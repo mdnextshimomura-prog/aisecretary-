@@ -1,0 +1,24 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Task {
+  id          String    @id @default(cuid())
+  title       String
+  category    String    // 売買/賃貸/管理/買取再販/その他
+  urgency     String    // 今日中/今週中/来週以降
+  dueDate     DateTime?
+  assignee    String?
+  status      String    @default("未着手") // 未着手/進行中/完了
+  rawMessage  String
+  notionId    String?
+  calendarId  String?
+  lineUserId  String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
