@@ -1,10 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
 import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage } from "@/lib/line";
 import { parseTaskFromMessage } from "@/lib/claude";
 import { createNotionTask } from "@/lib/notion";
-
-const prisma = new PrismaClient();
 
 interface LineWebhookEvent {
   type: string;
@@ -42,26 +39,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 2. Notion に登録
       const notionId = await createNotionTask(parsed, text);
 
-      // 3. DB に保存（失敗しても続行）
-      try {
-        await prisma.task.create({
-          data: {
-            title: parsed.title,
-            category: parsed.category,
-            urgency: parsed.urgency,
-            dueDate: parsed.dueDate ? new Date(parsed.dueDate) : null,
-            assignee: parsed.assignee,
-            rawMessage: text,
-            notionId,
-            calendarId: null,
-            lineUserId: userId,
-          },
-        });
-      } catch (dbErr) {
-        console.error("DB保存エラー（続行）:", dbErr);
-      }
-
-      // 4. LINE に返信
+      // 3. LINE に返信
       const reply = buildTaskRegisteredMessage(parsed);
       await sendLineMessage(replyToken, reply);
     } catch (err) {
