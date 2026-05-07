@@ -11,7 +11,7 @@ export async function createNotionTask(
   const response = await notion.pages.create({
     parent: { database_id: DATABASE_ID },
     properties: {
-      タイトル: {
+      名前: {
         title: [{ text: { content: task.title } }],
       },
       種別: {
@@ -83,7 +83,7 @@ export async function getUpcomingTasks(): Promise<
     const p = page as Record<string, unknown>;
     const props = (p.properties as Record<string, unknown>) ?? {};
 
-    const titleProp = props["タイトル"] as
+    const titleProp = props["名前"] as
       | { title: Array<{ plain_text: string }> }
       | undefined;
     const dueProp = props["期日"] as { date: { start: string } } | undefined;
