@@ -43,8 +43,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 2. Notion に登録
       const notionId = await createNotionTask(parsed, text);
 
-      // 3. Google Calendar に登録（期日があれば）
-      const calendarEventId = await createCalendarEvent(parsed, text);
+      // 3. Google Calendar に登録（期日があれば・設定済みの場合のみ）
+      let calendarEventId: string | null = null;
+      if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_ID !== "your_google_client_id") {
+        calendarEventId = await createCalendarEvent(parsed, text);
+      }
 
       // 4. DB に保存
       await prisma.task.create({
