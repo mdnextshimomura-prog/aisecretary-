@@ -32,7 +32,7 @@ export async function sendDailyReminders(): Promise<void> {
     byUser.set(task.lineUserId, list);
   }
 
-  for (const [userId, userTasks] of byUser) {
+  for (const [userId, userTasks] of Array.from(byUser)) {
     const todayTasks = userTasks.filter(
       (t) => t.dueDate && t.dueDate < tomorrow
     );
