@@ -3,15 +3,51 @@ import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage } from
 import { parseTaskFromMessage } from "@/lib/claude";
 import { createNotionTask } from "@/lib/notion";
 
+interface LineMentionee {
+  index: number;
+  length: number;
+  userId?: string;
+  type: "user" | "all";
+}
+
+interface LineMessage {
+  type: string;
+  text: string;
+  mention?: {
+    mentionees: LineMentionee[];
+  };
+}
+
 interface LineWebhookEvent {
   type: string;
   replyToken?: string;
   source: { userId: string; type: string };
-  message?: { type: string; text: string };
+  message?: LineMessage;
 }
 
 interface LineWebhookBody {
   events: LineWebhookEvent[];
+}
+
+const BOT_USER_ID = process.env.LINE_BOT_USER_ID!;
+
+// ボットがメンションされているか確認
+function isBotMentioned(message: LineMessage): boolean {
+  if (!message.mention) return false;
+  return message.mention.mentionees.some((m) => m.userId === BOT_USER_ID);
+}
+
+// メンション部分をテキストから除去して純粋なタスク内容だけ取り出す
+function stripMentions(message: LineMessage): string {
+  if (!message.mention) return message.text;
+  const mentionees = [...message.mention.mentionees].sort(
+    (a, b) => b.index - a.index
+  );
+  let text = message.text;
+  for (const m of mentionees) {
+    text = text.slice(0, m.index) + text.slice(m.index + m.length);
+  }
+  return text.trim();
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -27,8 +63,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   for (const event of body.events) {
     if (event.type !== "message" || event.message?.type !== "text") continue;
 
-    const text = event.message.text;
-    const userId = event.source.userId;
+    // ボットへのメンションがない場合はスキップ
+    if (!isBotMentioned(event.message)) continue;
+
+    const text = stripMentions(event.message);
     const replyToken = event.replyToken!;
     const today = new Date().toISOString().split("T")[0];
 
