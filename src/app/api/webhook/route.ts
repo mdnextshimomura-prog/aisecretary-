@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage, getGroupMemberName } from "@/lib/line";
+import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage } from "@/lib/line";
 import { parseTaskFromMessage } from "@/lib/claude";
 import { createNotionTask } from "@/lib/notion";
 
@@ -74,14 +74,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 1. Claude でタスク解析
       const parsed = await parseTaskFromMessage(text, today);
 
-      // ボット以外のメンション → 担当者に上書き
-      const groupId = event.source.groupId;
-      if (groupId && event.message.mention) {
+      // ボット以外のメンション → メッセージテキストから直接名前を取り出して担当者に上書き
+      if (event.message.mention) {
         const others = event.message.mention.mentionees.filter(
-          (m) => m.userId && m.userId !== BOT_USER_ID
+          (m) => m.type === "user" && m.userId !== BOT_USER_ID
         );
-        if (others.length > 0 && others[0].userId) {
-          const name = await getGroupMemberName(groupId, others[0].userId);
+        if (others.length > 0) {
+          const m = others[0];
+          const raw = event.message.text.slice(m.index, m.index + m.length);
+          const name = raw.startsWith("@") ? raw.slice(1) : raw;
           if (name) parsed.assignee = name;
         }
       }
