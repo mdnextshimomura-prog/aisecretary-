@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage } from "@/lib/line";
+import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage, getGroupMemberName } from "@/lib/line";
 import { parseTaskFromMessage } from "@/lib/claude";
 import { createNotionTask } from "@/lib/notion";
 
@@ -21,7 +21,7 @@ interface LineMessage {
 interface LineWebhookEvent {
   type: string;
   replyToken?: string;
-  source: { userId: string; type: string };
+  source: { userId: string; type: string; groupId?: string };
   message?: LineMessage;
 }
 
@@ -73,6 +73,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     try {
       // 1. Claude でタスク解析
       const parsed = await parseTaskFromMessage(text, today);
+
+      // ボット以外のメンション → 担当者に上書き
+      const groupId = event.source.groupId;
+      if (groupId && event.message.mention) {
+        const others = event.message.mention.mentionees.filter(
+          (m) => m.userId && m.userId !== BOT_USER_ID
+        );
+        if (others.length > 0 && others[0].userId) {
+          const name = await getGroupMemberName(groupId, others[0].userId);
+          if (name) parsed.assignee = name;
+        }
+      }
 
       // 2. Notion に登録
       const notionId = await createNotionTask(parsed, text);

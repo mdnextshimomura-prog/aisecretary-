@@ -34,6 +34,20 @@ export async function sendLineMessage(
   });
 }
 
+// グループメンバーの表示名を取得
+export async function getGroupMemberName(
+  groupId: string,
+  userId: string
+): Promise<string | null> {
+  const res = await fetch(
+    `https://api.line.me/v2/bot/group/${groupId}/member/${userId}`,
+    { headers: { Authorization: `Bearer ${ACCESS_TOKEN}` } }
+  );
+  if (!res.ok) return null;
+  const data = await res.json();
+  return (data.displayName as string) ?? null;
+}
+
 // Push通知（replyTokenなし）
 export async function pushLineMessage(
   to: string,

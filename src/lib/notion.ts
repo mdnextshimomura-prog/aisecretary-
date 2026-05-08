@@ -27,7 +27,7 @@ export async function createNotionTask(
       }),
       ...(task.assignee && {
         担当者: {
-          rich_text: [{ text: { content: task.assignee } }],
+          select: { name: task.assignee },
         },
       }),
       ステータス: {
