@@ -66,6 +66,35 @@ export async function pushLineMessage(
   });
 }
 
+// LINEメンション付きPush送信。
+// mentionees の index/length は text 内の「@名前」部分の位置（JSの文字列インデックス＝
+// LINE仕様のUTF-16コード単位と一致）。userId を指定するとその人に通知が飛ぶ。
+export async function pushLineMessageWithMentions(
+  to: string,
+  text: string,
+  mentionees: Array<{ index: number; length: number; userId: string }>
+): Promise<void> {
+  const message: Record<string, unknown> = { type: "text", text };
+  if (mentionees.length > 0) {
+    message.mention = {
+      mentionees: mentionees.map((m) => ({
+        index: m.index,
+        length: m.length,
+        type: "user",
+        userId: m.userId,
+      })),
+    };
+  }
+  await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${ACCESS_TOKEN}`,
+    },
+    body: JSON.stringify({ to, messages: [message] }),
+  });
+}
+
 // タスク登録完了メッセージ生成
 export function buildTaskRegisteredMessage(task: ParsedTask): string {
   const dueLine = task.dueDate

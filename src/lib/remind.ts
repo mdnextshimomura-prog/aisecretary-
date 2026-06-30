@@ -1,61 +1,56 @@
-import { PrismaClient } from "@prisma/client";
-import { pushLineMessage } from "./line";
+import { getUpcomingTasks, jstDateStr } from "./notion";
+import { pushLineMessageWithMentions } from "./line";
 
-const prisma = new PrismaClient();
+// リマインドの送信先＝会社グループ。反響通知と同じグループに送る。
+const LINE_GROUP_ID =
+  process.env.LINE_GROUP_ID ?? "Cd5fda3261e9bdd012e598884b2e6a696";
+
+// LINEの1メッセージあたりメンション上限（20）に対する安全策
+const MAX_MENTIONS = 20;
+
+type UpcomingTask = Awaited<ReturnType<typeof getUpcomingTasks>>[number];
 
 export async function sendDailyReminders(): Promise<void> {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-
-  const dayAfterTomorrow = new Date(today);
-  dayAfterTomorrow.setDate(dayAfterTomorrow.getDate() + 2);
-
-  // 今日・明日が期日のタスクを取得
-  const tasks = await prisma.task.findMany({
-    where: {
-      dueDate: { gte: today, lt: dayAfterTomorrow },
-      status: { not: "完了" },
-    },
-    orderBy: { dueDate: "asc" },
-  });
-
+  // 期日が今日・明日（JST基準）で未完了のタスクをNotionから取得
+  const tasks = await getUpcomingTasks();
   if (tasks.length === 0) return;
 
-  // ユーザーごとにグループ化してPush送信
-  const byUser = new Map<string, typeof tasks>();
-  for (const task of tasks) {
-    const list = byUser.get(task.lineUserId) ?? [];
-    list.push(task);
-    byUser.set(task.lineUserId, list);
+  const todayStr = jstDateStr(0);
+  const todayTasks = tasks.filter((t) => t.dueDate === todayStr);
+  const tomorrowTasks = tasks.filter((t) => t.dueDate !== todayStr);
+
+  let text = "🔔 本日のリマインドです\n";
+  const mentionees: Array<{ index: number; length: number; userId: string }> =
+    [];
+
+  // タスク1件を本文に追記し、担当者がメンション可能ならメンション情報を積む
+  const appendTask = (t: UpcomingTask) => {
+    text += `\n・${t.title}（${t.urgency}）`;
+    if (t.assigneeUserId && t.assignee && mentionees.length < MAX_MENTIONS) {
+      text += " ";
+      const at = text.length; // 「@」が入る位置
+      const mention = `@${t.assignee}`;
+      text += mention;
+      mentionees.push({
+        index: at,
+        length: mention.length,
+        userId: t.assigneeUserId,
+      });
+    } else if (t.assignee) {
+      // userId未取得（メンションで指定されていない）の担当者は名前だけ表示
+      text += `（担当：${t.assignee}）`;
+    }
+  };
+
+  if (todayTasks.length > 0) {
+    text += "\n【本日期限】";
+    for (const t of todayTasks) appendTask(t);
   }
 
-  for (const [userId, userTasks] of Array.from(byUser)) {
-    const todayTasks = userTasks.filter(
-      (t) => t.dueDate && t.dueDate < tomorrow
-    );
-    const tomorrowTasks = userTasks.filter(
-      (t) => t.dueDate && t.dueDate >= tomorrow
-    );
-
-    const lines: string[] = ["🔔 本日のリマインドです\n"];
-
-    if (todayTasks.length > 0) {
-      lines.push("【本日期限】");
-      for (const t of todayTasks) {
-        lines.push(`・${t.title}（${t.urgency}）`);
-      }
-    }
-
-    if (tomorrowTasks.length > 0) {
-      lines.push("\n【明日期限】");
-      for (const t of tomorrowTasks) {
-        lines.push(`・${t.title}（${t.urgency}）`);
-      }
-    }
-
-    await pushLineMessage(userId, lines.join("\n"));
+  if (tomorrowTasks.length > 0) {
+    text += "\n\n【明日期限】";
+    for (const t of tomorrowTasks) appendTask(t);
   }
+
+  await pushLineMessageWithMentions(LINE_GROUP_ID, text, mentionees);
 }

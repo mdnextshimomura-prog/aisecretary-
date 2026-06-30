@@ -87,6 +87,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const raw = event.message.text.slice(m.index, m.index + m.length);
         const name = raw.startsWith("@") ? raw.slice(1) : raw;
         if (name) parsed.assignee = name;
+        // リマインド時にLINEメンション（@通知）するため userId も保存する
+        if (m.userId) parsed.assigneeUserId = m.userId;
       }
     }
 

@@ -30,6 +30,11 @@ export async function createNotionTask(
           select: { name: task.assignee },
         },
       }),
+      ...(task.assigneeUserId && {
+        担当者ID: {
+          rich_text: [{ text: { content: task.assigneeUserId } }],
+        },
+      }),
       ステータス: {
         select: { name: "未着手" },
       },
@@ -42,6 +47,15 @@ export async function createNotionTask(
   return response.id;
 }
 
+// JST（日本時間）基準の日付文字列 "YYYY-MM-DD" を返す。
+// Vercel CronはUTCで動く（朝8時JST = 前日23時UTC）ため、UTCのままだと
+// 日付が1日ずれてリマインド対象を取りこぼす。必ずJSTに直してから比較する。
+export function jstDateStr(offsetDays = 0): string {
+  const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  jst.setUTCDate(jst.getUTCDate() + offsetDays);
+  return jst.toISOString().split("T")[0];
+}
+
 export async function getUpcomingTasks(): Promise<
   Array<{
     id: string;
@@ -49,15 +63,12 @@ export async function getUpcomingTasks(): Promise<
     dueDate: string;
     urgency: string;
     assignee: string | null;
+    assigneeUserId: string | null;
     url: string;
   }>
 > {
-  const today = new Date();
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-
-  const todayStr = today.toISOString().split("T")[0];
-  const tomorrowStr = tomorrow.toISOString().split("T")[0];
+  const todayStr = jstDateStr(0);
+  const tomorrowStr = jstDateStr(1);
 
   const response = await notion.databases.query({
     database_id: DATABASE_ID,
@@ -90,7 +101,11 @@ export async function getUpcomingTasks(): Promise<
     const urgencyProp = props["緊急度"] as
       | { select: { name: string } }
       | undefined;
+    // 担当者は select 型（旧コードは rich_text で読んでいて常にnullになっていた）
     const assigneeProp = props["担当者"] as
+      | { select: { name: string } | null }
+      | undefined;
+    const assigneeIdProp = props["担当者ID"] as
       | { rich_text: Array<{ plain_text: string }> }
       | undefined;
 
@@ -99,7 +114,8 @@ export async function getUpcomingTasks(): Promise<
       title: titleProp?.title[0]?.plain_text ?? "（無題）",
       dueDate: dueProp?.date?.start ?? "",
       urgency: urgencyProp?.select?.name ?? "",
-      assignee: assigneeProp?.rich_text[0]?.plain_text ?? null,
+      assignee: assigneeProp?.select?.name ?? null,
+      assigneeUserId: assigneeIdProp?.rich_text[0]?.plain_text ?? null,
       url: (p.url as string) ?? "",
     };
   });

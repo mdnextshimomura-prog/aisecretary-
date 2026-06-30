@@ -11,6 +11,10 @@ export interface ParsedTask {
   urgency: "今日中" | "今週中" | "来週以降";
   dueDate: string | null; // ISO 8601 date string or null
   assignee: string | null;
+  // LINEメンションで担当者を指定された場合の、その人のLINE userId。
+  // Claudeの出力には含まれず、Webhook受信時にメンション情報から補完する。
+  // リマインド時にこのIDでLINEメンション（@通知）するために保存する。
+  assigneeUserId?: string | null;
   memo: string | null;
 }
 
