@@ -28,12 +28,20 @@ export default function Home() {
         />
       </div>
 
-      <Link
-        href="/dashboard"
-        className="bg-green-500 hover:bg-green-600 text-white px-8 py-3 rounded-lg font-semibold text-lg transition-colors"
-      >
-        管理画面を開く →
-      </Link>
+      <div className="flex flex-col sm:flex-row gap-3">
+        <Link
+          href="/dashboard"
+          className="bg-green-500 hover:bg-green-600 text-white px-8 py-3 rounded-lg font-semibold text-lg transition-colors text-center"
+        >
+          管理画面を開く →
+        </Link>
+        <Link
+          href="/restoration"
+          className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-lg font-semibold text-lg transition-colors text-center"
+        >
+          🏠 原状回復判定ツール →
+        </Link>
+      </div>
 
       <div className="text-sm text-gray-400 text-center max-w-md">
         <p>Webhook URL: <code className="bg-gray-100 px-2 py-1 rounded">/api/webhook</code></p>

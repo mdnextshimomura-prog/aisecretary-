@@ -2,7 +2,24 @@
   "permissions": {
     "allow": [
       "Skill(claude-api)",
-      "Skill(claude-api:*)"
+      "Skill(claude-api:*)",
+      "Bash(npm run *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3000/restoration)",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "Bash(open \"http://localhost:3000/restoration\")",
+      "Bash(vercel whoami *)",
+      "Bash(vercel ls *)",
+      "Bash(vercel env *)",
+      "Bash(mkdir -p /Users/shimo/restoration-checker)",
+      "Read(//Users/shimo/**)",
+      "Bash(npx create-next-app@14 . --typescript --tailwind --eslint --app --no-src-dir --import-alias \"@/*\" --yes)",
+      "Bash(npm install *)",
+      "Bash(vercel --prod --yes)",
+      "Bash(echo \"EXIT: $?\")"
     ]
   }
 }
