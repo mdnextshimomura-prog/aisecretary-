@@ -22,7 +22,13 @@ export async function createNotionTask(
       },
       ...(task.dueDate && {
         期日: {
-          date: { start: task.dueDate },
+          date: {
+            // 時刻の明示があれば日時で保存（期限前通知の基準になる）。
+            // 無ければ日付のみ（通知側でデフォルト18:00とみなす）。
+            start: task.dueTime
+              ? `${task.dueDate}T${task.dueTime}:00+09:00`
+              : task.dueDate,
+          },
         },
       }),
       ...(task.assignee && {
@@ -54,6 +60,67 @@ export function jstDateStr(offsetDays = 0): string {
   const jst = new Date(Date.now() + 9 * 60 * 60 * 1000);
   jst.setUTCDate(jst.getUTCDate() + offsetDays);
   return jst.toISOString().split("T")[0];
+}
+
+// 期限前通知の対象タスク: 期日が今日（JST）で、未完了・未通知のもの。
+// 通知するかどうかの時刻判定は呼び出し側（/api/remind-due）で行う。
+export async function getDueSoonTasks(): Promise<
+  Array<{
+    id: string;
+    title: string;
+    dueStart: string; // Notionの期日そのまま（"YYYY-MM-DD" or ISO日時）
+    createdTime: string;
+    assignee: string | null;
+    assigneeUserId: string | null;
+  }>
+> {
+  const todayStr = jstDateStr(0);
+  const response = await notion.databases.query({
+    database_id: DATABASE_ID,
+    filter: {
+      and: [
+        { property: "期日", date: { on_or_after: todayStr } },
+        { property: "期日", date: { before: jstDateStr(1) } },
+        { property: "ステータス", select: { does_not_equal: "完了" } },
+        { property: "通知済み", checkbox: { equals: false } },
+      ],
+    },
+  });
+
+  return response.results.map((page) => {
+    const p = page as unknown as {
+      id: string;
+      created_time: string;
+      properties: Record<string, unknown>;
+    };
+    const props = p.properties;
+    const titleProp = props["名前"] as
+      | { title: Array<{ plain_text: string }> }
+      | undefined;
+    const dueProp = props["期日"] as { date: { start: string } } | undefined;
+    const assigneeProp = props["担当者"] as
+      | { select: { name: string } | null }
+      | undefined;
+    const assigneeIdProp = props["担当者ID"] as
+      | { rich_text: Array<{ plain_text: string }> }
+      | undefined;
+    return {
+      id: p.id,
+      title: titleProp?.title[0]?.plain_text ?? "（無題）",
+      dueStart: dueProp?.date?.start ?? "",
+      createdTime: p.created_time,
+      assignee: assigneeProp?.select?.name ?? null,
+      assigneeUserId: assigneeIdProp?.rich_text[0]?.plain_text ?? null,
+    };
+  });
+}
+
+// 期限前通知を送ったタスクに印を付ける（二重通知防止）
+export async function markNotified(pageId: string): Promise<void> {
+  await notion.pages.update({
+    page_id: pageId,
+    properties: { 通知済み: { checkbox: true } },
+  });
 }
 
 export async function getUpcomingTasks(): Promise<
