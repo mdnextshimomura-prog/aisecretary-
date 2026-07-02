@@ -3,10 +3,6 @@
     {
       "path": "/api/remind",
       "schedule": "0 23 * * *"
-    },
-    {
-      "path": "/api/remind-due",
-      "schedule": "*/10 * * * *"
     }
   ]
 }
