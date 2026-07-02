@@ -61,7 +61,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const text = stripMentions(event.message);
     if (!text) continue;
     const replyToken = event.replyToken!;
-    const today = new Date().toISOString().split("T")[0];
+    // JST（日本時間）の日時を渡す。UTCのままだと朝9時まで前日扱いになる上、
+    // 午前/午後で期日を変えるルールの判定に受信時刻が必要。
+    const today = new Date(Date.now() + 9 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 16)
+      .replace("T", " ");
 
     // 1. Claude でタスク判定＋解析。解析自体が失敗した発言は雑談扱いで黙ってスキップ。
     let parsed;
