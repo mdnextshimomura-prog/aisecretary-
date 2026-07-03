@@ -6,7 +6,27 @@ import {
   setTaskMessageIds,
   findTaskByMessageId,
   updateTaskAssignee,
+  archiveTask,
 } from "@/lib/notion";
+
+// 「これはタスクじゃない／取り消したい」意図の判定（引用リプライ時のみ使用）
+const CANCEL_PHRASES = [
+  "タスクではない",
+  "タスクじゃない",
+  "タスクではありません",
+  "タスクじゃなかった",
+  "キャンセル",
+  "取り消",
+  "取消",
+  "削除",
+  "消して",
+  "いらない",
+  "不要",
+];
+function isCancelIntent(text: string): boolean {
+  const t = text.replace(/\s/g, "");
+  return CANCEL_PHRASES.some((p) => t.includes(p));
+}
 
 interface LineMentionee {
   index: number;
@@ -66,29 +86,45 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const replyToken = event.replyToken!;
 
-    // 引用リプライ＋@メンション → 既存タスクへの担当者の後付け・変更として扱う。
+    // 引用リプライ → 既存タスクへの操作（取り消し／担当者の後付け・変更）として扱う。
     // 元の依頼メッセージ or Botの「✅タスク登録しました」への引用のどちらでも特定できる。
     const userMentions =
       event.message.mention?.mentionees.filter(
         (m) => m.type === "user" && m.userId !== BOT_USER_ID
       ) ?? [];
-    if (event.message.quotedMessageId && userMentions.length > 0) {
+    if (event.message.quotedMessageId) {
       const task = await findTaskByMessageId(event.message.quotedMessageId);
       if (task) {
-        const m = userMentions[0];
-        const raw = event.message.text.slice(m.index, m.index + m.length);
-        const name = raw.startsWith("@") ? raw.slice(1) : raw;
-        if (name) {
+        // (a) 「タスクじゃない／取り消し」→ タスクを削除
+        if (isCancelIntent(stripMentions(event.message))) {
           try {
-            await updateTaskAssignee(task.id, name, m.userId ?? null);
+            await archiveTask(task.id);
             await sendLineMessage(
               replyToken,
-              `👤 担当者を ${name} さんに設定しました\n📋 ${task.title}`
+              `🗑 タスクを取り消しました\n📋 ${task.title}`
             );
           } catch (err) {
-            console.error("担当者更新エラー:", err);
+            console.error("タスク取り消しエラー:", err);
           }
-          continue; // 担当者設定のリプライは新規タスクとして解析しない
+          continue;
+        }
+        // (b) @メンション → 担当者の設定・変更
+        if (userMentions.length > 0) {
+          const m = userMentions[0];
+          const raw = event.message.text.slice(m.index, m.index + m.length);
+          const name = raw.startsWith("@") ? raw.slice(1) : raw;
+          if (name) {
+            try {
+              await updateTaskAssignee(task.id, name, m.userId ?? null);
+              await sendLineMessage(
+                replyToken,
+                `👤 担当者を ${name} さんに設定しました\n📋 ${task.title}`
+              );
+            } catch (err) {
+              console.error("担当者更新エラー:", err);
+            }
+            continue; // 担当者設定のリプライは新規タスクとして解析しない
+          }
         }
       }
     }

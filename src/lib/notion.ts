@@ -165,6 +165,11 @@ export async function findTaskByMessageId(
   };
 }
 
+// タスクを取り消す（Notionページをアーカイブ＝一覧から消す）
+export async function archiveTask(pageId: string): Promise<void> {
+  await notion.pages.update({ page_id: pageId, archived: true });
+}
+
 // タスクの担当者を後から設定・変更する（リプライでのメンション用）
 export async function updateTaskAssignee(
   pageId: string,
