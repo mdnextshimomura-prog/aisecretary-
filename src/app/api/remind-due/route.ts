@@ -28,6 +28,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const tasks = await getDueSoonTasks();
   const now = Date.now();
   let sent = 0;
+  // 起動役（GAS）から叩かれているか可視化するための目印
+  console.log(`[remind-due] invoked / 対象候補 ${tasks.length}件`);
 
   for (const t of tasks) {
     if (!t.dueStart) continue;
