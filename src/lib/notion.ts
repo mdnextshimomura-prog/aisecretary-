@@ -123,6 +123,65 @@ export async function markNotified(pageId: string): Promise<void> {
   });
 }
 
+// タスクに紐づくLINEメッセージID群を保存する。
+// 元の依頼メッセージとBotの確認返信の両方を保存し、どちらへの
+// 引用リプライでもタスクを特定できるようにする（カンマ区切り）。
+export async function setTaskMessageIds(
+  pageId: string,
+  messageIds: string[]
+): Promise<void> {
+  await notion.pages.update({
+    page_id: pageId,
+    properties: {
+      メッセージID: {
+        rich_text: [{ text: { content: messageIds.filter(Boolean).join(",") } }],
+      },
+    },
+  });
+}
+
+// 引用リプライ先のメッセージIDからタスクを探す
+export async function findTaskByMessageId(
+  messageId: string
+): Promise<{ id: string; title: string } | null> {
+  const response = await notion.databases.query({
+    database_id: DATABASE_ID,
+    filter: {
+      property: "メッセージID",
+      rich_text: { contains: messageId },
+    },
+    page_size: 1,
+  });
+  const page = response.results[0];
+  if (!page) return null;
+  const props = (page as unknown as { properties: Record<string, unknown> })
+    .properties;
+  const titleProp = props["名前"] as
+    | { title: Array<{ plain_text: string }> }
+    | undefined;
+  return {
+    id: page.id,
+    title: titleProp?.title[0]?.plain_text ?? "（無題）",
+  };
+}
+
+// タスクの担当者を後から設定・変更する（リプライでのメンション用）
+export async function updateTaskAssignee(
+  pageId: string,
+  name: string,
+  userId: string | null
+): Promise<void> {
+  await notion.pages.update({
+    page_id: pageId,
+    properties: {
+      担当者: { select: { name } },
+      担当者ID: {
+        rich_text: userId ? [{ text: { content: userId } }] : [],
+      },
+    },
+  });
+}
+
 export async function getUpcomingTasks(): Promise<
   Array<{
     id: string;

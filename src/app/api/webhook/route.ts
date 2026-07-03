@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage } from "@/lib/line";
 import { parseTaskFromMessage, TASK_CONFIDENCE_THRESHOLD } from "@/lib/claude";
-import { createNotionTask } from "@/lib/notion";
+import {
+  createNotionTask,
+  setTaskMessageIds,
+  findTaskByMessageId,
+  updateTaskAssignee,
+} from "@/lib/notion";
 
 interface LineMentionee {
   index: number;
@@ -11,8 +16,10 @@ interface LineMentionee {
 }
 
 interface LineMessage {
+  id: string;
   type: string;
   text: string;
+  quotedMessageId?: string; // 引用リプライのとき、引用元メッセージのID
   mention?: {
     mentionees: LineMentionee[];
   };
@@ -57,10 +64,38 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   for (const event of body.events) {
     if (event.type !== "message" || event.message?.type !== "text") continue;
 
+    const replyToken = event.replyToken!;
+
+    // 引用リプライ＋@メンション → 既存タスクへの担当者の後付け・変更として扱う。
+    // 元の依頼メッセージ or Botの「✅タスク登録しました」への引用のどちらでも特定できる。
+    const userMentions =
+      event.message.mention?.mentionees.filter(
+        (m) => m.type === "user" && m.userId !== BOT_USER_ID
+      ) ?? [];
+    if (event.message.quotedMessageId && userMentions.length > 0) {
+      const task = await findTaskByMessageId(event.message.quotedMessageId);
+      if (task) {
+        const m = userMentions[0];
+        const raw = event.message.text.slice(m.index, m.index + m.length);
+        const name = raw.startsWith("@") ? raw.slice(1) : raw;
+        if (name) {
+          try {
+            await updateTaskAssignee(task.id, name, m.userId ?? null);
+            await sendLineMessage(
+              replyToken,
+              `👤 担当者を ${name} さんに設定しました\n📋 ${task.title}`
+            );
+          } catch (err) {
+            console.error("担当者更新エラー:", err);
+          }
+          continue; // 担当者設定のリプライは新規タスクとして解析しない
+        }
+      }
+    }
+
     // メンションは必須ではない。全発言をClaudeに渡し、タスクかどうかを判定させる。
     const text = stripMentions(event.message);
     if (!text) continue;
-    const replyToken = event.replyToken!;
     // JST（日本時間）の日時を渡す。UTCのままだと朝9時まで前日扱いになる上、
     // 午前/午後で期日を変えるルールの判定に受信時刻が必要。
     const today = new Date(Date.now() + 9 * 60 * 60 * 1000)
@@ -99,11 +134,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     try {
       // 2. Notion に登録
-      await createNotionTask(parsed, text);
+      const pageId = await createNotionTask(parsed, text);
 
       // 3. LINE に「登録しました」と返信
       const reply = buildTaskRegisteredMessage(parsed);
-      await sendLineMessage(replyToken, reply);
+      const botMsgId = await sendLineMessage(replyToken, reply);
+
+      // 4. 元メッセージとBot返信のIDを保存（後からの引用リプライで
+      //    「どのタスクへの担当者指定か」を特定できるようにする）
+      await setTaskMessageIds(
+        pageId,
+        [event.message.id, botMsgId ?? ""].filter(Boolean)
+      );
     } catch (err) {
       console.error("タスク登録エラー:", err);
       await sendLineMessage(

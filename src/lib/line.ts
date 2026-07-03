@@ -16,12 +16,12 @@ export function verifyLineSignature(
   return hash === signature;
 }
 
-// LINEメッセージ送信
+// LINEメッセージ送信。送ったメッセージのID（引用リプライの照合に使う）を返す。
 export async function sendLineMessage(
   replyToken: string,
   text: string
-): Promise<void> {
-  await fetch("https://api.line.me/v2/bot/message/reply", {
+): Promise<string | null> {
+  const res = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -32,6 +32,11 @@ export async function sendLineMessage(
       messages: [{ type: "text", text }],
     }),
   });
+  if (!res.ok) return null;
+  const data = (await res.json()) as {
+    sentMessages?: Array<{ id: string }>;
+  };
+  return data.sentMessages?.[0]?.id ?? null;
 }
 
 // グループメンバーの表示名を取得
