@@ -1,5 +1,5 @@
 import { getUpcomingTasks, jstDateStr } from "./notion";
-import { pushLineMessageWithMentions } from "./line";
+import { pushLineMessageWithMentions, sanitizeForTextV2 } from "./line";
 
 // リマインドの送信先＝会社グループ。反響通知と同じグループに送る。
 const LINE_GROUP_ID =
@@ -20,22 +20,17 @@ export async function sendDailyReminders(): Promise<void> {
   const tomorrowTasks = tasks.filter((t) => t.dueDate !== todayStr);
 
   let text = "🔔 本日のリマインドです\n";
-  const mentionees: Array<{ index: number; length: number; userId: string }> =
-    [];
+  const mentions: Record<string, string> = {}; // {key} -> userId
+  let mentionCount = 0;
 
-  // タスク1件を本文に追記し、担当者がメンション可能ならメンション情報を積む
+  // タスク1件を本文に追記し、担当者がメンション可能ならtextV2の置換キーを埋め込む
   const appendTask = (t: UpcomingTask) => {
-    text += `\n・${t.title}（${t.urgency}）`;
-    if (t.assigneeUserId && t.assignee && mentionees.length < MAX_MENTIONS) {
-      text += " ";
-      const at = text.length; // 「@」が入る位置
-      const mention = `@${t.assignee}`;
-      text += mention;
-      mentionees.push({
-        index: at,
-        length: mention.length,
-        userId: t.assigneeUserId,
-      });
+    text += `\n・${sanitizeForTextV2(t.title)}（${t.urgency}）`;
+    if (t.assigneeUserId && t.assignee && mentionCount < MAX_MENTIONS) {
+      mentionCount += 1;
+      const key = `m${mentionCount}`;
+      text += ` {${key}}`;
+      mentions[key] = t.assigneeUserId;
     } else if (t.assignee) {
       // userId未取得（メンションで指定されていない）の担当者は名前だけ表示
       text += `（担当：${t.assignee}）`;
@@ -52,5 +47,5 @@ export async function sendDailyReminders(): Promise<void> {
     for (const t of tomorrowTasks) appendTask(t);
   }
 
-  await pushLineMessageWithMentions(LINE_GROUP_ID, text, mentionees);
+  await pushLineMessageWithMentions(LINE_GROUP_ID, text, mentions);
 }

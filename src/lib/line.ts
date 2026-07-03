@@ -66,26 +66,34 @@ export async function pushLineMessage(
   });
 }
 
-// LINEメンション付きPush送信。
-// mentionees の index/length は text 内の「@名前」部分の位置（JSの文字列インデックス＝
-// LINE仕様のUTF-16コード単位と一致）。userId を指定するとその人に通知が飛ぶ。
+// LINEメンション付きPush送信（textV2形式）。
+// 通常の text メッセージに mention を付けても送信時は無視される（受信専用の仕様）ため、
+// 本物のメンション（相手に通知が飛び、青くハイライトされる）には textV2 の
+// substitution 置換を使う。text 中の {key} が substitution のメンションに置換される。
+// 注意: userId がそのグループのメンバーでないとメンションにならない。
 export async function pushLineMessageWithMentions(
   to: string,
   text: string,
-  mentionees: Array<{ index: number; length: number; userId: string }>
+  mentions: Record<string, string> // key（textの{key}） -> LINE userId
 ): Promise<void> {
-  const message: Record<string, unknown> = { type: "text", text };
-  if (mentionees.length > 0) {
-    message.mention = {
-      mentionees: mentionees.map((m) => ({
-        index: m.index,
-        length: m.length,
-        type: "user",
-        userId: m.userId,
-      })),
-    };
-  }
-  await fetch("https://api.line.me/v2/bot/message/push", {
+  const keys = Object.keys(mentions);
+  const message: Record<string, unknown> =
+    keys.length === 0
+      ? { type: "text", text }
+      : {
+          type: "textV2",
+          text,
+          substitution: Object.fromEntries(
+            keys.map((k) => [
+              k,
+              {
+                type: "mention",
+                mentionee: { type: "user", userId: mentions[k] },
+              },
+            ])
+          ),
+        };
+  const res = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -93,6 +101,14 @@ export async function pushLineMessageWithMentions(
     },
     body: JSON.stringify({ to, messages: [message] }),
   });
+  if (!res.ok) {
+    console.error("LINE push失敗:", res.status, await res.text());
+  }
+}
+
+// textV2では { } が置換記法として解釈されるため、本文に含めない
+export function sanitizeForTextV2(s: string): string {
+  return s.replace(/\{/g, "（").replace(/\}/g, "）");
 }
 
 // タスク登録完了メッセージ生成

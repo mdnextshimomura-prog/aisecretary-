@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDueSoonTasks, markNotified } from "@/lib/notion";
-import { pushLineMessageWithMentions } from "@/lib/line";
+import { pushLineMessageWithMentions, sanitizeForTextV2 } from "@/lib/line";
 
 // 期限前通知（Vercel Cronから10分おきに呼ばれる）
 // - 期日当日に登録されたタスク（短期のもの）: 期限の1時間前に通知
@@ -49,26 +49,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       .toISOString()
       .slice(11, 16); // "HH:mm" (JST)
 
-    let text = `⏰ まもなく期限です（本日${dueLabel}まで）\n・${t.title}`;
-    const mentionees: Array<{ index: number; length: number; userId: string }> =
-      [];
+    let text = `⏰ まもなく期限です（本日${dueLabel}まで）\n・${sanitizeForTextV2(t.title)}`;
+    const mentions: Record<string, string> = {};
     if (t.assignee) {
       text += "\n担当: ";
       if (t.assigneeUserId) {
-        const at = text.length;
-        const mention = `@${t.assignee}`;
-        text += mention;
-        mentionees.push({
-          index: at,
-          length: mention.length,
-          userId: t.assigneeUserId,
-        });
+        text += "{m1}";
+        mentions.m1 = t.assigneeUserId;
       } else {
         text += `${t.assignee}さん`;
       }
     }
 
-    await pushLineMessageWithMentions(LINE_GROUP_ID, text, mentionees);
+    await pushLineMessageWithMentions(LINE_GROUP_ID, text, mentions);
     await markNotified(t.id); // 送信後に印を付けて二重通知を防ぐ
     sent += 1;
   }
