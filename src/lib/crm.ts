@@ -28,12 +28,16 @@ export function isNewCustomerCommand(text: string): boolean {
 
 interface ParsedCustomer {
   name: string;
+  kana: string;
   phone: string;
   property: string;
   referrer: string;
 }
 
-/** 「#新規 氏名/電話/物件/紹介者」をパース。区切りは半角/全角スラッシュ。 */
+/**
+ * 「#新規 氏名/フリガナ/電話/物件/紹介者」をパース。区切りは半角/全角スラッシュ。
+ * 後方互換: 2番目が電話番号のときは旧形式「氏名/電話/物件/紹介者」（フリガナ省略）とみなす。
+ */
 export function parseNewCustomer(
   text: string
 ): ParsedCustomer | { error: string } {
@@ -41,10 +45,24 @@ export function parseNewCustomer(
   if (!rest) return { error: "氏名と電話番号が入力されていません" };
   const parts = rest.split(/[/／]/).map((p) => p.trim());
   const name = parts[0] || "";
-  const phone = parts[1] || "";
   if (!name) return { error: "氏名が入力されていません" };
+
+  // 2番目が電話番号として成立するなら旧形式（フリガナなし）と判定
+  const secondIsPhone = /^0\d{9,10}$/.test(normalizePhone(parts[1] || ""));
+  let kana: string, phone: string, property: string, referrer: string;
+  if (secondIsPhone) {
+    kana = "";
+    phone = parts[1] || "";
+    property = parts[2] || "";
+    referrer = parts[3] || "";
+  } else {
+    kana = parts[1] || "";
+    phone = parts[2] || "";
+    property = parts[3] || "";
+    referrer = parts[4] || "";
+  }
   if (!phone) return { error: "電話番号が入力されていません（名寄せに必須です）" };
-  return { name, phone, property: parts[2] || "", referrer: parts[3] || "" };
+  return { name, kana, phone, property, referrer };
 }
 
 /**
@@ -60,6 +78,19 @@ export function normalizePhone(s: string): string {
   let digits = str.replace(/[^0-9]/g, "");
   if (digits.startsWith("81")) digits = "0" + digits.slice(2);
   return digits;
+}
+
+/**
+ * フリガナ正規化。normalize.py の normalize_kana に準拠。
+ * NFKCで半角カナ→全角カナ（濁点結合込み）、ひらがな→カタカナ、空白除去。
+ */
+export function normalizeKana(s: string): string {
+  if (!s) return "";
+  let t = s.normalize("NFKC");
+  t = t.replace(/[ぁ-ゖ]/g, (ch) =>
+    String.fromCharCode(ch.charCodeAt(0) + 0x60)
+  );
+  return t.replace(/[\s　]/g, "");
 }
 
 function titleOf(page: unknown): string {
@@ -109,9 +140,8 @@ async function createActivity(
 function usage(reason: string): string {
   return (
     `登録できませんでした: ${reason}\n\n` +
-    "送信フォーマット:\n#新規 氏名/電話/物件/紹介者\n" +
-    "例: #新規 山田太郎/090-1234-5678/世田谷区◯◯戸建/佐藤様\n" +
-    "（物件・紹介者は省略可。区切りは「/」）"
+    "送信フォーマット:\n#新規 氏名/フリガナ/電話番号/物件/紹介者\n" +
+    "（フリガナ・物件・紹介者は省略可。氏名と電話番号は必須。区切りは「/」）"
   );
 }
 
@@ -159,6 +189,11 @@ export async function handleNewCustomer(text: string): Promise<string> {
     parent: { database_id: ACCOUNTS_DB },
     properties: {
       氏名: { title: [{ text: { content: parsed.name } }] },
+      ...(parsed.kana && {
+        氏名カナ: {
+          rich_text: [{ text: { content: normalizeKana(parsed.kana) } }],
+        },
+      }),
       区分: { select: { name: "個人" } },
       電話番号: { phone_number: parsed.phone },
       電話番号_正規化: { rich_text: [{ text: { content: phoneNorm } }] },
