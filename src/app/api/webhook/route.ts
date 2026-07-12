@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage } from "@/lib/line";
 import { parseTaskFromMessage, TASK_CONFIDENCE_THRESHOLD } from "@/lib/claude";
+import { isNewCustomerCommand, handleNewCustomer } from "@/lib/crm";
 import {
   createNotionTask,
   setTaskMessageIds,
@@ -132,6 +133,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // メンションは必須ではない。全発言をClaudeに渡し、タスクかどうかを判定させる。
     const text = stripMentions(event.message);
     if (!text) continue;
+
+    // #新規 で始まるメッセージは CRM顧客登録として処理（タスク分類には流さない）
+    if (isNewCustomerCommand(text)) {
+      try {
+        await sendLineMessage(replyToken, await handleNewCustomer(text));
+      } catch (err) {
+        console.error("CRM顧客登録エラー:", err);
+        await sendLineMessage(
+          replyToken,
+          "⚠️ 顧客登録中にエラーが発生しました。もう一度お試しください。"
+        );
+      }
+      continue;
+    }
     // JST（日本時間）の日時を渡す。UTCのままだと朝9時まで前日扱いになる上、
     // 午前/午後で期日を変えるルールの判定に受信時刻が必要。
     const today = new Date(Date.now() + 9 * 60 * 60 * 1000)
