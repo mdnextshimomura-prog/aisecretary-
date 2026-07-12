@@ -98,14 +98,36 @@ function parseRole(s: string): string {
   return "";
 }
 
-/** 対応内容から案件のフェーズを推定。 */
-function dealPhaseFromNote(note: string): string {
-  if (/査定|見積/.test(note)) return "内覧・査定";
-  if (/媒介/.test(note)) return "媒介・申込";
+/** 役割から取引の立場（購入/売却）を導く。 */
+function stanceFromRole(role: string): string {
+  if (role === "売主") return "売却";
+  if (role === "買主") return "購入";
+  return "";
+}
+
+/** 対応内容＋立場から案件のフェーズを推定（14フェーズ）。 */
+function dealPhaseFromNote(note: string, stance: string): string {
   if (/契約/.test(note)) return "契約";
-  if (/決済|引渡/.test(note)) return "決済";
-  if (/内覧|案内/.test(note)) return "内覧・査定";
-  if (/申込|買付/.test(note)) return "媒介・申込";
+  if (/決済|引渡/.test(note)) return "決済・引渡";
+  if (stance === "売却") {
+    if (/査定|見積/.test(note)) return "【売】査定";
+    if (/媒介/.test(note)) return "【売】媒介契約";
+    if (/販売|広告|掲載|レインズ/.test(note)) return "【売】販売活動";
+    if (/内覧|案内|受付|買付|申込/.test(note)) return "【売】内覧・買付受付";
+    return "反響";
+  }
+  if (stance === "購入") {
+    if (/紹介|提案/.test(note)) return "【買】物件紹介";
+    if (/内覧|案内/.test(note)) return "【買】内覧";
+    if (/買付|申込/.test(note)) return "【買】買付申込";
+    if (/ローン|融資|審査/.test(note)) return "【買】ローン審査";
+    return "反響";
+  }
+  // 立場不明: 内容から推定
+  if (/査定|見積/.test(note)) return "【売】査定";
+  if (/媒介/.test(note)) return "【売】媒介契約";
+  if (/内覧|案内/.test(note)) return "【買】内覧";
+  if (/買付|申込/.test(note)) return "【買】買付申込";
   return "反響";
 }
 
@@ -245,6 +267,7 @@ async function createDeal(
     (p.assigneeName ? `／担当: ${p.assigneeName}` : "") +
     (p.referrer ? `／紹介: ${p.referrer}` : "") +
     "。案件ソース(会社案件/自己開拓)と主担当は要手動設定。";
+  const stance = stanceFromRole(p.role);
   await crm.pages.create({
     parent: { database_id: DEALS_DB },
     properties: {
@@ -252,7 +275,8 @@ async function createDeal(
       顧客: { relation: [{ id: customerId }] },
       案件種別: { select: { name: "売買仲介" } },
       取引区分: { select: { name: "仲介" } },
-      フェーズ: { select: { name: dealPhaseFromNote(p.dealNote) } },
+      フェーズ: { select: { name: dealPhaseFromNote(p.dealNote, stance) } },
+      ...(stance && { 取引の立場: { select: { name: stance } } }),
       備考: { rich_text: [{ text: { content: remark } }] },
     },
   });
