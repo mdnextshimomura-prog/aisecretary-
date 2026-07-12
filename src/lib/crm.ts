@@ -29,9 +29,12 @@ const DEALS_DB = process.env.CRM_DEALS_DB_ID!;
 const SITUATION_RE =
   /^(不明|未確認|なし|未取得|確認中|後で|あとで|メール|ﾒｰﾙ|e-?mail|mail|LINE|ライン|らいん|line|SMS|連絡不可|連絡取れ|音信不通|経由|紹介者経由|業者経由)/i;
 
-/** 「#新規／＃新規／♯新規」で始まるか。route.ts の分岐判定に使う。 */
+/**
+ * メッセージ内に「#新規／＃新規／♯新規」の行が含まれるか。route.ts の分岐判定に使う。
+ * 先頭でなくてもよい（前に別の文があってもOK。行頭の #新規 を拾う）。
+ */
 export function isNewCustomerCommand(text: string): boolean {
-  return /^[#＃♯]\s*新規/.test(text.trim());
+  return /(^|\n)[ 　\t]*[#＃♯][ 　\t]*新規/.test(text);
 }
 
 interface ParsedCustomer {
@@ -144,7 +147,9 @@ function isRealDeal(note: string): boolean {
 export function parseNewCustomer(
   text: string
 ): ParsedCustomer | { error: string } {
-  const rest = text.trim().replace(/^[#＃♯]\s*新規/, "").trim();
+  // メッセージ内の「#新規 …」の行だけを取り出す（前後に別の文があってもよい）。
+  const m = text.match(/[#＃♯][ 　\t]*新規[ 　\t]*(.*)/);
+  const rest = (m ? m[1] : "").trim();
   if (!rest) return { error: "氏名と連絡先が入力されていません" };
   const parts = rest.split(/[/／]/).map((p) => p.trim());
   const name = parts[0] || "";
