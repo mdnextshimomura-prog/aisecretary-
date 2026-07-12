@@ -1,19 +1,21 @@
 /**
- * crm.ts — LINE「#新規」紹介登録 → CRM_顧客 自動起票
+ * crm.ts — LINE「#新規」紹介登録 → CRM_顧客(＋案件) 自動起票
  * ============================================================================
  * MDNEXT秘書に追加された「紹介客のCRM登録」機能。
  * webhook/route.ts が #新規 で始まるメッセージを検知してここに委譲する。
  * 既存のタスク秘書機能とは独立（この分岐に入らないメッセージは無影響）。
  *
- * 送信フォーマット: #新規 氏名/フリガナ/連絡先/物件/紹介者
- *   - フリガナ・物件・紹介者は省略可。氏名と連絡先は必須。
- *   - 連絡先は「電話番号」「メールアドレス」または状況語（不明/メール/LINE/紹介者経由 等）。
- *   - 2番目が連絡先に見えるときはフリガナ省略（氏名/連絡先/…）として解釈。
+ * 送信フォーマット（#新規 から始まる1行・区切りは「/」）:
+ *   #新規 氏名/フリガナ/連絡先/売主買主/対応内容/物件/担当者/紹介者
+ *   - 必須: 氏名・連絡先。他は不明なら空でOK（中間を飛ばすときも「/」は残す）。
+ *   - 連絡先: 電話番号 or メール or 状況語（不明/メール/LINE/紹介者経由 等）。
+ *   - 売主買主: 「売主」「買主」等 → CRM_顧客の役割へ。既存客に再送すると役割を追加。
+ *   - 対応内容: 査定依頼/媒介予定 等 → 記入があれば CRM_案件 を自動作成。
+ *   - 担当者: people欄はAPIで名前設定できないため備考に記録（Notion側で手動設定）。
+ *   - 氏名/連絡先 だけの2項目（#新規 氏名/電話）でも登録可（クイック）。
  *
  * 必要な環境変数（.env.local と Vercel の両方）:
- *   CRM_NOTION_TOKEN / CRM_ACCOUNTS_DB_ID / CRM_ACTIVITIES_DB_ID
- *
- * 正規化ルールの正は normalize.py（Customer relationship managementリポジトリ）。
+ *   CRM_NOTION_TOKEN / CRM_ACCOUNTS_DB_ID / CRM_ACTIVITIES_DB_ID / CRM_DEALS_DB_ID
  * ============================================================================
  */
 import { Client } from "@notionhq/client";
@@ -21,6 +23,7 @@ import { Client } from "@notionhq/client";
 const crm = new Client({ auth: process.env.CRM_NOTION_TOKEN });
 const ACCOUNTS_DB = process.env.CRM_ACCOUNTS_DB_ID!;
 const ACTIVITIES_DB = process.env.CRM_ACTIVITIES_DB_ID!;
+const DEALS_DB = process.env.CRM_DEALS_DB_ID!;
 
 /** 連絡先が電話でない場合の「状況語」。これらは電話番号なしで登録を通す。 */
 const SITUATION_RE =
@@ -34,10 +37,13 @@ export function isNewCustomerCommand(text: string): boolean {
 interface ParsedCustomer {
   name: string;
   kana: string;
-  phone: string; // 妥当な電話番号のみ。無ければ ""
-  email: string; // メールアドレス。無ければ ""
-  contactNote: string; // 電話・メール以外の状況語（不明/メール/LINE 等）
+  phone: string;
+  email: string;
+  contactNote: string;
+  role: string; // 売主/買主/紹介元/地主/投資家 or ""
+  dealNote: string; // 対応内容（案件化する内容）
   property: string;
+  assigneeName: string; // 担当者名（テキスト。people欄は手動設定）
   referrer: string;
 }
 
@@ -67,13 +73,6 @@ function isValidPhone(s: string): boolean {
   return /^0\d{9,10}$/.test(normalizePhone(s));
 }
 
-/** その文字列が「連絡先（電話/メール/状況語）」として成立するか。フリガナ有無の判定に使う。 */
-function looksLikeContact(s: string): boolean {
-  const t = (s || "").trim();
-  if (!t) return false;
-  return isValidPhone(t) || t.includes("@") || SITUATION_RE.test(t);
-}
-
 /** 連絡先欄を 電話 / メール / 状況語 に振り分ける。 */
 function classifyContact(s: string): {
   phone: string;
@@ -87,9 +86,38 @@ function classifyContact(s: string): {
   return { phone: "", email: "", note: t };
 }
 
+/** 「売主」「買主」等を役割の選択肢名に正規化。該当なしは ""（未設定）。 */
+function parseRole(s: string): string {
+  const t = (s || "").trim();
+  if (!t) return "";
+  if (/売/.test(t)) return "売主";
+  if (/買/.test(t)) return "買主";
+  if (/紹介/.test(t)) return "紹介元";
+  if (/地主/.test(t)) return "地主";
+  if (/投資/.test(t)) return "投資家";
+  return "";
+}
+
+/** 対応内容から案件のフェーズを推定。 */
+function dealPhaseFromNote(note: string): string {
+  if (/査定|見積/.test(note)) return "内覧・査定";
+  if (/媒介/.test(note)) return "媒介・申込";
+  if (/契約/.test(note)) return "契約";
+  if (/決済|引渡/.test(note)) return "決済";
+  if (/内覧|案内/.test(note)) return "内覧・査定";
+  if (/申込|買付/.test(note)) return "媒介・申込";
+  return "反響";
+}
+
+/** 対応内容が実質的な案件か（不明/なし等は案件化しない）。 */
+function isRealDeal(note: string): boolean {
+  const t = (note || "").trim();
+  return !!t && !/^(不明|なし|未定|未確認|-|ー)$/.test(t);
+}
+
 /**
- * 「#新規 氏名/フリガナ/連絡先/物件/紹介者」をパース。
- * 2番目が連絡先に見えるときはフリガナ省略「氏名/連絡先/…」と解釈（後方互換）。
+ * 「#新規 氏名/フリガナ/連絡先/売主買主/対応内容/物件/担当者/紹介者」をパース。
+ * 2項目だけ（氏名/連絡先）のクイック入力にも対応。
  */
 export function parseNewCustomer(
   text: string
@@ -100,17 +128,24 @@ export function parseNewCustomer(
   const name = parts[0] || "";
   if (!name) return { error: "氏名が入力されていません" };
 
-  let kana: string, contactRaw: string, property: string, referrer: string;
-  if (looksLikeContact(parts[1] || "")) {
-    kana = "";
+  let kana = "",
+    contactRaw = "",
+    role = "",
+    dealNote = "",
+    property = "",
+    assigneeName = "",
+    referrer = "";
+  if (parts.length <= 2) {
+    // クイック: 氏名/連絡先
     contactRaw = parts[1] || "";
-    property = parts[2] || "";
-    referrer = parts[3] || "";
   } else {
     kana = parts[1] || "";
     contactRaw = parts[2] || "";
-    property = parts[3] || "";
-    referrer = parts[4] || "";
+    role = parts[3] || "";
+    dealNote = parts[4] || "";
+    property = parts[5] || "";
+    assigneeName = parts[6] || "";
+    referrer = parts[7] || "";
   }
 
   const { phone, email, note } = classifyContact(contactRaw);
@@ -121,7 +156,18 @@ export function parseNewCustomer(
         "分からなければ「メール」「LINE」「不明」等の状況を入れてください",
     };
   }
-  return { name, kana, phone, email, contactNote: note, property, referrer };
+  return {
+    name,
+    kana,
+    phone,
+    email,
+    contactNote: note,
+    role: parseRole(role),
+    dealNote,
+    property,
+    assigneeName,
+    referrer,
+  };
 }
 
 function titleOf(page: unknown): string {
@@ -140,6 +186,15 @@ function titleOf(page: unknown): string {
     }
   }
   return "";
+}
+
+function rolesOf(page: unknown): string[] {
+  const p = (
+    page as {
+      properties?: Record<string, { multi_select?: Array<{ name: string }> }>;
+    }
+  ).properties?.["役割"];
+  return (p?.multi_select ?? []).map((o) => o.name);
 }
 
 async function findAccountByPhone(phoneNorm: string) {
@@ -177,47 +232,91 @@ async function createActivity(
   });
 }
 
+/** 対応内容から CRM_案件 を作成し、案件名を返す。 */
+async function createDeal(
+  customerId: string,
+  p: ParsedCustomer
+): Promise<string> {
+  const dealName = `${p.dealNote}｜${p.name}${
+    p.property ? "｜" + p.property : ""
+  }`.slice(0, 100);
+  const remark =
+    `LINE #新規 から自動作成。対応内容: ${p.dealNote}` +
+    (p.assigneeName ? `／担当: ${p.assigneeName}` : "") +
+    (p.referrer ? `／紹介: ${p.referrer}` : "") +
+    "。案件ソース(会社案件/自己開拓)と主担当は要手動設定。";
+  await crm.pages.create({
+    parent: { database_id: DEALS_DB },
+    properties: {
+      案件名: { title: [{ text: { content: dealName } }] },
+      顧客: { relation: [{ id: customerId }] },
+      案件種別: { select: { name: "売買仲介" } },
+      取引区分: { select: { name: "仲介" } },
+      フェーズ: { select: { name: dealPhaseFromNote(p.dealNote) } },
+      備考: { rich_text: [{ text: { content: remark } }] },
+    },
+  });
+  return dealName;
+}
+
 function usage(reason: string): string {
   return (
     `登録できませんでした: ${reason}\n\n` +
     "送信フォーマット（#新規 から始まる1行で）:\n" +
-    "#新規 氏名/フリガナ/連絡先/物件/紹介者\n\n" +
-    "・連絡先＝電話番号 or メール。分からなければ「メール」「LINE」「不明」等でもOK\n" +
-    "・フリガナ・物件・紹介者は省略可。区切りは「/」"
+    "#新規 氏名/フリガナ/連絡先/売主買主/対応内容/物件/担当者/紹介者\n\n" +
+    "・必須は氏名と連絡先。他は不明なら空でOK（中間を飛ばすときも「/」は残す）\n" +
+    "・連絡先＝電話番号 or メール。分からなければ「メール」「LINE」「不明」等でもOK"
   );
 }
 
 /**
  * 「#新規」メッセージを処理し、LINEに返す文言を返す。
- * 電話 or メールで名寄せ（状況語のみの場合は名寄せせず新規）。
+ * 電話/メールで名寄せ。既存客なら役割追加＋履歴、新規なら顧客(＋案件)を作成。
  */
 export async function handleNewCustomer(text: string): Promise<string> {
   const parsed = parseNewCustomer(text);
   if ("error" in parsed) return usage(parsed.error);
 
-  // 名寄せ: 電話 or メール で既存客を照合
-  let existing: { id: string; properties?: unknown } | null = null;
   const phoneNorm = parsed.phone ? normalizePhone(parsed.phone) : "";
   const emailNorm = parsed.email ? parsed.email.trim().toLowerCase() : "";
+  let existing: { id: string; properties?: unknown } | null = null;
   if (phoneNorm) existing = await findAccountByPhone(phoneNorm);
   else if (emailNorm) existing = await findAccountByEmail(emailNorm);
 
   if (existing) {
     const name = titleOf(existing) || parsed.name;
+    // 役割の追加更新（多対応: 売主かつ買主もあり得るので既存に足す）
+    let roleMsg = "";
+    if (parsed.role) {
+      const roles = rolesOf(existing);
+      if (!roles.includes(parsed.role)) {
+        await crm.pages.update({
+          page_id: existing.id,
+          properties: {
+            役割: {
+              multi_select: [...roles, parsed.role].map((n) => ({ name: n })),
+            },
+          },
+        });
+        roleMsg = `\n役割に「${parsed.role}」を追加しました。`;
+      }
+    }
     await createActivity(
       "LINE経由の重複登録試行",
       existing.id,
-      `既存顧客にヒットしたため新規作成せず履歴のみ追記。\n受信原文: ${text}`
+      `既存顧客にヒット。新規作成せず履歴のみ追記。\n受信原文: ${text}`
     );
-    return `既存顧客「${name}」に一致したため、新規登録せず履歴に追記しました。`;
+    return `既存顧客「${name}」に一致しました。新規登録せず履歴に追記。${roleMsg}`;
   }
 
   // 新規起票
   const remark = ["LINE #新規 経由で自動起票。"];
   if (parsed.contactNote)
     remark.push(
-      `連絡状況: ${parsed.contactNote}（電話番号は未取得。連絡先が分かったらNotionに追記してください）`
+      `連絡状況: ${parsed.contactNote}（電話番号は未取得。分かったら追記してください）`
     );
+  if (parsed.assigneeName)
+    remark.push(`担当: ${parsed.assigneeName}（担当者のpeople欄は手動設定してください）`);
   if (parsed.referrer)
     remark.push(
       `紹介者: ${parsed.referrer}（「紹介者」リレーションは手動設定してください）`
@@ -237,6 +336,8 @@ export async function handleNewCustomer(text: string): Promise<string> {
     properties["氏名カナ"] = {
       rich_text: [{ text: { content: normalizeKana(parsed.kana) } }],
     };
+  if (parsed.role)
+    properties["役割"] = { multi_select: [{ name: parsed.role }] };
   if (parsed.phone) {
     properties["電話番号"] = { phone_number: parsed.phone };
     properties["電話番号_正規化"] = {
@@ -261,19 +362,33 @@ export async function handleNewCustomer(text: string): Promise<string> {
     `LINEの #新規 フォーマットから自動起票。\n受信原文: ${text}`
   );
 
+  // 対応内容があれば案件を作成
+  let dealMsg = "";
+  if (isRealDeal(parsed.dealNote)) {
+    try {
+      const dealName = await createDeal(page.id, parsed);
+      dealMsg = `\n📁 案件「${dealName}」も作成しました（案件ソース・主担当は要設定）。`;
+    } catch (err) {
+      console.error("案件作成エラー:", err);
+      dealMsg = `\n⚠️ 顧客は登録できましたが、案件の作成に失敗しました。手動で作成してください。`;
+    }
+  }
+
   const contactLabel = parsed.phone
     ? `電話 ${parsed.phone}`
     : parsed.email
     ? `メール ${parsed.email}`
-    : `連絡状況「${parsed.contactNote}」で登録（電話番号は未取得）`;
-
-  const referrerLine = parsed.referrer
-    ? `\n紹介者「${parsed.referrer}」は備考に記録済み。Notionの「紹介者」リレーション設定をお願いします。`
-    : "";
-  const contactReminder =
-    !parsed.phone && !parsed.email
-      ? "\n※連絡先が分かったらNotionに追記してください。"
+    : `連絡状況「${parsed.contactNote}」（電話番号は未取得）`;
+  const roleLabel = parsed.role ? `／${parsed.role}` : "";
+  const reminders = [
+    !parsed.phone && !parsed.email ? "連絡先" : "",
+    parsed.assigneeName ? "担当者" : "",
+    parsed.referrer ? "紹介者リレーション" : "",
+  ].filter(Boolean);
+  const reminderLine =
+    reminders.length > 0
+      ? `\n※Notionで設定が必要: ${reminders.join("・")}`
       : "";
 
-  return `✅ 新規顧客「${parsed.name}」を登録しました（${contactLabel}）。${referrerLine}${contactReminder}`;
+  return `✅ 新規顧客「${parsed.name}」を登録しました（${contactLabel}${roleLabel}）。${dealMsg}${reminderLine}`;
 }
