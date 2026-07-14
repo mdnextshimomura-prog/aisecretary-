@@ -58,7 +58,13 @@ export function normalizePhone(s: string): string {
   );
   str = str.replace(/＋/g, "+");
   let digits = str.replace(/[^0-9]/g, "");
-  if (digits.startsWith("81")) digits = "0" + digits.slice(2);
+  // 国番号 +81/81 始まり → 0 始まりの国内表記へ。
+  // Python版（normalize.py）と同一: 10桁未満は国番号とみなさない・
+  // 「+81(0)90…」のように既に0が続く場合は0を二重に付けない。
+  if (digits.startsWith("81") && digits.length >= 10) {
+    const rest = digits.slice(2);
+    digits = rest.startsWith("0") ? rest : "0" + rest;
+  }
   return digits;
 }
 
