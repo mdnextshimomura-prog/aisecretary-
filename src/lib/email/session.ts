@@ -278,3 +278,56 @@ export async function deletePendingMedia(
   }
   mediaMemStore.delete(key);
 }
+
+// ── 曖昧な発言の「対応フロー選択待ち」を一時保持する ──
+const CLAR_PREFIX = "clarify";
+const clarMemStore = new Map<string, { value: string; expireAt: number }>();
+
+function clarKey(groupId: string | undefined, userId: string): string {
+  return `${CLAR_PREFIX}:${groupId ?? "direct"}:${userId}`;
+}
+
+export async function savePendingClarification(
+  groupId: string | undefined,
+  userId: string,
+  originalText: string
+): Promise<void> {
+  const key = clarKey(groupId, userId);
+  if (kvEnabled()) {
+    await kv.set(key, originalText, { ex: TTL_SECONDS });
+    return;
+  }
+  clarMemStore.set(key, {
+    value: originalText,
+    expireAt: Date.now() + TTL_SECONDS * 1000,
+  });
+}
+
+export async function getPendingClarification(
+  groupId: string | undefined,
+  userId: string
+): Promise<string | null> {
+  const key = clarKey(groupId, userId);
+  if (kvEnabled()) {
+    return (await kv.get<string>(key)) ?? null;
+  }
+  const hit = clarMemStore.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expireAt) {
+    clarMemStore.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+export async function deletePendingClarification(
+  groupId: string | undefined,
+  userId: string
+): Promise<void> {
+  const key = clarKey(groupId, userId);
+  if (kvEnabled()) {
+    await kv.del(key);
+    return;
+  }
+  clarMemStore.delete(key);
+}
