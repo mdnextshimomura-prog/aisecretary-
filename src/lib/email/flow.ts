@@ -6,7 +6,7 @@ import {
   type EmailRequest,
 } from "./draft";
 import { sendGmail } from "./send";
-import { resolveSender, getSenderByLabel } from "./accounts";
+import { resolveSender, getSenderByLabel, resolveSignature } from "./accounts";
 import { fetchLineImage, readBusinessCard } from "./card";
 import {
   saveDraftSession,
@@ -122,11 +122,14 @@ export async function startEmailFlow(
     .map((r) => r.email)
     .filter((e): e is string => Boolean(e));
 
-  // 差出人を決める（「自分から」「社長名義で」等。無指定なら既定＝会社）
+  // 送信元アドレス（アカウント）を決める。無指定なら既定＝会社。
   const sender = resolveSender(req.from);
-  const senderName = sender?.name ?? "MDNEXT";
-  // 署名は差出人アカウントのもの。未設定なら最低限「表示名」を署名にする。
-  const signature = (sender?.signature ?? "").trim() || senderName;
+  // 署名（名義）を決める。明示指定(as)があればそれ、無ければ送信元アカウントの署名。
+  // 例:「会社から社長名義で」→ アドレスは会社、署名は社長。
+  const persona = resolveSignature(req.as || req.from);
+  const senderName = persona?.name ?? sender?.name ?? "MDNEXT";
+  const signature =
+    (persona?.signature ?? sender?.signature ?? "").trim() || senderName;
 
   const draft = await generateEmailDraft(req, senderName);
 
@@ -231,6 +234,7 @@ export async function handleConfirmReply(
     purpose: session.purpose,
     tone: session.tone,
     from: session.senderLabel,
+    as: "", // 修正時は署名を変えない（session.signatureを維持）
   };
   try {
     const draft = await generateEmailDraft(req, session.senderName, text, {

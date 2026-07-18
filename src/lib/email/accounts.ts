@@ -108,3 +108,58 @@ export function getSenderByLabel(label: string): SenderAccount | null {
 export function listSenderLabels(): string[] {
   return loadSenderAccounts().map((a) => a.label);
 }
+
+// ── 署名（名義）ペルソナ ──
+// 送信アドレスとは別に「誰の署名で締めるか」を選べるようにする。
+// 送信アカウントを持たない人（例: 会社アドレスから送る社長）は GMAIL_SIGNATURES に登録。
+//   GMAIL_SIGNATURES='{"社長":{"name":"前田誠司","signature":"MD NEXT株式会社\n代表取締役 前田誠司\n..."}}'
+export interface SignaturePersona {
+  name: string; // 差出人表示名（From表示にも使う）
+  signature: string; // 署名ブロック
+}
+
+function loadSignatures(): Record<string, SignaturePersona> {
+  const out: Record<string, SignaturePersona> = {};
+  const raw = process.env.GMAIL_SIGNATURES;
+  if (raw) {
+    try {
+      const obj = JSON.parse(raw) as Record<
+        string,
+        { name?: string; signature?: string }
+      >;
+      for (const [label, v] of Object.entries(obj)) {
+        if (v?.signature) {
+          out[label] = { name: v.name || label, signature: v.signature };
+        }
+      }
+    } catch (err) {
+      console.error("GMAIL_SIGNATURES のJSON解析に失敗:", err);
+    }
+  }
+  return out;
+}
+
+// 署名ヒント（「社長名義で」「下村の署名で」等）から署名ペルソナを決める。
+// 1) 署名専用ペルソナ（GMAIL_SIGNATURES） 2) 送信アカウントの署名 の順に探す。
+export function resolveSignature(hint?: string): SignaturePersona | null {
+  const h = (hint ?? "").trim().toLowerCase();
+  if (!h) return null;
+
+  const sigs = loadSignatures();
+  for (const [label, v] of Object.entries(sigs)) {
+    const lab = label.toLowerCase();
+    if (lab.includes(h) || h.includes(lab) || v.name.toLowerCase().includes(h)) {
+      return v;
+    }
+  }
+
+  // 送信アカウント側の署名を流用（例: 下村アカウントの署名で会社アドレスから送る）
+  const accounts = loadSenderAccounts();
+  const a = accounts.find((x) => {
+    const lab = x.label.toLowerCase();
+    return lab.includes(h) || h.includes(lab) || x.name.toLowerCase().includes(h);
+  });
+  if (a && a.signature) return { name: a.name, signature: a.signature };
+
+  return null;
+}
