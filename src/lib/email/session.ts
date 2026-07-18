@@ -185,14 +185,15 @@ export async function getPendingAttachments(
   return hit.value;
 }
 
-// 追加（既存リストに追記）。複数ファイルをまとめて添付できる。
+// 追加（既存リストに追記。同じメッセージIDは重複させない）。
+// 複数ファイルをまとめて添付できる。
 export async function addPendingAttachment(
   groupId: string | undefined,
   userId: string,
   att: PendingAttachment
 ): Promise<number> {
   const cur = await getPendingAttachments(groupId, userId);
-  const next = [...cur, att];
+  const next = [...cur.filter((a) => a.messageId !== att.messageId), att];
   const key = attKey(groupId, userId);
   if (kvEnabled()) {
     await kv.set(key, next, { ex: TTL_SECONDS });
