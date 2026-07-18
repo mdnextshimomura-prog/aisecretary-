@@ -12,8 +12,8 @@ import { classifyIntent, EMAIL_INTENT_THRESHOLD } from "@/lib/intent";
 import {
   startEmailFlow,
   handleConfirmReply,
-  handleBusinessCard,
-  handleFileAttachment,
+  handleIncomingImage,
+  handleIncomingFile,
   getDraftSession,
 } from "@/lib/email/flow";
 import {
@@ -107,21 +107,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       groupId: event.source.groupId,
     };
 
-    // 画像（名刺など）→ 連絡先を読み取り「宛先候補」として保存する。
-    // 続く「この人にメール送って」等で宛先として使われる。
+    // 画像 → 黙って「直近メディア」として控えるだけ（返信しない）。
+    // メールの指示（「この人に送って」等）が来たときに名刺として読み取る。
     if (event.message.type === "image") {
-      await handleBusinessCard(event.message.id, source, replyToken);
+      await handleIncomingImage(event.message.id, source);
       continue;
     }
 
-    // ファイル（PDF等）→ 「添付候補」として保存する。
-    // 続く「この資料を〇〇さんに送って」等でメールに添付される。
+    // ファイル（PDF等）→ 黙って「直近メディア＋添付候補」として控えるだけ（返信しない）。
+    // メールの指示が来たときに添付／名刺読み取りに使う。
     if (event.message.type === "file") {
-      await handleFileAttachment(
+      await handleIncomingFile(
         event.message.id,
         event.message.fileName ?? "file",
-        source,
-        replyToken
+        source
       );
       continue;
     }

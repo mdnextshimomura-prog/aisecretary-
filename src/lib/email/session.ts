@@ -216,3 +216,65 @@ export async function clearPendingAttachments(
   }
   attMemStore.delete(key);
 }
+
+// ── 直近に届いた画像/ファイルの参照（黙って控えるだけ。メール指示時に名刺として読む） ──
+export interface PendingMedia {
+  messageId: string;
+  fileName: string; // ファイル名（画像はダミー可）
+  kind: "image" | "file";
+}
+
+const MEDIA_PREFIX = "emailmedia";
+const mediaMemStore = new Map<
+  string,
+  { value: PendingMedia; expireAt: number }
+>();
+
+function mediaKey(groupId: string | undefined, userId: string): string {
+  return `${MEDIA_PREFIX}:${groupId ?? "direct"}:${userId}`;
+}
+
+export async function savePendingMedia(
+  groupId: string | undefined,
+  userId: string,
+  media: PendingMedia
+): Promise<void> {
+  const key = mediaKey(groupId, userId);
+  if (kvEnabled()) {
+    await kv.set(key, media, { ex: TTL_SECONDS });
+    return;
+  }
+  mediaMemStore.set(key, {
+    value: media,
+    expireAt: Date.now() + TTL_SECONDS * 1000,
+  });
+}
+
+export async function getPendingMedia(
+  groupId: string | undefined,
+  userId: string
+): Promise<PendingMedia | null> {
+  const key = mediaKey(groupId, userId);
+  if (kvEnabled()) {
+    return (await kv.get<PendingMedia>(key)) ?? null;
+  }
+  const hit = mediaMemStore.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expireAt) {
+    mediaMemStore.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+export async function deletePendingMedia(
+  groupId: string | undefined,
+  userId: string
+): Promise<void> {
+  const key = mediaKey(groupId, userId);
+  if (kvEnabled()) {
+    await kv.del(key);
+    return;
+  }
+  mediaMemStore.delete(key);
+}
