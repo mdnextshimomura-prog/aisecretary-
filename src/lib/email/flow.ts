@@ -17,9 +17,9 @@ import {
   saveDraftSession,
   getDraftSession,
   deleteDraftSession,
-  getPendingRecipient,
-  savePendingRecipient,
-  deletePendingRecipient,
+  savePendingMedia,
+  getPendingMedia,
+  deletePendingMedia,
   getPendingAttachments,
   addPendingAttachment,
   clearPendingAttachments,
@@ -32,6 +32,10 @@ export interface MessageSource {
 }
 
 const EMAIL_RE = /[^\s@]+@[^\s@]+\.[^\s@]+/;
+
+// 「添付して」の意図を表す語（これが指示に含まれるときだけ直近ファイルを添付する）
+const ATTACH_INTENT_RE =
+  /資料|ファイル|添付|同封|書類|pdf|付けて|つけて|一緒に送|も送って|これも|それも/i;
 
 const CANCEL_PHRASES = [
   "キャンセル",
@@ -174,14 +178,18 @@ export async function startEmailFlow(
   toName = toResolved.name;
   toEmail = toResolved.email;
 
-  // 宛先が解決できない（台帳に無い・宛先未指定）場合は、直前に読み取った
-  // 名刺などの「宛先候補」を使う（「この人に送って」等に対応）。
+  // 宛先が解決できない（台帳に無い・宛先未指定）場合のみ、直前に届いた画像/PDFを
+  // 名刺として読み取り、宛先に使う（「この人に送って」等に対応）。
+  // ※ここで初めてAI解析する（無関係な画像には反応しないための遅延読み取り）。
   if (!toEmail) {
-    const pending = await getPendingRecipient(source.groupId, source.userId);
-    if (pending?.email) {
-      toName = pending.name || pending.email;
-      toEmail = pending.email;
-      await deletePendingRecipient(source.groupId, source.userId);
+    const media = await getPendingMedia(source.groupId, source.userId);
+    if (media) {
+      const card = await readCardFromMedia(media.messageId);
+      if (card?.email) {
+        toName = card.name || card.company || card.email;
+        toEmail = card.email;
+      }
+      await deletePendingMedia(source.groupId, source.userId);
     }
   }
 
@@ -190,13 +198,16 @@ export async function startEmailFlow(
     .map((r) => r.email)
     .filter((e): e is string => Boolean(e));
 
-  // 直前にLINEで届いた添付ファイル（PDF等）があれば、このメールに付ける。
-  const attachments = await getPendingAttachments(
-    source.groupId,
-    source.userId
-  );
+  // 添付は「資料/ファイル/添付/PDF」等が指示に含まれるときだけ付ける（無関係な
+  // PDFを勝手に添付しない）。指示があれば直近の添付候補を使い、候補は消費する。
+  const wantsAttach = ATTACH_INTENT_RE.test(text);
+  let attachments = wantsAttach
+    ? await getPendingAttachments(source.groupId, source.userId)
+    : [];
   if (attachments.length) {
     await clearPendingAttachments(source.groupId, source.userId);
+  } else {
+    attachments = [];
   }
 
   // 送信元アドレス（アカウント）を決める。無指定なら既定＝会社。
@@ -365,110 +376,54 @@ export async function handleConfirmReply(
   }
 }
 
-// 名刺情報を「宛先候補」として保存する共通処理。読めた名刺（or null）を返す。
-async function tryReadAndSaveCard(
-  messageId: string,
-  source: MessageSource
-): Promise<CardContact | null> {
+// 画像/PDFの中身から名刺として連絡先を読み取る（保存はしない）。
+// メール指示が来て宛先が未解決のときだけ呼ぶ（無関係な画像を解析しないため）。
+async function readCardFromMedia(messageId: string): Promise<CardContact | null> {
   const content = await fetchLineContent(messageId);
   if (!content) return null;
-  let card;
   try {
-    card = await readContactFromContent(content.base64, content.contentType);
+    const card = await readContactFromContent(
+      content.base64,
+      content.contentType
+    );
+    if (!card.isBusinessCard) return null;
+    return card;
   } catch (err) {
     console.error("名刺読み取りエラー:", err);
     return null;
   }
-  if (!card.isBusinessCard || (!card.email && !card.name)) return null;
-
-  await savePendingRecipient(source.groupId, source.userId, {
-    name: card.name || card.company || "（氏名不明）",
-    email: card.email,
-    company: card.company,
-    phone: card.phone,
-    createdAt: Date.now(),
-  });
-  return card;
 }
 
-function cardSummaryLines(card: {
-  name: string;
-  title: string | null;
-  company: string | null;
-  tradeName: string | null;
-  email: string | null;
-  phone: string | null;
-}): string[] {
-  return [
-    card.name ? `氏名：${card.name}` : null,
-    card.title ? `役職：${card.title}` : null,
-    card.company ? `会社：${card.company}` : null,
-    card.tradeName ? `屋号：${card.tradeName}` : null,
-    card.email ? `メール：${card.email}` : "メール：（読み取れず）",
-    card.phone ? `電話：${card.phone}` : null,
-  ].filter((l): l is string => Boolean(l));
-}
-
-// 画像（名刺）を受け取り、連絡先を読み取って「宛先候補」として保存する。
-// この後の「この人にメール送って」等で、その連絡先が宛先に使われる。
-export async function handleBusinessCard(
+// 画像を受信 → 黙って「直近メディア」として控えるだけ（返信もAI解析もしない）。
+// メールの指示（「この人に送って」等）が来て初めて名刺として読む。
+export async function handleIncomingImage(
   messageId: string,
-  source: MessageSource,
-  replyToken: string
+  source: MessageSource
 ): Promise<void> {
-  const card = await tryReadAndSaveCard(messageId, source);
-  if (!card) {
-    // 連絡先が読み取れない画像は黙ってスキップ（雑談画像などを誤爆させない）
-    return;
-  }
-  const lines = [
-    "📇 名刺を読み取りました。",
-    ...cardSummaryLines(card),
-    "",
-    card.email
-      ? "▶ この方にメールするなら、続けて用件を送ってください（例:「この人に内見のお礼メール送って」）。"
-      : "▶ メールアドレスが読み取れませんでした。アドレスが写るように撮り直すか、宛先を文字で教えてください。",
-  ];
-  await sendLineMessage(replyToken, lines.join("\n"));
+  await savePendingMedia(source.groupId, source.userId, {
+    messageId,
+    fileName: "image",
+    kind: "image",
+  });
 }
 
-// LINEで届いたファイル（PDF等）を「添付候補」として一時保持する。
-// さらに、そのファイルが名刺なら連絡先も読み取って「宛先候補」にする
-// （PDF名刺で「この人に送って」に対応。用件で相手を指定すれば添付として扱われる）。
-export async function handleFileAttachment(
+// ファイル(PDF等)を受信 → 黙って「直近メディア」＋「添付候補」として控えるだけ。
+// 返信はしない。メールの指示が来たときに、添付や名刺読み取りに使う。
+export async function handleIncomingFile(
   messageId: string,
   fileName: string,
-  source: MessageSource,
-  replyToken: string
+  source: MessageSource
 ): Promise<void> {
   const name = fileName || "file";
-  const count = await addPendingAttachment(source.groupId, source.userId, {
+  await savePendingMedia(source.groupId, source.userId, {
+    messageId,
+    fileName: name,
+    kind: "file",
+  });
+  await addPendingAttachment(source.groupId, source.userId, {
     messageId,
     fileName: name,
   });
-
-  // PDF等が名刺なら宛先候補としても読み取る
-  const isPdf = /\.pdf$/i.test(name);
-  const card = isPdf ? await tryReadAndSaveCard(messageId, source) : null;
-
-  const lines = [
-    `📎 ファイル「${name}」を受け取りました（添付候補 ${count}件）。`,
-  ];
-  if (card && card.email) {
-    lines.push("", "📇 このファイルは名刺として連絡先も読み取りました。");
-    lines.push(...cardSummaryLines(card));
-    lines.push(
-      "",
-      "▶「この人に送って」→ この相手にメール（名刺の宛先）",
-      "▶「この資料を〇〇さんに送って」→ 〇〇さん宛にこのPDFを添付"
-    );
-  } else {
-    lines.push(
-      "▶ メールに添付するなら、続けて用件を送ってください（例:「この資料を田中さんに送って」）。"
-    );
-  }
-
-  await sendLineMessage(replyToken, lines.join("\n"));
 }
 
 // webhook から使う: 確認セッションの有無を返す
