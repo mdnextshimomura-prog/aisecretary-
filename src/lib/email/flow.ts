@@ -164,9 +164,19 @@ export async function handleConfirmReply(
       );
     } catch (err) {
       console.error("メール送信エラー:", err);
+      // 原因切り分け用に理由を短く添える（パスワード等の機密は含まれない）。
+      const e = err as { response?: string; message?: string; code?: string };
+      const reason = String(e?.response || e?.message || e?.code || "").slice(0, 180);
+      const authFailed =
+        /535|5\.7\.8|badcredentials|invalid login|username and password not accepted|eauth/i.test(
+          reason
+        );
+      const hint = authFailed
+        ? "\n※Gmailのアプリパスワードが、送信元アカウント（GMAIL_SENDER）本人のものと一致していない可能性が高いです。"
+        : "";
       await sendLineMessage(
         replyToken,
-        "⚠️ メールの送信に失敗しました。時間をおいて再度お試しください。"
+        `⚠️ メールの送信に失敗しました。${hint}\n詳細: ${reason}`
       );
     }
     return;
