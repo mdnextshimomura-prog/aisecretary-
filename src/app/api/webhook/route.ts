@@ -11,6 +11,7 @@ import {
 import {
   classifyIntent,
   looksLikeEmailCommand,
+  looksLikeSendWithMaterial,
   buildClarificationMenu,
   interpretClarification,
   EMAIL_INTENT_THRESHOLD,
@@ -25,6 +26,7 @@ import {
   handleConfirmReply,
   handleIncomingImage,
   handleIncomingFile,
+  hasPendingEmailContext,
   getDraftSession,
 } from "@/lib/email/flow";
 import {
@@ -165,20 +167,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       groupId: event.source.groupId,
     };
 
-    // 画像 → 黙って「直近メディア」として控えるだけ（返信しない）。
-    // メールの指示（「この人に送って」等）が来たときに名刺として読み取る。
+    // 画像 → 通常は黙って「直近メディア」として控えるだけ（返信しない）。
+    // ただし下書きの宛先待ち中は、その場で名刺として読み宛先に設定して返信する。
     if (event.message.type === "image") {
-      await handleIncomingImage(event.message.id, source);
+      await handleIncomingImage(event.message.id, source, replyToken);
       continue;
     }
 
-    // ファイル（PDF等）→ 黙って「直近メディア＋添付候補」として控えるだけ（返信しない）。
-    // メールの指示が来たときに添付／名刺読み取りに使う。
+    // ファイル（PDF等）→ 通常は黙って「直近メディア＋添付候補」として控えるだけ。
+    // 下書き作成中は、名刺PDFなら宛先に、そうでなければ添付候補として案内する。
     if (event.message.type === "file") {
       await handleIncomingFile(
         event.message.id,
         event.message.fileName ?? "file",
-        source
+        source,
+        replyToken
       );
       continue;
     }
@@ -292,6 +295,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // ③ 「メール送って」等の明確なメール指示は、AI判定より前に確定でメールへ。
     //    （AIが稀にタスクと誤判定するのを防ぐ）
     if (looksLikeEmailCommand(text)) {
+      await startEmailFlow(text, source, replyToken);
+      continue;
+    }
+
+    // ③+ 直近に画像/PDFが届いている文脈での「この名刺の方にPDFを送って」等も
+    //     確定でメールへ（「メール」という単語が無くても曖昧メニューを出さない）。
+    if (looksLikeSendWithMaterial(text) && (await hasPendingEmailContext(source))) {
       await startEmailFlow(text, source, replyToken);
       continue;
     }

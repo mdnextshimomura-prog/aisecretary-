@@ -218,6 +218,8 @@ export async function clearPendingAttachments(
 }
 
 // ── 直近に届いた画像/ファイルの参照（黙って控えるだけ。メール指示時に名刺として読む） ──
+// 名刺画像とPDFを続けて送るケースがあるため、1件ではなくリストで保持する
+// （以前は1件のみで、後から届いたPDFが名刺画像を上書きして宛先解決に失敗していた）。
 export interface PendingMedia {
   messageId: string;
   fileName: string; // ファイル名（画像はダミー可）
@@ -225,49 +227,59 @@ export interface PendingMedia {
 }
 
 const MEDIA_PREFIX = "emailmedia";
+const MEDIA_MAX = 5; // 保持する直近メディアの上限（古いものから捨てる）
 const mediaMemStore = new Map<
   string,
-  { value: PendingMedia; expireAt: number }
+  { value: PendingMedia[]; expireAt: number }
 >();
 
 function mediaKey(groupId: string | undefined, userId: string): string {
   return `${MEDIA_PREFIX}:${groupId ?? "direct"}:${userId}`;
 }
 
-export async function savePendingMedia(
-  groupId: string | undefined,
-  userId: string,
-  media: PendingMedia
-): Promise<void> {
-  const key = mediaKey(groupId, userId);
-  if (kvEnabled()) {
-    await kv.set(key, media, { ex: TTL_SECONDS });
-    return;
-  }
-  mediaMemStore.set(key, {
-    value: media,
-    expireAt: Date.now() + TTL_SECONDS * 1000,
-  });
-}
-
-export async function getPendingMedia(
+export async function getPendingMediaList(
   groupId: string | undefined,
   userId: string
-): Promise<PendingMedia | null> {
+): Promise<PendingMedia[]> {
   const key = mediaKey(groupId, userId);
   if (kvEnabled()) {
-    return (await kv.get<PendingMedia>(key)) ?? null;
+    const raw = await kv.get<PendingMedia[] | PendingMedia>(key);
+    if (!raw) return [];
+    // 旧形式（単一オブジェクト）が残っていてもリストとして扱えるようにする
+    return Array.isArray(raw) ? raw : [raw];
   }
   const hit = mediaMemStore.get(key);
-  if (!hit) return null;
+  if (!hit) return [];
   if (Date.now() > hit.expireAt) {
     mediaMemStore.delete(key);
-    return null;
+    return [];
   }
   return hit.value;
 }
 
-export async function deletePendingMedia(
+// 追加（既存リストに追記。上限を超えたら古いものから捨てる）
+export async function addPendingMedia(
+  groupId: string | undefined,
+  userId: string,
+  media: PendingMedia
+): Promise<void> {
+  const cur = await getPendingMediaList(groupId, userId);
+  const next = [
+    ...cur.filter((m) => m.messageId !== media.messageId),
+    media,
+  ].slice(-MEDIA_MAX);
+  const key = mediaKey(groupId, userId);
+  if (kvEnabled()) {
+    await kv.set(key, next, { ex: TTL_SECONDS });
+    return;
+  }
+  mediaMemStore.set(key, {
+    value: next,
+    expireAt: Date.now() + TTL_SECONDS * 1000,
+  });
+}
+
+export async function clearPendingMedia(
   groupId: string | undefined,
   userId: string
 ): Promise<void> {

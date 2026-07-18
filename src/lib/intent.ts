@@ -63,8 +63,24 @@ export function looksLikeEmailCommand(text: string): boolean {
       t
     ) ||
     /(送信|返信|返事).{0,8}メール/.test(t) ||
-    /メールで.{0,12}(送|返信|連絡|案内)/.test(t)
+    /メールで.{0,12}(送|返信|連絡|案内)/.test(t) ||
+    // 「この名刺の方に送って」等。名刺相手への送付はメール以外に解釈しようがない
+    /名刺の?(方|人|かた|お方).{0,20}(送|案内|連絡|メール)/.test(t)
   );
+}
+
+// 直近に画像/PDFが届いている文脈での「送って」判定。
+// 「この名刺の方にPDFを送って」のように「メール」という単語が無い指示に対応する。
+// 単体では誤爆しやすい（「査定書送っておいて」等）ため、
+// 送信語 ＋（宛先らしき語 or 資料らしき語）の両方を要求し、
+// さらに webhook 側で「直近にメディアが届いているとき」だけ使う。
+export function looksLikeSendWithMaterial(text: string): boolean {
+  const t = text.replace(/\s/g, "");
+  const send = /送っ|送付|送信|お送り|送る|送り|届け/.test(t);
+  const target =
+    /名刺|この(方|人|かた)|その(方|人)|さんに|様に|宛|先方|お客様に/.test(t);
+  const material = /pdf|資料|ファイル|添付|画像|写真|データ|書類/i.test(t);
+  return send && (target || material);
 }
 
 const SYSTEM_PROMPT = `あなたは不動産会社の社内アシスタントです。
