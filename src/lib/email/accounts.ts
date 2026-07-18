@@ -20,6 +20,12 @@ function stripPw(s: string): string {
   return (s ?? "").replace(/\s/g, "");
 }
 
+// 環境変数に "\n"（バックスラッシュ+n）で書かれた改行を実際の改行に直す。
+// JSON.parse済みの実改行はそのまま通す（no-op）。
+function normSig(s: string): string {
+  return (s ?? "").replace(/\\n/g, "\n");
+}
+
 // 既定＋追加をまとめて返す（先頭が既定＝指定なし時の送信元）。
 export function loadSenderAccounts(): SenderAccount[] {
   const list: SenderAccount[] = [];
@@ -29,7 +35,7 @@ export function loadSenderAccounts(): SenderAccount[] {
   const defPass = stripPw(process.env.GMAIL_APP_PASSWORD ?? "");
   const defLabel = process.env.GMAIL_DEFAULT_LABEL ?? "会社";
   const defName = process.env.GMAIL_SENDER_NAME ?? defLabel;
-  const defSig = process.env.GMAIL_DEFAULT_SIGNATURE ?? "";
+  const defSig = normSig(process.env.GMAIL_DEFAULT_SIGNATURE ?? "");
   if (defEmail && defPass) {
     list.push({
       label: defLabel,
@@ -55,7 +61,7 @@ export function loadSenderAccounts(): SenderAccount[] {
             email: v.email,
             password: stripPw(v.password),
             name: v.name || label,
-            signature: v.signature || "",
+            signature: normSig(v.signature || ""),
           });
         }
       }
@@ -129,7 +135,7 @@ function loadSignatures(): Record<string, SignaturePersona> {
       >;
       for (const [label, v] of Object.entries(obj)) {
         if (v?.signature) {
-          out[label] = { name: v.name || label, signature: v.signature };
+          out[label] = { name: v.name || label, signature: normSig(v.signature) };
         }
       }
     } catch (err) {
