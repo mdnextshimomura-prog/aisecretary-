@@ -14,6 +14,12 @@ import {
   handleConfirmReply,
   getDraftSession,
 } from "@/lib/email/flow";
+import {
+  detectNewCustomerCommand,
+  parseCustomerFromMessage,
+  createCrmCustomer,
+  buildCustomerRegisteredMessage,
+} from "@/lib/crm";
 
 // 「これはタスクじゃない／取り消したい」意図の判定（引用リプライ時のみ使用）
 const CANCEL_PHRASES = [
@@ -159,6 +165,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // メンションは必須ではない。全発言をClaudeに渡し、タスクかどうかを判定させる。
     const text = stripMentions(event.message);
     if (!text) continue;
+
+    // ②' 「#新規」コマンド → 紹介客をCRM_顧客へ登録（どの行の行頭でも検知）
+    const crmText = detectNewCustomerCommand(text);
+    if (crmText !== null) {
+      try {
+        const customer = await parseCustomerFromMessage(crmText || text);
+        await createCrmCustomer(customer, text);
+        await sendLineMessage(replyToken, buildCustomerRegisteredMessage(customer));
+      } catch (err) {
+        console.error("CRM顧客登録エラー:", err);
+        await sendLineMessage(
+          replyToken,
+          "⚠️ 顧客の登録中にエラーが発生しました。もう一度お試しください。"
+        );
+      }
+      continue;
+    }
 
     // ③ メール送信依頼なら新処理へ。intent判定が email かつ確信度が高い時だけ
     //    メールフローに入り、それ以外（task/other/判定失敗）は下の既存タスク処理へ落とす。
