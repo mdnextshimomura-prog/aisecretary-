@@ -17,9 +17,9 @@ import {
   saveDraftSession,
   getDraftSession,
   deleteDraftSession,
-  savePendingMedia,
-  getPendingMedia,
-  deletePendingMedia,
+  addPendingMedia,
+  getPendingMediaList,
+  clearPendingMedia,
   getPendingAttachments,
   addPendingAttachment,
   clearPendingAttachments,
@@ -182,14 +182,10 @@ export async function startEmailFlow(
   // 名刺として読み取り、宛先に使う（「この人に送って」等に対応）。
   // ※ここで初めてAI解析する（無関係な画像には反応しないための遅延読み取り）。
   if (!toEmail) {
-    const media = await getPendingMedia(source.groupId, source.userId);
-    if (media) {
-      const card = await readCardFromMedia(media.messageId);
-      if (card?.email) {
-        toName = card.name || card.company || card.email;
-        toEmail = card.email;
-      }
-      await deletePendingMedia(source.groupId, source.userId);
+    const fromCard = await resolveRecipientFromMedia(source);
+    if (fromCard) {
+      toName = fromCard.name;
+      toEmail = fromCard.email;
     }
   }
 
@@ -280,6 +276,22 @@ export async function handleConfirmReply(
       await sendLineMessage(replyToken, buildPreview(updated));
       return;
     }
+    // アドレスの直書きが無ければ、直近に届いた画像/PDF（名刺）から宛先を解決してみる。
+    // 「宛先は画像送ってる」「これでいける？」のような返信でも名刺が読まれるようにする。
+    const fromCard = await resolveRecipientFromMedia(source);
+    if (fromCard) {
+      const updated: DraftSession = {
+        ...session,
+        toName: fromCard.name,
+        toEmail: fromCard.email,
+      };
+      await saveDraftSession(source.groupId, source.userId, updated);
+      await sendLineMessage(
+        replyToken,
+        `📇 名刺から宛先を設定しました。\n\n${buildPreview(updated)}`
+      );
+      return;
+    }
   }
 
   // 送信（「純粋に送信の合図だけ」のときのみ。修正指示が混ざっていたら送信しない）
@@ -345,6 +357,27 @@ export async function handleConfirmReply(
     return;
   }
 
+  // 「添付して」等 → 下書き作成後に届いたファイルを、この下書きに追加する
+  if (ATTACH_INTENT_RE.test(text)) {
+    const pend = await getPendingAttachments(source.groupId, source.userId);
+    if (pend.length) {
+      const merged = [
+        ...session.attachments,
+        ...pend.filter(
+          (p) => !session.attachments.some((a) => a.messageId === p.messageId)
+        ),
+      ];
+      await clearPendingAttachments(source.groupId, source.userId);
+      const updated: DraftSession = { ...session, attachments: merged };
+      await saveDraftSession(source.groupId, source.userId, updated);
+      await sendLineMessage(
+        replyToken,
+        `📎 添付を追加しました。\n\n${buildPreview(updated)}`
+      );
+      return;
+    }
+  }
+
   // 上記以外 → 修正指示として下書きを作り直す
   const req: EmailRequest = {
     to: session.toName,
@@ -376,6 +409,33 @@ export async function handleConfirmReply(
   }
 }
 
+// 直近に届いた画像/PDFのリストを名刺として読み、宛先を解決する。
+// 画像を優先（名刺は画像で届くことが多い）、新しいものから最大3件まで試す。
+// 物件資料PDFなど「名刺でないもの」は isBusinessCard=false で自然にスキップされる。
+// 試し終えたら控えは消費する（再送されれば再登録されるので詰まらない）。
+async function resolveRecipientFromMedia(
+  source: MessageSource
+): Promise<{ name: string; email: string } | null> {
+  const list = await getPendingMediaList(source.groupId, source.userId);
+  if (!list.length) return null;
+  const ordered = [...list].reverse(); // 新しい順
+  ordered.sort(
+    (a, b) => (a.kind === "image" ? 0 : 1) - (b.kind === "image" ? 0 : 1)
+  ); // 安定ソート → 画像優先・各種別の中では新しい順
+  for (const m of ordered.slice(0, 3)) {
+    const card = await readCardFromMedia(m.messageId);
+    if (card?.email) {
+      await clearPendingMedia(source.groupId, source.userId);
+      return {
+        name: card.name || card.company || card.email,
+        email: card.email,
+      };
+    }
+  }
+  await clearPendingMedia(source.groupId, source.userId);
+  return null;
+}
+
 // 画像/PDFの中身から名刺として連絡先を読み取る（保存はしない）。
 // メール指示が来て宛先が未解決のときだけ呼ぶ（無関係な画像を解析しないため）。
 async function readCardFromMedia(messageId: string): Promise<CardContact | null> {
@@ -394,28 +454,83 @@ async function readCardFromMedia(messageId: string): Promise<CardContact | null>
   }
 }
 
-// 画像を受信 → 黙って「直近メディア」として控えるだけ（返信もAI解析もしない）。
-// メールの指示（「この人に送って」等）が来て初めて名刺として読む。
+// 名刺の読み取り結果で下書きの宛先を更新し、プレビューを返信する（成功時true）
+async function fillRecipientFromCard(
+  messageId: string,
+  source: MessageSource,
+  replyToken: string,
+  session: DraftSession
+): Promise<boolean> {
+  const card = await readCardFromMedia(messageId);
+  if (!card?.email) return false;
+  const updated: DraftSession = {
+    ...session,
+    toName: card.name || card.company || card.email,
+    toEmail: card.email,
+  };
+  await saveDraftSession(source.groupId, source.userId, updated);
+  await sendLineMessage(
+    replyToken,
+    `📇 名刺から宛先を設定しました。\n\n${buildPreview(updated)}`
+  );
+  return true;
+}
+
+// 画像を受信。
+// - 下書きの宛先待ち中 → その場で名刺として読み、宛先に設定して返信する。
+//   （読めなければその旨を返信。黙ったままだと「画像送ってるのに！」となるため）
+// - それ以外 → 黙って「直近メディア」として控えるだけ（返信もAI解析もしない）。
 export async function handleIncomingImage(
   messageId: string,
-  source: MessageSource
+  source: MessageSource,
+  replyToken: string
 ): Promise<void> {
-  await savePendingMedia(source.groupId, source.userId, {
+  const session = await getDraftSession(source.groupId, source.userId);
+  if (session && !session.toEmail) {
+    const ok = await fillRecipientFromCard(messageId, source, replyToken, session);
+    if (!ok) {
+      await sendLineMessage(
+        replyToken,
+        "⚠️ 画像から宛先のメールアドレスを読み取れませんでした。鮮明な名刺画像をもう一度送るか、メールアドレスを直接返信してください。"
+      );
+    }
+    return;
+  }
+  await addPendingMedia(source.groupId, source.userId, {
     messageId,
     fileName: "image",
     kind: "image",
   });
 }
 
-// ファイル(PDF等)を受信 → 黙って「直近メディア」＋「添付候補」として控えるだけ。
-// 返信はしない。メールの指示が来たときに、添付や名刺読み取りに使う。
+// ファイル(PDF等)を受信。
+// - 下書きの宛先待ち中 → まず名刺PDFとして読んでみて、宛先が取れれば設定する。
+// - 下書き作成中（宛先は解決済み）→ 添付候補として控え、「添付して」で追加できると案内する。
+// - それ以外 → 黙って「直近メディア＋添付候補」として控えるだけ（返信しない）。
 export async function handleIncomingFile(
   messageId: string,
   fileName: string,
-  source: MessageSource
+  source: MessageSource,
+  replyToken: string
 ): Promise<void> {
   const name = fileName || "file";
-  await savePendingMedia(source.groupId, source.userId, {
+  const session = await getDraftSession(source.groupId, source.userId);
+  if (session) {
+    if (!session.toEmail) {
+      const ok = await fillRecipientFromCard(messageId, source, replyToken, session);
+      if (ok) return; // 名刺PDFとして宛先に使ったので、添付候補には入れない
+    }
+    await addPendingAttachment(source.groupId, source.userId, {
+      messageId,
+      fileName: name,
+    });
+    await sendLineMessage(
+      replyToken,
+      `📎 「${name}」を受け取りました。「添付して」と返信すると、作成中のメールに添付します。`
+    );
+    return;
+  }
+  await addPendingMedia(source.groupId, source.userId, {
     messageId,
     fileName: name,
     kind: "file",
@@ -424,6 +539,16 @@ export async function handleIncomingFile(
     messageId,
     fileName: name,
   });
+}
+
+// webhook から使う: 直近に画像/ファイルが届いているか（「送って」の文脈判定用）
+export async function hasPendingEmailContext(
+  source: MessageSource
+): Promise<boolean> {
+  const media = await getPendingMediaList(source.groupId, source.userId);
+  if (media.length) return true;
+  const atts = await getPendingAttachments(source.groupId, source.userId);
+  return atts.length > 0;
 }
 
 // webhook から使う: 確認セッションの有無を返す
