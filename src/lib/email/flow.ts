@@ -59,6 +59,15 @@ function hitsAny(compact: string, phrases: string[]): boolean {
   return phrases.some((p) => lower.includes(p.toLowerCase()));
 }
 
+// 署名テンプレの {name}（名前の差し込み口）に署名者名を入れる。
+// 名前が空なら {name} を含む行ごと削除（空行が残らないように）。
+// {name} が無いテンプレはそのまま返す。
+function applyName(sig: string, name: string): string {
+  if (!sig.includes("{name}")) return sig;
+  if (name) return sig.replace(/\{name\}/g, name);
+  return sig.replace(/^.*\{name\}.*\n?/gm, "");
+}
+
 // 本文＋署名を連結した「送信される最終テキスト」を作る
 function composeFullBody(session: DraftSession): string {
   const sig = (session.signature ?? "").trim();
@@ -124,12 +133,25 @@ export async function startEmailFlow(
 
   // 送信元アドレス（アカウント）を決める。無指定なら既定＝会社。
   const sender = resolveSender(req.from);
-  // 署名（名義）を決める。明示指定(as)があればそれ、無ければ送信元アカウントの署名。
-  // 例:「会社から社長名義で」→ アドレスは会社、署名は社長。
-  const persona = resolveSignature(req.as || req.from);
-  const senderName = persona?.name ?? sender?.name ?? "MDNEXT";
-  const signature =
-    (persona?.signature ?? sender?.signature ?? "").trim() || senderName;
+  // 署名（名義）を決める。優先順位:
+  //  1. 登録済みの署名ペルソナ/アカウント（社長・下村 等）
+  //  2. 未登録の名前（例: 事務の山口）→ 送信元の署名テンプレの {name} に差し込む
+  //  3. 指定なし → 送信元の署名（テンプレの {name} 行は除去）
+  const hint = (req.as || req.from).trim();
+  const persona = resolveSignature(hint);
+  let senderName: string;
+  let signature: string;
+  if (persona) {
+    senderName = persona.name;
+    signature = applyName(persona.signature, "");
+  } else if (hint) {
+    senderName = hint;
+    signature = applyName(sender?.signature ?? "", hint);
+  } else {
+    senderName = sender?.name ?? "MDNEXT";
+    signature = applyName(sender?.signature ?? "", "");
+  }
+  signature = signature.trim() || senderName;
 
   const draft = await generateEmailDraft(req, senderName);
 
