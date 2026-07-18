@@ -20,6 +20,19 @@ export const EMAIL_INTENT_THRESHOLD = Number(
   process.env.EMAIL_INTENT_THRESHOLD ?? "0.7"
 );
 
+// 「メール送って」等の明確なメール指示か（AI判定より前の確定ルール）。
+// AIが稀にタスクと誤判定するため、明示的なメール指示は問答無用でメールへ回す。
+export function looksLikeEmailCommand(text: string): boolean {
+  const t = text.replace(/\s/g, "");
+  return (
+    /メール.{0,12}(送信|送っ|送る|送付|出し|書い|書く|作成|して|してほ|ください|お願い)/.test(
+      t
+    ) ||
+    /(送信|返信|返事).{0,8}メール/.test(t) ||
+    /メールで.{0,12}(送|返信|連絡|案内)/.test(t)
+  );
+}
+
 const SYSTEM_PROMPT = `あなたは不動産会社の社内アシスタントです。
 LINEで届いた1件の発言が、次のどれを求めているかを分類してください。
 

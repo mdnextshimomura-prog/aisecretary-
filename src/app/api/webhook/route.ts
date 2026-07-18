@@ -8,7 +8,11 @@ import {
   updateTaskAssignee,
   archiveTask,
 } from "@/lib/notion";
-import { classifyIntent, EMAIL_INTENT_THRESHOLD } from "@/lib/intent";
+import {
+  classifyIntent,
+  looksLikeEmailCommand,
+  EMAIL_INTENT_THRESHOLD,
+} from "@/lib/intent";
 import {
   startEmailFlow,
   handleConfirmReply,
@@ -207,8 +211,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       continue;
     }
 
-    // ③ メール送信依頼なら新処理へ。intent判定が email かつ確信度が高い時だけ
-    //    メールフローに入り、それ以外（task/other/判定失敗）は下の既存タスク処理へ落とす。
+    // ③ 「メール送って」等の明確なメール指示は、AI判定より前に確定でメールへ。
+    //    （AIが稀にタスクと誤判定するのを防ぐ）
+    if (looksLikeEmailCommand(text)) {
+      await startEmailFlow(text, source, replyToken);
+      continue;
+    }
+
+    // ③' 上記に当てはまらない場合、AIで意図判定。emailかつ確信度が高い時だけ
+    //     メールフローに入り、それ以外（task/other/判定失敗）は既存タスク処理へ。
     try {
       const intent = await classifyIntent(text);
       if (
