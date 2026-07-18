@@ -6,15 +6,13 @@ import {
   type EmailRequest,
 } from "./draft";
 import { sendGmail } from "./send";
+import { resolveSender, getSenderByLabel } from "./accounts";
 import {
   saveDraftSession,
   getDraftSession,
   deleteDraftSession,
   type DraftSession,
 } from "./session";
-
-// メール本文の署名に使う名前（会社名等。未設定なら既定）
-const SENDER_NAME = process.env.GMAIL_SENDER_NAME ?? "MDNEXT";
 
 export interface MessageSource {
   userId: string;
@@ -59,6 +57,7 @@ function hitsAny(compact: string, phrases: string[]): boolean {
 
 // 下書きプレビューのLINEメッセージを組み立てる
 function buildPreview(session: DraftSession): string {
+  const fromLine = `👤 差出人：${session.senderName} <${session.senderEmail}>`;
   const toLine = session.toEmail
     ? `📮 宛先：${session.toName} <${session.toEmail}>`
     : `⚠️ 宛先：${session.toName}（メールアドレス未解決）`;
@@ -67,6 +66,7 @@ function buildPreview(session: DraftSession): string {
   const lines = [
     "✉️ メール下書きを作成しました。内容をご確認ください。",
     "",
+    fromLine,
     toLine,
     ccLine,
     `件名：${session.subject}`,
@@ -96,7 +96,11 @@ export async function startEmailFlow(
     .map((r) => r.email)
     .filter((e): e is string => Boolean(e));
 
-  const draft = await generateEmailDraft(req, SENDER_NAME);
+  // 差出人を決める（「自分から」「社長名義で」等。無指定なら既定＝会社）
+  const sender = resolveSender(req.from);
+  const senderName = sender?.name ?? "MDNEXT";
+
+  const draft = await generateEmailDraft(req, senderName);
 
   const session: DraftSession = {
     toName: toResolved.name,
@@ -104,6 +108,9 @@ export async function startEmailFlow(
     cc: ccResolved,
     subject: draft.subject,
     body: draft.body,
+    senderLabel: sender?.label ?? "会社",
+    senderEmail: sender?.email ?? "",
+    senderName,
     purpose: req.purpose,
     tone: req.tone,
     subjectHint: req.subject_hint,
@@ -151,16 +158,21 @@ export async function handleConfirmReply(
       return;
     }
     try {
+      // 送信時に差出人アカウントの認証情報をenvから引き当てる（パスワードはKVに置かない）
+      const sender = getSenderByLabel(session.senderLabel);
       await sendGmail({
         to: session.toEmail,
         cc: session.cc,
         subject: session.subject,
         body: session.body,
+        from: sender
+          ? { email: sender.email, password: sender.password, name: sender.name }
+          : undefined,
       });
       await deleteDraftSession(source.groupId, source.userId);
       await sendLineMessage(
         replyToken,
-        `📧 送信しました。\n宛先：${session.toName} <${session.toEmail}>\n件名：${session.subject}`
+        `📧 送信しました。\n差出人：${session.senderName} <${session.senderEmail}>\n宛先：${session.toName} <${session.toEmail}>\n件名：${session.subject}`
       );
     } catch (err) {
       console.error("メール送信エラー:", err);
@@ -189,9 +201,10 @@ export async function handleConfirmReply(
     subject_hint: session.subjectHint,
     purpose: session.purpose,
     tone: session.tone,
+    from: session.senderLabel,
   };
   try {
-    const draft = await generateEmailDraft(req, SENDER_NAME, text, {
+    const draft = await generateEmailDraft(req, session.senderName, text, {
       subject: session.subject,
       body: session.body,
     });
