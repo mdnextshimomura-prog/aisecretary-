@@ -7,10 +7,14 @@ import {
 } from "./draft";
 import { sendGmail } from "./send";
 import { resolveSender, getSenderByLabel } from "./accounts";
+import { fetchLineImage, readBusinessCard } from "./card";
 import {
   saveDraftSession,
   getDraftSession,
   deleteDraftSession,
+  getPendingRecipient,
+  savePendingRecipient,
+  deletePendingRecipient,
   type DraftSession,
 } from "./session";
 
@@ -55,6 +59,12 @@ function hitsAny(compact: string, phrases: string[]): boolean {
   return phrases.some((p) => lower.includes(p.toLowerCase()));
 }
 
+// 本文＋署名を連結した「送信される最終テキスト」を作る
+function composeFullBody(session: DraftSession): string {
+  const sig = (session.signature ?? "").trim();
+  return sig ? `${session.body}\n\n${sig}` : session.body;
+}
+
 // 下書きプレビューのLINEメッセージを組み立てる
 function buildPreview(session: DraftSession): string {
   const fromLine = `👤 差出人：${session.senderName} <${session.senderEmail}>`;
@@ -71,7 +81,7 @@ function buildPreview(session: DraftSession): string {
     ccLine,
     `件名：${session.subject}`,
     "――――――――――",
-    session.body,
+    composeFullBody(session),
     "――――――――――",
     "",
     session.toEmail
@@ -90,7 +100,23 @@ export async function startEmailFlow(
 ): Promise<void> {
   const req = await extractEmailRequest(text);
 
+  let toName = "";
+  let toEmail: string | null = null;
   const toResolved = resolveRecipient(req.to);
+  toName = toResolved.name;
+  toEmail = toResolved.email;
+
+  // 宛先が解決できない（台帳に無い・宛先未指定）場合は、直前に読み取った
+  // 名刺などの「宛先候補」を使う（「この人に送って」等に対応）。
+  if (!toEmail) {
+    const pending = await getPendingRecipient(source.groupId, source.userId);
+    if (pending?.email) {
+      toName = pending.name || pending.email;
+      toEmail = pending.email;
+      await deletePendingRecipient(source.groupId, source.userId);
+    }
+  }
+
   const ccResolved = req.cc
     .map(resolveRecipient)
     .map((r) => r.email)
@@ -99,15 +125,18 @@ export async function startEmailFlow(
   // 差出人を決める（「自分から」「社長名義で」等。無指定なら既定＝会社）
   const sender = resolveSender(req.from);
   const senderName = sender?.name ?? "MDNEXT";
+  // 署名は差出人アカウントのもの。未設定なら最低限「表示名」を署名にする。
+  const signature = (sender?.signature ?? "").trim() || senderName;
 
   const draft = await generateEmailDraft(req, senderName);
 
   const session: DraftSession = {
-    toName: toResolved.name,
-    toEmail: toResolved.email,
+    toName,
+    toEmail,
     cc: ccResolved,
     subject: draft.subject,
     body: draft.body,
+    signature,
     senderLabel: sender?.label ?? "会社",
     senderEmail: sender?.email ?? "",
     senderName,
@@ -164,7 +193,7 @@ export async function handleConfirmReply(
         to: session.toEmail,
         cc: session.cc,
         subject: session.subject,
-        body: session.body,
+        body: composeFullBody(session), // 本文＋署名
         from: sender
           ? { email: sender.email, password: sender.password, name: sender.name }
           : undefined,
@@ -222,6 +251,63 @@ export async function handleConfirmReply(
       "⚠️ 下書きの修正に失敗しました。もう一度指示してください。"
     );
   }
+}
+
+// 画像（名刺）を受け取り、連絡先を読み取って「宛先候補」として保存する。
+// この後の「この人にメール送って」等で、その連絡先が宛先に使われる。
+export async function handleBusinessCard(
+  messageId: string,
+  source: MessageSource,
+  replyToken: string
+): Promise<void> {
+  const img = await fetchLineImage(messageId);
+  if (!img) {
+    await sendLineMessage(
+      replyToken,
+      "⚠️ 画像を取得できませんでした。もう一度送ってみてください。"
+    );
+    return;
+  }
+
+  let card;
+  try {
+    card = await readBusinessCard(img.base64, img.mediaType);
+  } catch (err) {
+    console.error("名刺読み取りエラー:", err);
+    await sendLineMessage(
+      replyToken,
+      "⚠️ 画像の読み取りに失敗しました。文字がはっきり写るように撮り直してみてください。"
+    );
+    return;
+  }
+
+  if (!card.isBusinessCard || (!card.email && !card.name)) {
+    // 連絡先が読み取れない画像は黙ってスキップ（雑談画像などを誤爆させない）
+    return;
+  }
+
+  await savePendingRecipient(source.groupId, source.userId, {
+    name: card.name || card.company || "（氏名不明）",
+    email: card.email,
+    company: card.company,
+    phone: card.phone,
+    createdAt: Date.now(),
+  });
+
+  const lines = [
+    "📇 名刺を読み取りました。",
+    card.name ? `氏名：${card.name}` : null,
+    card.title ? `役職：${card.title}` : null,
+    card.company ? `会社：${card.company}` : null,
+    card.email ? `メール：${card.email}` : "メール：（読み取れず）",
+    card.phone ? `電話：${card.phone}` : null,
+    "",
+    card.email
+      ? "▶ この方にメールするなら、続けて用件を送ってください（例:「この人に内見のお礼メール送って」）。"
+      : "▶ メールアドレスが読み取れませんでした。アドレスが写るように撮り直すか、宛先を文字で教えてください。",
+  ].filter(Boolean);
+
+  await sendLineMessage(replyToken, lines.join("\n"));
 }
 
 // webhook から使う: 確認セッションの有無を返す

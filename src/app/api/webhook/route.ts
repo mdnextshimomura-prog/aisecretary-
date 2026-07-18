@@ -12,6 +12,7 @@ import { classifyIntent, EMAIL_INTENT_THRESHOLD } from "@/lib/intent";
 import {
   startEmailFlow,
   handleConfirmReply,
+  handleBusinessCard,
   getDraftSession,
 } from "@/lib/email/flow";
 import {
@@ -94,9 +95,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const body: LineWebhookBody = JSON.parse(rawBody);
 
   for (const event of body.events) {
-    if (event.type !== "message" || event.message?.type !== "text") continue;
+    if (event.type !== "message" || !event.message) continue;
 
     const replyToken = event.replyToken!;
+
+    // メール機能: 送受信の発言元（グループ/個人 × ユーザー）を特定するためのキー。
+    const source = {
+      userId: event.source.userId,
+      groupId: event.source.groupId,
+    };
+
+    // 画像（名刺など）→ 連絡先を読み取り「宛先候補」として保存する。
+    // 続く「この人にメール送って」等で宛先として使われる。
+    if (event.message.type === "image") {
+      await handleBusinessCard(event.message.id, source, replyToken);
+      continue;
+    }
+
+    // 以降はテキストメッセージのみ対象
+    if (event.message.type !== "text") continue;
 
     // 引用リプライ → 既存タスクへの操作（取り消し／担当者の後付け・変更）として扱う。
     // 元の依頼メッセージ or Botの「✅タスク登録しました」への引用のどちらでも特定できる。
@@ -104,12 +121,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       event.message.mention?.mentionees.filter(
         (m) => m.type === "user" && m.userId !== BOT_USER_ID
       ) ?? [];
-
-    // メール機能: 送受信の発言元（グループ/個人 × ユーザー）を特定するためのキー。
-    const source = {
-      userId: event.source.userId,
-      groupId: event.source.groupId,
-    };
 
     // ① メール下書きの確認セッションがある場合は最優先。
     //    「送信 / 修正 / 宛先補完 / キャンセル」への返答として処理し、
