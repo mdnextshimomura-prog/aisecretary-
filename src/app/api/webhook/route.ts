@@ -11,8 +11,15 @@ import {
 import {
   classifyIntent,
   looksLikeEmailCommand,
+  buildClarificationMenu,
+  interpretClarification,
   EMAIL_INTENT_THRESHOLD,
 } from "@/lib/intent";
+import {
+  savePendingClarification,
+  getPendingClarification,
+  deletePendingClarification,
+} from "@/lib/email/session";
 import {
   startEmailFlow,
   handleConfirmReply,
@@ -88,6 +95,53 @@ function stripMentions(message: LineMessage): string {
     text = text.slice(0, m.index) + text.slice(m.index + m.length);
   }
   return text.trim();
+}
+
+// テキストからタスクを登録して返信する（曖昧確認で「タスク」を選ばれた時に使う）。
+async function registerTaskFromText(
+  text: string,
+  replyToken: string
+): Promise<void> {
+  const today = new Date(Date.now() + 9 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 16)
+    .replace("T", " ");
+  let parsed;
+  try {
+    parsed = await parseTaskFromMessage(text, today);
+  } catch (err) {
+    console.error("タスク解析エラー:", err);
+    await sendLineMessage(replyToken, "⚠️ タスクの解析に失敗しました。");
+    return;
+  }
+  try {
+    await createNotionTask(parsed, text);
+    await sendLineMessage(replyToken, buildTaskRegisteredMessage(parsed));
+  } catch (err) {
+    console.error("タスク登録エラー:", err);
+    await sendLineMessage(
+      replyToken,
+      "⚠️ タスクの登録中にエラーが発生しました。もう一度お試しください。"
+    );
+  }
+}
+
+// テキストから顧客をCRMへ登録して返信する（曖昧確認で「顧客」を選ばれた時に使う）。
+async function registerCrmFromText(
+  text: string,
+  replyToken: string
+): Promise<void> {
+  try {
+    const customer = await parseCustomerFromMessage(text);
+    await createCrmCustomer(customer, text);
+    await sendLineMessage(replyToken, buildCustomerRegisteredMessage(customer));
+  } catch (err) {
+    console.error("CRM顧客登録エラー:", err);
+    await sendLineMessage(
+      replyToken,
+      "⚠️ 顧客の登録中にエラーが発生しました。もう一度お試しください。"
+    );
+  }
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -194,6 +248,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const text = stripMentions(event.message);
     if (!text) continue;
 
+    // ①' 曖昧確認への返答（「①」「メール」等）→ 保留していた発言を選んだフローへ流す。
+    const pendingClar = await getPendingClarification(
+      source.groupId,
+      source.userId
+    );
+    if (pendingClar) {
+      const choice = interpretClarification(text);
+      if (choice) {
+        await deletePendingClarification(source.groupId, source.userId);
+        if (choice === "none") {
+          await sendLineMessage(replyToken, "了解しました。今回は何もしません。");
+        } else if (choice === "email") {
+          await startEmailFlow(pendingClar, source, replyToken);
+        } else if (choice === "crm") {
+          await registerCrmFromText(pendingClar, replyToken);
+        } else {
+          await registerTaskFromText(pendingClar, replyToken);
+        }
+        continue;
+      }
+      // 選択と解釈できない返答 → 保留を解除し、この新しい発言を通常処理する
+      await deletePendingClarification(source.groupId, source.userId);
+    }
+
     // ②' 「#新規」コマンド → 紹介客をCRM_顧客へ登録（どの行の行頭でも検知）
     const crmText = detectNewCustomerCommand(text);
     if (crmText !== null) {
@@ -218,10 +296,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       continue;
     }
 
-    // ③' 上記に当てはまらない場合、AIで意図判定。emailかつ確信度が高い時だけ
-    //     メールフローに入り、それ以外（task/other/判定失敗）は既存タスク処理へ。
+    // ③' 上記に当てはまらない場合、AIで意図判定。
+    //     ・曖昧（メール/タスク/顧客のどれとも取れる）→ どう対応するか確認する
+    //     ・emailかつ確信度が高い → メールフロー
+    //     ・それ以外（task/other/判定失敗）→ 既存タスク処理へ
     try {
       const intent = await classifyIntent(text);
+      if (intent.ambiguous) {
+        await savePendingClarification(source.groupId, source.userId, text);
+        await sendLineMessage(replyToken, buildClarificationMenu());
+        continue;
+      }
       if (
         intent.intent === "email" &&
         intent.confidence >= EMAIL_INTENT_THRESHOLD
