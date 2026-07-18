@@ -11,6 +11,10 @@ export interface DraftSession {
   cc: string[]; // 解決済みCCアドレス
   subject: string;
   body: string;
+  // 差出人（送信元）。パスワードはKVに保存せず、送信時にlabelからenvで引き当てる。
+  senderLabel: string; // 送信元アカウントのラベル（例: 会社 / 下村）
+  senderEmail: string; // 送信元メールアドレス（プレビュー表示用）
+  senderName: string; // 送信元表示名
   // 再修正時に文面を作り直すための元依頼情報
   purpose: string;
   tone: string;
