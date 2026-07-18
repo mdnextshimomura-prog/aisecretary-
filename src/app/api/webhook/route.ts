@@ -13,6 +13,7 @@ import {
   startEmailFlow,
   handleConfirmReply,
   handleBusinessCard,
+  handleFileAttachment,
   getDraftSession,
 } from "@/lib/email/flow";
 import {
@@ -52,6 +53,7 @@ interface LineMessage {
   id: string;
   type: string;
   text: string;
+  fileName?: string; // ファイルメッセージのファイル名（type === "file"）
   quotedMessageId?: string; // 引用リプライのとき、引用元メッセージのID
   mention?: {
     mentionees: LineMentionee[];
@@ -109,6 +111,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // 続く「この人にメール送って」等で宛先として使われる。
     if (event.message.type === "image") {
       await handleBusinessCard(event.message.id, source, replyToken);
+      continue;
+    }
+
+    // ファイル（PDF等）→ 「添付候補」として保存する。
+    // 続く「この資料を〇〇さんに送って」等でメールに添付される。
+    if (event.message.type === "file") {
+      await handleFileAttachment(
+        event.message.id,
+        event.message.fileName ?? "file",
+        source,
+        replyToken
+      );
       continue;
     }
 

@@ -81,21 +81,26 @@ export function resolveSender(hint?: string): SenderAccount | null {
 
   const h = (hint ?? "").trim().toLowerCase();
   if (h) {
-    // 1) メールアドレス完全一致
+    // 完全一致を最優先（ゆるい部分一致より前に判定する。
+    // 例: 会社の表示名が「MDNEXT 下村」でも、"下村"はラベル完全一致の下村口座を選ぶ）
     const byEmail = accounts.find((a) => a.email.toLowerCase() === h);
     if (byEmail) return byEmail;
-    // 2) ラベル / 表示名の部分一致
-    const byLabel = accounts.find((a) => {
+    const byLabelExact = accounts.find((a) => a.label.toLowerCase() === h);
+    if (byLabelExact) return byLabelExact;
+    const byNameExact = accounts.find((a) => a.name.toLowerCase() === h);
+    if (byNameExact) return byNameExact;
+    // ゆるい一致（ラベル→ローカル部→表示名の順）
+    const byLabelLoose = accounts.find((a) => {
       const lab = a.label.toLowerCase();
-      const nm = a.name.toLowerCase();
-      return lab.includes(h) || h.includes(lab) || nm.includes(h);
+      return lab.includes(h) || h.includes(lab);
     });
-    if (byLabel) return byLabel;
-    // 3) メールのローカル部分に含まれる（例: "shimomura"）
+    if (byLabelLoose) return byLabelLoose;
     const byLocal = accounts.find((a) =>
       a.email.toLowerCase().split("@")[0].includes(h)
     );
     if (byLocal) return byLocal;
+    const byName = accounts.find((a) => a.name.toLowerCase().includes(h));
+    if (byName) return byName;
   }
 
   return accounts[0]; // 既定
@@ -146,26 +151,41 @@ function loadSignatures(): Record<string, SignaturePersona> {
 }
 
 // 署名ヒント（「社長名義で」「下村の署名で」等）から署名ペルソナを決める。
-// 1) 署名専用ペルソナ（GMAIL_SIGNATURES） 2) 送信アカウントの署名 の順に探す。
+// 署名専用ペルソナ（GMAIL_SIGNATURES）＋各送信アカウントの署名を候補にし、
+// 完全一致（ラベル→表示名）を部分一致より優先する。
 export function resolveSignature(hint?: string): SignaturePersona | null {
   const h = (hint ?? "").trim().toLowerCase();
   if (!h) return null;
 
+  const candidates: Array<{ label: string; persona: SignaturePersona }> = [];
   const sigs = loadSignatures();
   for (const [label, v] of Object.entries(sigs)) {
-    const lab = label.toLowerCase();
-    if (lab.includes(h) || h.includes(lab) || v.name.toLowerCase().includes(h)) {
-      return v;
+    candidates.push({ label, persona: v });
+  }
+  for (const a of loadSenderAccounts()) {
+    if (a.signature) {
+      candidates.push({
+        label: a.label,
+        persona: { name: a.name, signature: a.signature },
+      });
     }
   }
 
-  // 送信アカウント側の署名を流用（例: 下村アカウントの署名で会社アドレスから送る）
-  const accounts = loadSenderAccounts();
-  const a = accounts.find((x) => {
-    const lab = x.label.toLowerCase();
-    return lab.includes(h) || h.includes(lab) || x.name.toLowerCase().includes(h);
+  const byLabelExact = candidates.find((c) => c.label.toLowerCase() === h);
+  if (byLabelExact) return byLabelExact.persona;
+  const byNameExact = candidates.find(
+    (c) => c.persona.name.toLowerCase() === h
+  );
+  if (byNameExact) return byNameExact.persona;
+  const byLabelLoose = candidates.find((c) => {
+    const lab = c.label.toLowerCase();
+    return lab.includes(h) || h.includes(lab);
   });
-  if (a && a.signature) return { name: a.name, signature: a.signature };
+  if (byLabelLoose) return byLabelLoose.persona;
+  const byName = candidates.find((c) =>
+    c.persona.name.toLowerCase().includes(h)
+  );
+  if (byName) return byName.persona;
 
   return null;
 }

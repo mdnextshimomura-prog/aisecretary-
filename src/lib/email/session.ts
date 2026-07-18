@@ -16,11 +16,19 @@ export interface DraftSession {
   senderLabel: string; // 送信元アカウントのラベル（例: 会社 / 下村）
   senderEmail: string; // 送信元メールアドレス（プレビュー表示用）
   senderName: string; // 送信元表示名
+  // 添付ファイル（LINEのメッセージID＋ファイル名。実体は送信時にLINEから取得）
+  attachments: PendingAttachment[];
   // 再修正時に文面を作り直すための元依頼情報
   purpose: string;
   tone: string;
   subjectHint: string;
   createdAt: number;
+}
+
+// LINEで届いた添付ファイルの参照（実体は保持せず、送信時に取得）
+export interface PendingAttachment {
+  messageId: string;
+  fileName: string;
 }
 
 const TTL_SECONDS = 60 * 30; // 30分で自動失効
@@ -147,4 +155,64 @@ export async function deletePendingRecipient(
     return;
   }
   recMemStore.delete(key);
+}
+
+// ── LINEで届いた添付ファイル（PDF等）を、次のメール指示まで一時保持する ──
+const ATT_PREFIX = "emailattach";
+const attMemStore = new Map<
+  string,
+  { value: PendingAttachment[]; expireAt: number }
+>();
+
+function attKey(groupId: string | undefined, userId: string): string {
+  return `${ATT_PREFIX}:${groupId ?? "direct"}:${userId}`;
+}
+
+export async function getPendingAttachments(
+  groupId: string | undefined,
+  userId: string
+): Promise<PendingAttachment[]> {
+  const key = attKey(groupId, userId);
+  if (kvEnabled()) {
+    return (await kv.get<PendingAttachment[]>(key)) ?? [];
+  }
+  const hit = attMemStore.get(key);
+  if (!hit) return [];
+  if (Date.now() > hit.expireAt) {
+    attMemStore.delete(key);
+    return [];
+  }
+  return hit.value;
+}
+
+// 追加（既存リストに追記）。複数ファイルをまとめて添付できる。
+export async function addPendingAttachment(
+  groupId: string | undefined,
+  userId: string,
+  att: PendingAttachment
+): Promise<number> {
+  const cur = await getPendingAttachments(groupId, userId);
+  const next = [...cur, att];
+  const key = attKey(groupId, userId);
+  if (kvEnabled()) {
+    await kv.set(key, next, { ex: TTL_SECONDS });
+  } else {
+    attMemStore.set(key, {
+      value: next,
+      expireAt: Date.now() + TTL_SECONDS * 1000,
+    });
+  }
+  return next.length;
+}
+
+export async function clearPendingAttachments(
+  groupId: string | undefined,
+  userId: string
+): Promise<void> {
+  const key = attKey(groupId, userId);
+  if (kvEnabled()) {
+    await kv.del(key);
+    return;
+  }
+  attMemStore.delete(key);
 }
