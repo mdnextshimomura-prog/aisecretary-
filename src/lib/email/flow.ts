@@ -1,5 +1,6 @@
 import { sendLineMessage } from "@/lib/line";
 import { resolveRecipient } from "@/lib/contacts";
+import { looksLikeEmailCommand } from "@/lib/intent";
 import {
   extractEmailRequest,
   generateEmailDraft,
@@ -36,6 +37,20 @@ const EMAIL_RE = /[^\s@]+@[^\s@]+\.[^\s@]+/;
 // 「添付して」の意図を表す語（これが指示に含まれるときだけ直近ファイルを添付する）
 const ATTACH_INTENT_RE =
   /資料|ファイル|添付|同封|書類|pdf|付けて|つけて|一緒に送|も送って|これも|それも/i;
+
+// 下書きセッションを「今まさにやり取り中」とみなす時間。
+// これを過ぎた古い下書きは、新しく届いた画像/ファイルを横取りしない
+// （前回のテストの下書きが残っていて、名刺を送った瞬間に勝手に
+//   「送信する？」まで進んでしまった事故の再発防止）。
+const SESSION_ACTIVE_MS = 10 * 60 * 1000;
+
+function isActiveSession(session: DraftSession): boolean {
+  return Date.now() - session.createdAt < SESSION_ACTIVE_MS;
+}
+
+// 「◯◯さんに送って」など、新しい宛先への送付指示らしさの判定（下書き作り直し用）
+const NEW_TARGET_RE = /名刺|さんに|様に|宛てに|宛に|先方に|お客様に/;
+const SEND_WORD_RE = /送っ|送付|送信|お送り|送る|送り/;
 
 const CANCEL_PHRASES = [
   "キャンセル",
@@ -267,11 +282,34 @@ export async function handleConfirmReply(
     return;
   }
 
+  // 新しいメール指示が来たら、残っていた下書きを破棄して最初から作り直す。
+  // （前回の下書きが残ったまま、新しい依頼が古い下書きの「修正」扱いに
+  //   なってしまうのを防ぐ。宛先未解決中の「名刺で」等の弱い言及は、
+  //   下では既存下書きへの宛先補完として扱うため作り直さない）
+  const wantsNewMail =
+    looksLikeEmailCommand(text) ||
+    (Boolean(session.toEmail) &&
+      SEND_WORD_RE.test(compact) &&
+      NEW_TARGET_RE.test(compact));
+  if (wantsNewMail) {
+    // 旧下書きに載っていた添付ファイルは失わないよう、添付候補に戻してから作り直す
+    for (const a of session.attachments) {
+      await addPendingAttachment(source.groupId, source.userId, a);
+    }
+    await deleteDraftSession(source.groupId, source.userId);
+    await startEmailFlow(text, source, replyToken);
+    return;
+  }
+
   // 宛先が未解決のとき、返信にメールアドレスが含まれていれば補完する
   if (!session.toEmail) {
     const m = text.match(EMAIL_RE);
     if (m) {
-      const updated: DraftSession = { ...session, toEmail: m[0] };
+      const updated: DraftSession = {
+        ...session,
+        toEmail: m[0],
+        createdAt: Date.now(),
+      };
       await saveDraftSession(source.groupId, source.userId, updated);
       await sendLineMessage(replyToken, buildPreview(updated));
       return;
@@ -284,6 +322,7 @@ export async function handleConfirmReply(
         ...session,
         toName: fromCard.name,
         toEmail: fromCard.email,
+        createdAt: Date.now(),
       };
       await saveDraftSession(source.groupId, source.userId, updated);
       await sendLineMessage(
@@ -368,7 +407,11 @@ export async function handleConfirmReply(
         ),
       ];
       await clearPendingAttachments(source.groupId, source.userId);
-      const updated: DraftSession = { ...session, attachments: merged };
+      const updated: DraftSession = {
+        ...session,
+        attachments: merged,
+        createdAt: Date.now(),
+      };
       await saveDraftSession(source.groupId, source.userId, updated);
       await sendLineMessage(
         replyToken,
@@ -397,6 +440,7 @@ export async function handleConfirmReply(
       ...session,
       subject: draft.subject,
       body: draft.body,
+      createdAt: Date.now(),
     };
     await saveDraftSession(source.groupId, source.userId, updated);
     await sendLineMessage(replyToken, buildPreview(updated));
@@ -467,11 +511,12 @@ async function fillRecipientFromCard(
     ...session,
     toName: card.name || card.company || card.email,
     toEmail: card.email,
+    createdAt: Date.now(), // やり取り中とみなす期限を延長
   };
   await saveDraftSession(source.groupId, source.userId, updated);
   await sendLineMessage(
     replyToken,
-    `📇 名刺から宛先を設定しました。\n\n${buildPreview(updated)}`
+    `📇 作成途中のメール下書きに、名刺から宛先を設定しました。\n（この下書きが不要な場合は「キャンセル」と返信してください）\n\n${buildPreview(updated)}`
   );
   return true;
 }
@@ -486,7 +531,7 @@ export async function handleIncomingImage(
   replyToken: string
 ): Promise<void> {
   const session = await getDraftSession(source.groupId, source.userId);
-  if (session && !session.toEmail) {
+  if (session && isActiveSession(session) && !session.toEmail) {
     const ok = await fillRecipientFromCard(messageId, source, replyToken, session);
     if (!ok) {
       await sendLineMessage(
@@ -515,7 +560,7 @@ export async function handleIncomingFile(
 ): Promise<void> {
   const name = fileName || "file";
   const session = await getDraftSession(source.groupId, source.userId);
-  if (session) {
+  if (session && isActiveSession(session)) {
     if (!session.toEmail) {
       const ok = await fillRecipientFromCard(messageId, source, replyToken, session);
       if (ok) return; // 名刺PDFとして宛先に使ったので、添付候補には入れない
