@@ -7,7 +7,7 @@ import {
 } from "./draft";
 import { sendGmail, type EmailAttachment } from "./send";
 import { resolveSender, getSenderByLabel, resolveSignature } from "./accounts";
-import { fetchLineImage, readBusinessCard } from "./card";
+import { fetchLineContent, readContactFromContent } from "./card";
 import { fetchLineFileBuffer } from "./attachments";
 import {
   saveDraftSession,
@@ -29,23 +29,6 @@ export interface MessageSource {
 
 const EMAIL_RE = /[^\s@]+@[^\s@]+\.[^\s@]+/;
 
-// 確認セッション中の「送信」意図。空白除去後に部分一致で判定（既存 isCancelIntent と同方式）。
-const SEND_PHRASES = [
-  "送信",
-  "送って",
-  "おくって",
-  "これで送",
-  "これでok",
-  "これでOK",
-  "これでいい",
-  "オッケー",
-  "おっけー",
-  "おk",
-  "ok",
-  "了解",
-  "お願いします",
-  "お願い",
-];
 const CANCEL_PHRASES = [
   "キャンセル",
   "取り消",
@@ -61,6 +44,70 @@ const CANCEL_PHRASES = [
 function hitsAny(compact: string, phrases: string[]): boolean {
   const lower = compact.toLowerCase();
   return phrases.some((p) => lower.includes(p.toLowerCase()));
+}
+
+// ── 誤送信防止：確認返信が「純粋に送信の合図だけ」か判定する ──
+// 少しでも修正指示や他の内容が混ざっていたら false を返し、送信ではなく
+// 「修正 → 下書きを作り直して再確認」に回す。
+// 例:「送信」「OK」「これで送信」→ 送信 / 「丁寧にして送って」→ 修正（送信しない）
+const SEND_WORDS = [
+  "送信して",
+  "送信",
+  "送ってください",
+  "送って",
+  "おくって",
+  "そうしん",
+  "ok",
+  "おk",
+  "おっけー",
+  "オッケー",
+  "了解です",
+  "了解",
+  "りょうかい",
+  "お願いします",
+  "おねがいします",
+  "お願い",
+  "おねがい",
+  "はい",
+  "うん",
+  "よし",
+  "👍",
+  "🆗",
+];
+const SEND_FILLERS = [
+  "これで",
+  "それで",
+  "じゃあ",
+  "もう",
+  "この内容で",
+  "この内容",
+  "以上で",
+  "以上",
+  "ください",
+  "下さい",
+  "です",
+  "でお願いします",
+  "でお願い",
+  "で",
+  "ね",
+  "よ",
+];
+
+function isPureSendConfirmation(text: string): boolean {
+  // 記号・空白を除去
+  let s = text.toLowerCase().replace(/[\s、。，．,.！!？?〜~・「」]/g, "");
+  if (!s) return false;
+  for (const f of SEND_FILLERS) s = s.split(f.toLowerCase()).join("");
+  // 送信語を長い順に全部除去し、送信語が1つでも有って残りが空なら「純粋な送信」
+  let hadSend = false;
+  for (const w of [...SEND_WORDS].sort((a, b) => b.length - a.length)) {
+    const wl = w.toLowerCase();
+    if (s.includes(wl)) {
+      hadSend = true;
+      s = s.split(wl).join("");
+    }
+  }
+  return hadSend && s.length === 0;
 }
 
 // 署名テンプレの {name}（名前の差し込み口）に署名者名を入れる。
@@ -220,8 +267,8 @@ export async function handleConfirmReply(
     }
   }
 
-  // 送信
-  if (hitsAny(compact, SEND_PHRASES)) {
+  // 送信（「純粋に送信の合図だけ」のときのみ。修正指示が混ざっていたら送信しない）
+  if (isPureSendConfirmation(text)) {
     if (!session.toEmail) {
       await sendLineMessage(
         replyToken,
@@ -314,38 +361,28 @@ export async function handleConfirmReply(
   }
 }
 
-// 画像（名刺）を受け取り、連絡先を読み取って「宛先候補」として保存する。
-// この後の「この人にメール送って」等で、その連絡先が宛先に使われる。
-export async function handleBusinessCard(
+// 名刺情報を「宛先候補」として保存する共通処理。読めた名刺（or null）を返す。
+async function tryReadAndSaveCard(
   messageId: string,
-  source: MessageSource,
-  replyToken: string
-): Promise<void> {
-  const img = await fetchLineImage(messageId);
-  if (!img) {
-    await sendLineMessage(
-      replyToken,
-      "⚠️ 画像を取得できませんでした。もう一度送ってみてください。"
-    );
-    return;
-  }
-
+  source: MessageSource
+): Promise<{
+  isBusinessCard: boolean;
+  name: string;
+  company: string | null;
+  title: string | null;
+  email: string | null;
+  phone: string | null;
+} | null> {
+  const content = await fetchLineContent(messageId);
+  if (!content) return null;
   let card;
   try {
-    card = await readBusinessCard(img.base64, img.mediaType);
+    card = await readContactFromContent(content.base64, content.contentType);
   } catch (err) {
     console.error("名刺読み取りエラー:", err);
-    await sendLineMessage(
-      replyToken,
-      "⚠️ 画像の読み取りに失敗しました。文字がはっきり写るように撮り直してみてください。"
-    );
-    return;
+    return null;
   }
-
-  if (!card.isBusinessCard || (!card.email && !card.name)) {
-    // 連絡先が読み取れない画像は黙ってスキップ（雑談画像などを誤爆させない）
-    return;
-  }
+  if (!card.isBusinessCard || (!card.email && !card.name)) return null;
 
   await savePendingRecipient(source.groupId, source.userId, {
     name: card.name || card.company || "（氏名不明）",
@@ -354,25 +391,51 @@ export async function handleBusinessCard(
     phone: card.phone,
     createdAt: Date.now(),
   });
+  return card;
+}
 
-  const lines = [
-    "📇 名刺を読み取りました。",
+function cardSummaryLines(card: {
+  name: string;
+  title: string | null;
+  company: string | null;
+  email: string | null;
+  phone: string | null;
+}): string[] {
+  return [
     card.name ? `氏名：${card.name}` : null,
     card.title ? `役職：${card.title}` : null,
     card.company ? `会社：${card.company}` : null,
     card.email ? `メール：${card.email}` : "メール：（読み取れず）",
     card.phone ? `電話：${card.phone}` : null,
+  ].filter((l): l is string => Boolean(l));
+}
+
+// 画像（名刺）を受け取り、連絡先を読み取って「宛先候補」として保存する。
+// この後の「この人にメール送って」等で、その連絡先が宛先に使われる。
+export async function handleBusinessCard(
+  messageId: string,
+  source: MessageSource,
+  replyToken: string
+): Promise<void> {
+  const card = await tryReadAndSaveCard(messageId, source);
+  if (!card) {
+    // 連絡先が読み取れない画像は黙ってスキップ（雑談画像などを誤爆させない）
+    return;
+  }
+  const lines = [
+    "📇 名刺を読み取りました。",
+    ...cardSummaryLines(card),
     "",
     card.email
       ? "▶ この方にメールするなら、続けて用件を送ってください（例:「この人に内見のお礼メール送って」）。"
       : "▶ メールアドレスが読み取れませんでした。アドレスが写るように撮り直すか、宛先を文字で教えてください。",
-  ].filter(Boolean);
-
+  ];
   await sendLineMessage(replyToken, lines.join("\n"));
 }
 
 // LINEで届いたファイル（PDF等）を「添付候補」として一時保持する。
-// この後の「これも添付して〇〇さんに送って」等で、そのメールに添付される。
+// さらに、そのファイルが名刺なら連絡先も読み取って「宛先候補」にする
+// （PDF名刺で「この人に送って」に対応。用件で相手を指定すれば添付として扱われる）。
 export async function handleFileAttachment(
   messageId: string,
   fileName: string,
@@ -384,10 +447,29 @@ export async function handleFileAttachment(
     messageId,
     fileName: name,
   });
-  await sendLineMessage(
-    replyToken,
-    `📎 ファイル「${name}」を受け取りました（添付候補 ${count}件）。\n▶ メールに添付するなら、続けて用件を送ってください（例:「この資料を田中さんに送って」）。`
-  );
+
+  // PDF等が名刺なら宛先候補としても読み取る
+  const isPdf = /\.pdf$/i.test(name);
+  const card = isPdf ? await tryReadAndSaveCard(messageId, source) : null;
+
+  const lines = [
+    `📎 ファイル「${name}」を受け取りました（添付候補 ${count}件）。`,
+  ];
+  if (card && card.email) {
+    lines.push("", "📇 このファイルは名刺として連絡先も読み取りました。");
+    lines.push(...cardSummaryLines(card));
+    lines.push(
+      "",
+      "▶「この人に送って」→ この相手にメール（名刺の宛先）",
+      "▶「この資料を〇〇さんに送って」→ 〇〇さん宛にこのPDFを添付"
+    );
+  } else {
+    lines.push(
+      "▶ メールに添付するなら、続けて用件を送ってください（例:「この資料を田中さんに送って」）。"
+    );
+  }
+
+  await sendLineMessage(replyToken, lines.join("\n"));
 }
 
 // webhook から使う: 確認セッションの有無を返す
