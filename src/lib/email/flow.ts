@@ -5,9 +5,10 @@ import {
   generateEmailDraft,
   type EmailRequest,
 } from "./draft";
-import { sendGmail } from "./send";
+import { sendGmail, type EmailAttachment } from "./send";
 import { resolveSender, getSenderByLabel, resolveSignature } from "./accounts";
 import { fetchLineImage, readBusinessCard } from "./card";
+import { fetchLineFileBuffer } from "./attachments";
 import {
   saveDraftSession,
   getDraftSession,
@@ -15,6 +16,9 @@ import {
   getPendingRecipient,
   savePendingRecipient,
   deletePendingRecipient,
+  getPendingAttachments,
+  addPendingAttachment,
+  clearPendingAttachments,
   type DraftSession,
 } from "./session";
 
@@ -81,6 +85,9 @@ function buildPreview(session: DraftSession): string {
     ? `📮 宛先：${session.toName} <${session.toEmail}>`
     : `⚠️ 宛先：${session.toName}（メールアドレス未解決）`;
   const ccLine = session.cc.length ? `📎 CC：${session.cc.join(", ")}` : null;
+  const attachLine = session.attachments.length
+    ? `📎 添付：${session.attachments.map((a) => a.fileName).join(", ")}`
+    : null;
 
   const lines = [
     "✉️ メール下書きを作成しました。内容をご確認ください。",
@@ -88,6 +95,7 @@ function buildPreview(session: DraftSession): string {
     fromLine,
     toLine,
     ccLine,
+    attachLine,
     `件名：${session.subject}`,
     "――――――――――",
     composeFullBody(session),
@@ -131,6 +139,15 @@ export async function startEmailFlow(
     .map((r) => r.email)
     .filter((e): e is string => Boolean(e));
 
+  // 直前にLINEで届いた添付ファイル（PDF等）があれば、このメールに付ける。
+  const attachments = await getPendingAttachments(
+    source.groupId,
+    source.userId
+  );
+  if (attachments.length) {
+    await clearPendingAttachments(source.groupId, source.userId);
+  }
+
   // 送信元アドレス（アカウント）を決める。無指定なら既定＝会社。
   const sender = resolveSender(req.from);
   // 署名（名義）を決める。優先順位:
@@ -165,6 +182,7 @@ export async function startEmailFlow(
     senderLabel: sender?.label ?? "会社",
     senderEmail: sender?.email ?? "",
     senderName,
+    attachments,
     purpose: req.purpose,
     tone: req.tone,
     subjectHint: req.subject_hint,
@@ -214,6 +232,15 @@ export async function handleConfirmReply(
     try {
       // 送信時に差出人アカウントの認証情報をenvから引き当てる（パスワードはKVに置かない）
       const sender = getSenderByLabel(session.senderLabel);
+
+      // 添付ファイルの実体を送信直前にLINEから取得する
+      const attFiles: EmailAttachment[] = [];
+      for (const a of session.attachments) {
+        const buf = await fetchLineFileBuffer(a.messageId);
+        if (buf) attFiles.push({ filename: a.fileName, content: buf });
+      }
+      const droppedAtt = session.attachments.length - attFiles.length;
+
       await sendGmail({
         to: session.toEmail,
         cc: session.cc,
@@ -222,11 +249,19 @@ export async function handleConfirmReply(
         from: sender
           ? { email: sender.email, password: sender.password, name: sender.name }
           : undefined,
+        attachments: attFiles,
       });
       await deleteDraftSession(source.groupId, source.userId);
+      const attNote = attFiles.length
+        ? `\n添付：${attFiles.map((f) => f.filename).join(", ")}`
+        : "";
+      const dropNote =
+        droppedAtt > 0
+          ? `\n⚠️ ${droppedAtt}件の添付は取得できず送信できませんでした。`
+          : "";
       await sendLineMessage(
         replyToken,
-        `📧 送信しました。\n差出人：${session.senderName} <${session.senderEmail}>\n宛先：${session.toName} <${session.toEmail}>\n件名：${session.subject}`
+        `📧 送信しました。\n差出人：${session.senderName} <${session.senderEmail}>\n宛先：${session.toName} <${session.toEmail}>\n件名：${session.subject}${attNote}${dropNote}`
       );
     } catch (err) {
       console.error("メール送信エラー:", err);
@@ -334,6 +369,25 @@ export async function handleBusinessCard(
   ].filter(Boolean);
 
   await sendLineMessage(replyToken, lines.join("\n"));
+}
+
+// LINEで届いたファイル（PDF等）を「添付候補」として一時保持する。
+// この後の「これも添付して〇〇さんに送って」等で、そのメールに添付される。
+export async function handleFileAttachment(
+  messageId: string,
+  fileName: string,
+  source: MessageSource,
+  replyToken: string
+): Promise<void> {
+  const name = fileName || "file";
+  const count = await addPendingAttachment(source.groupId, source.userId, {
+    messageId,
+    fileName: name,
+  });
+  await sendLineMessage(
+    replyToken,
+    `📎 ファイル「${name}」を受け取りました（添付候補 ${count}件）。\n▶ メールに添付するなら、続けて用件を送ってください（例:「この資料を田中さんに送って」）。`
+  );
 }
 
 // webhook から使う: 確認セッションの有無を返す

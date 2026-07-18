@@ -28,12 +28,18 @@ function makeTransport(email: string, password: string) {
   });
 }
 
+export interface EmailAttachment {
+  filename: string;
+  content: Buffer;
+}
+
 export interface SendEmailInput {
   to: string; // メールアドレス
   cc?: string[]; // メールアドレスの配列
   subject: string;
   body: string; // プレーンテキスト本文
   from?: SenderCredentials; // 差出人。未指定なら既定（会社アカウント）
+  attachments?: EmailAttachment[]; // 添付ファイル
 }
 
 export async function sendGmail(input: SendEmailInput): Promise<string> {
@@ -49,6 +55,10 @@ export async function sendGmail(input: SendEmailInput): Promise<string> {
     cc: input.cc && input.cc.length ? input.cc.join(", ") : undefined,
     subject: input.subject,
     text: input.body, // nodemailerがUTF-8エンコードを自動処理
+    attachments:
+      input.attachments && input.attachments.length
+        ? input.attachments
+        : undefined,
   });
   return info.messageId ?? "";
 }
