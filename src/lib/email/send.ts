@@ -1,41 +1,26 @@
-import { google } from "googleapis";
+import nodemailer from "nodemailer";
 
-// Gmail API でメール送信する。
-// 送信元アカウント（mtnext.proposer@gmail.com）の OAuth2 リフレッシュトークンを使う。
-// スコープは https://www.googleapis.com/auth/gmail.send が必要。
-// calendar.ts と同じ GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET を共用し、
-// リフレッシュトークンだけ GMAIL_REFRESH_TOKEN（無ければ GOOGLE_REFRESH_TOKEN）で切り替える。
+// Gmail の「アプリパスワード」を使って SMTP でメール送信する。
+// 送信元アカウント（GMAIL_SENDER）で2段階認証を有効化し、アプリパスワードを発行して
+// GMAIL_APP_PASSWORD に設定する。OAuth（Google Cloudのプロジェクト・同意画面）は不要。
 
 const SENDER = process.env.GMAIL_SENDER ?? "mdnext.proposer@gmail.com";
+const SENDER_NAME = process.env.GMAIL_SENDER_NAME ?? "MDNEXT";
 
-function getGmailClient() {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-  const refreshToken =
-    process.env.GMAIL_REFRESH_TOKEN ?? process.env.GOOGLE_REFRESH_TOKEN;
-
-  if (!clientId || !clientSecret || !refreshToken) {
+function getTransport() {
+  // アプリパスワードは表示時に空白入りのことがある（例: "abcd efgh ijkl mnop"）ので除去
+  const pass = (process.env.GMAIL_APP_PASSWORD ?? "").replace(/\s/g, "");
+  if (!pass) {
     throw new Error(
-      "Gmail送信の認証情報が未設定です（GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GMAIL_REFRESH_TOKEN）"
+      "Gmailアプリパスワード（GMAIL_APP_PASSWORD）が未設定です"
     );
   }
-
-  const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
-  oauth2.setCredentials({ refresh_token: refreshToken });
-  return google.gmail({ version: "v1", auth: oauth2 });
-}
-
-// 件名の非ASCII対応（RFC 2047 の =?UTF-8?B?...?= エンコード）
-function encodeSubject(subject: string): string {
-  return `=?UTF-8?B?${Buffer.from(subject, "utf-8").toString("base64")}?=`;
-}
-
-function toBase64Url(s: string): string {
-  return Buffer.from(s, "utf-8")
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  return nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    auth: { user: SENDER, pass },
+  });
 }
 
 export interface SendEmailInput {
@@ -46,30 +31,15 @@ export interface SendEmailInput {
 }
 
 export async function sendGmail(input: SendEmailInput): Promise<string> {
-  const gmail = getGmailClient();
-
-  const headers = [
-    `From: ${SENDER}`,
-    `To: ${input.to}`,
-    ...(input.cc && input.cc.length ? [`Cc: ${input.cc.join(", ")}`] : []),
-    `Subject: ${encodeSubject(input.subject)}`,
-    "MIME-Version: 1.0",
-    'Content-Type: text/plain; charset="UTF-8"',
-    "Content-Transfer-Encoding: base64",
-  ];
-
-  // 本文もbase64にして、日本語や長い行での崩れを防ぐ
-  const rawMessage =
-    headers.join("\r\n") +
-    "\r\n\r\n" +
-    Buffer.from(input.body, "utf-8").toString("base64");
-
-  const res = await gmail.users.messages.send({
-    userId: "me",
-    requestBody: { raw: toBase64Url(rawMessage) },
+  const transport = getTransport();
+  const info = await transport.sendMail({
+    from: `${SENDER_NAME} <${SENDER}>`,
+    to: input.to,
+    cc: input.cc && input.cc.length ? input.cc.join(", ") : undefined,
+    subject: input.subject,
+    text: input.body, // nodemailerがUTF-8エンコードを自動処理
   });
-
-  return res.data.id ?? "";
+  return info.messageId ?? "";
 }
 
 export function getSenderAddress(): string {
