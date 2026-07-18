@@ -142,10 +142,28 @@ function applyName(sig: string, name: string): string {
   return sig.replace(/^.*\{name\}.*\n?/gm, "");
 }
 
-// 本文＋署名を連結した「送信される最終テキスト」を作る
+// 本文冒頭に付ける宛名ブロック（会社名（屋号）／役職 氏名 様）を作る。
+// 名刺から読み取った情報があれば正式なビジネスメールの宛名になる。
+// 宛先名が無い・メールアドレスそのままの場合は付けない。
+function recipientHeader(session: DraftSession): string {
+  const name = (session.toName ?? "").trim().replace(/(様|さま|さん)$/, "");
+  if (!name || EMAIL_RE.test(name)) return "";
+  const org = (session.toCompany ?? "").trim();
+  // 個人名が読めず会社名しか無い場合は「◯◯ 御中」
+  if (org && org === name) return `${org} 御中`;
+  const title = (session.toTitle ?? "").trim();
+  const lines: string[] = [];
+  if (org) lines.push(org);
+  lines.push(`${title ? `${title}　` : ""}${name} 様`);
+  return lines.join("\n");
+}
+
+// 宛名＋本文＋署名を連結した「送信される最終テキスト」を作る
 function composeFullBody(session: DraftSession): string {
+  const header = recipientHeader(session);
   const sig = (session.signature ?? "").trim();
-  return sig ? `${session.body}\n\n${sig}` : session.body;
+  const core = header ? `${header}\n\n${session.body}` : session.body;
+  return sig ? `${core}\n\n${sig}` : core;
 }
 
 // 下書きプレビューのLINEメッセージを組み立てる
@@ -189,6 +207,8 @@ export async function startEmailFlow(
 
   let toName = "";
   let toEmail: string | null = null;
+  let toCompany: string | null = null;
+  let toTitle: string | null = null;
   const toResolved = resolveRecipient(req.to);
   toName = toResolved.name;
   toEmail = toResolved.email;
@@ -201,6 +221,8 @@ export async function startEmailFlow(
     if (fromCard) {
       toName = fromCard.name;
       toEmail = fromCard.email;
+      toCompany = fromCard.company;
+      toTitle = fromCard.title;
     }
   }
 
@@ -248,6 +270,8 @@ export async function startEmailFlow(
   const session: DraftSession = {
     toName,
     toEmail,
+    toCompany,
+    toTitle,
     cc: ccResolved,
     subject: draft.subject,
     body: draft.body,
@@ -322,6 +346,8 @@ export async function handleConfirmReply(
         ...session,
         toName: fromCard.name,
         toEmail: fromCard.email,
+        toCompany: fromCard.company,
+        toTitle: fromCard.title,
         createdAt: Date.now(),
       };
       await saveDraftSession(source.groupId, source.userId, updated);
@@ -453,13 +479,34 @@ export async function handleConfirmReply(
   }
 }
 
+// 名刺の読み取り結果から、下書きに入れる宛先フィールドを組み立てる。
+// 屋号があれば「会社名（屋号）」の形にまとめる（宛名ブロックで使う）。
+function contactFields(card: CardContact): {
+  toName: string;
+  toCompany: string | null;
+  toTitle: string | null;
+} {
+  const company =
+    card.company && card.tradeName
+      ? `${card.company}（${card.tradeName}）`
+      : card.company ?? card.tradeName;
+  return {
+    toName: card.name || company || card.email || "",
+    toCompany: company,
+    toTitle: card.title,
+  };
+}
+
 // 直近に届いた画像/PDFのリストを名刺として読み、宛先を解決する。
 // 画像を優先（名刺は画像で届くことが多い）、新しいものから最大3件まで試す。
 // 物件資料PDFなど「名刺でないもの」は isBusinessCard=false で自然にスキップされる。
 // 試し終えたら控えは消費する（再送されれば再登録されるので詰まらない）。
-async function resolveRecipientFromMedia(
-  source: MessageSource
-): Promise<{ name: string; email: string } | null> {
+async function resolveRecipientFromMedia(source: MessageSource): Promise<{
+  name: string;
+  email: string;
+  company: string | null;
+  title: string | null;
+} | null> {
   const list = await getPendingMediaList(source.groupId, source.userId);
   if (!list.length) return null;
   const ordered = [...list].reverse(); // 新しい順
@@ -470,9 +517,12 @@ async function resolveRecipientFromMedia(
     const card = await readCardFromMedia(m.messageId);
     if (card?.email) {
       await clearPendingMedia(source.groupId, source.userId);
+      const f = contactFields(card);
       return {
-        name: card.name || card.company || card.email,
+        name: f.toName,
         email: card.email,
+        company: f.toCompany,
+        title: f.toTitle,
       };
     }
   }
@@ -507,10 +557,13 @@ async function fillRecipientFromCard(
 ): Promise<boolean> {
   const card = await readCardFromMedia(messageId);
   if (!card?.email) return false;
+  const f = contactFields(card);
   const updated: DraftSession = {
     ...session,
-    toName: card.name || card.company || card.email,
+    toName: f.toName,
     toEmail: card.email,
+    toCompany: f.toCompany,
+    toTitle: f.toTitle,
     createdAt: Date.now(), // やり取り中とみなす期限を延長
   };
   await saveDraftSession(source.groupId, source.userId, updated);
