@@ -7,7 +7,11 @@ import {
 } from "./draft";
 import { sendGmail, type EmailAttachment } from "./send";
 import { resolveSender, getSenderByLabel, resolveSignature } from "./accounts";
-import { fetchLineContent, readContactFromContent } from "./card";
+import {
+  fetchLineContent,
+  readContactFromContent,
+  type CardContact,
+} from "./card";
 import { fetchLineFileBuffer } from "./attachments";
 import {
   saveDraftSession,
@@ -365,14 +369,7 @@ export async function handleConfirmReply(
 async function tryReadAndSaveCard(
   messageId: string,
   source: MessageSource
-): Promise<{
-  isBusinessCard: boolean;
-  name: string;
-  company: string | null;
-  title: string | null;
-  email: string | null;
-  phone: string | null;
-} | null> {
+): Promise<CardContact | null> {
   const content = await fetchLineContent(messageId);
   if (!content) return null;
   let card;
@@ -398,6 +395,7 @@ function cardSummaryLines(card: {
   name: string;
   title: string | null;
   company: string | null;
+  tradeName: string | null;
   email: string | null;
   phone: string | null;
 }): string[] {
@@ -405,6 +403,7 @@ function cardSummaryLines(card: {
     card.name ? `氏名：${card.name}` : null,
     card.title ? `役職：${card.title}` : null,
     card.company ? `会社：${card.company}` : null,
+    card.tradeName ? `屋号：${card.tradeName}` : null,
     card.email ? `メール：${card.email}` : "メール：（読み取れず）",
     card.phone ? `電話：${card.phone}` : null,
   ].filter((l): l is string => Boolean(l));
