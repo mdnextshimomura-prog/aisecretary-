@@ -8,6 +8,10 @@ import { kv } from "@vercel/kv";
 export interface DraftSession {
   toName: string; // 宛先の表示名（未解決なら生テキスト）
   toEmail: string | null; // 解決済みメールアドレス。未解決は null（送信不可）
+  // 名刺から読み取った相手の情報（本文冒頭の宛名ブロックに使う）。
+  // 旧セッションには無いフィールドなので、読む側は undefined も許容すること。
+  toCompany?: string | null; // 会社名（屋号があれば「会社名（屋号）」）
+  toTitle?: string | null; // 役職
   cc: string[]; // 解決済みCCアドレス
   subject: string;
   body: string; // 本文（署名は含まない。プレビュー・送信時に signature を連結）
