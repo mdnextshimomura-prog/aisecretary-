@@ -6,7 +6,7 @@ import { google } from "googleapis";
 // calendar.ts と同じ GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET を共用し、
 // リフレッシュトークンだけ GMAIL_REFRESH_TOKEN（無ければ GOOGLE_REFRESH_TOKEN）で切り替える。
 
-const SENDER = process.env.GMAIL_SENDER ?? "mtnext.proposer@gmail.com";
+const SENDER = process.env.GMAIL_SENDER ?? "mdnext.proposer@gmail.com";
 
 function getGmailClient() {
   const clientId = process.env.GOOGLE_CLIENT_ID;
