@@ -13,6 +13,7 @@ export interface SenderAccount {
   email: string;
   password: string; // アプリパスワード（空白除去済み）
   name: string; // 差出人表示名（署名にも使う）
+  signature: string; // メール末尾の署名ブロック（会社名・役職氏名・住所・電話等）
 }
 
 function stripPw(s: string): string {
@@ -28,8 +29,15 @@ export function loadSenderAccounts(): SenderAccount[] {
   const defPass = stripPw(process.env.GMAIL_APP_PASSWORD ?? "");
   const defLabel = process.env.GMAIL_DEFAULT_LABEL ?? "会社";
   const defName = process.env.GMAIL_SENDER_NAME ?? defLabel;
+  const defSig = process.env.GMAIL_DEFAULT_SIGNATURE ?? "";
   if (defEmail && defPass) {
-    list.push({ label: defLabel, email: defEmail, password: defPass, name: defName });
+    list.push({
+      label: defLabel,
+      email: defEmail,
+      password: defPass,
+      name: defName,
+      signature: defSig,
+    });
   }
 
   // 追加の差出人
@@ -38,7 +46,7 @@ export function loadSenderAccounts(): SenderAccount[] {
     try {
       const obj = JSON.parse(raw) as Record<
         string,
-        { email?: string; password?: string; name?: string }
+        { email?: string; password?: string; name?: string; signature?: string }
       >;
       for (const [label, v] of Object.entries(obj)) {
         if (v?.email && v?.password) {
@@ -47,6 +55,7 @@ export function loadSenderAccounts(): SenderAccount[] {
             email: v.email,
             password: stripPw(v.password),
             name: v.name || label,
+            signature: v.signature || "",
           });
         }
       }

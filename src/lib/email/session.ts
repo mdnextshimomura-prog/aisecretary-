@@ -10,7 +10,8 @@ export interface DraftSession {
   toEmail: string | null; // 解決済みメールアドレス。未解決は null（送信不可）
   cc: string[]; // 解決済みCCアドレス
   subject: string;
-  body: string;
+  body: string; // 本文（署名は含まない。プレビュー・送信時に signature を連結）
+  signature: string; // 差出人の署名ブロック
   // 差出人（送信元）。パスワードはKVに保存せず、送信時にlabelからenvで引き当てる。
   senderLabel: string; // 送信元アカウントのラベル（例: 会社 / 下村）
   senderEmail: string; // 送信元メールアドレス（プレビュー表示用）
@@ -82,4 +83,68 @@ export async function deleteDraftSession(
     return;
   }
   memStore.delete(key);
+}
+
+// ── 名刺などから読み取った「宛先候補」を一時保持する（画像→次の指示で使う） ──
+export interface PendingRecipient {
+  name: string; // 氏名（会社名を含めても可）
+  email: string | null;
+  company: string | null;
+  phone: string | null;
+  createdAt: number;
+}
+
+const REC_PREFIX = "emailrecipient";
+const recMemStore = new Map<
+  string,
+  { value: PendingRecipient; expireAt: number }
+>();
+
+function recKey(groupId: string | undefined, userId: string): string {
+  return `${REC_PREFIX}:${groupId ?? "direct"}:${userId}`;
+}
+
+export async function savePendingRecipient(
+  groupId: string | undefined,
+  userId: string,
+  recipient: PendingRecipient
+): Promise<void> {
+  const key = recKey(groupId, userId);
+  if (kvEnabled()) {
+    await kv.set(key, recipient, { ex: TTL_SECONDS });
+    return;
+  }
+  recMemStore.set(key, {
+    value: recipient,
+    expireAt: Date.now() + TTL_SECONDS * 1000,
+  });
+}
+
+export async function getPendingRecipient(
+  groupId: string | undefined,
+  userId: string
+): Promise<PendingRecipient | null> {
+  const key = recKey(groupId, userId);
+  if (kvEnabled()) {
+    return (await kv.get<PendingRecipient>(key)) ?? null;
+  }
+  const hit = recMemStore.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expireAt) {
+    recMemStore.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+export async function deletePendingRecipient(
+  groupId: string | undefined,
+  userId: string
+): Promise<void> {
+  const key = recKey(groupId, userId);
+  if (kvEnabled()) {
+    await kv.del(key);
+    return;
+  }
+  recMemStore.delete(key);
 }
