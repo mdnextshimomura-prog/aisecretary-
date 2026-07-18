@@ -6,7 +6,11 @@ import { Client } from "@notionhq/client";
 //   コマンド検知 → Claudeで連絡先・状況を柔軟に抽出 → CRM_顧客へページ作成）
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const notion = new Client({ auth: process.env.NOTION_API_KEY });
+// CRM系DBは専用インテグレーション（CRM_NOTION_TOKEN）で共有されている場合がある。
+// あればそちらを優先し、無ければタスク用のNOTION_API_KEYで接続する。
+const notion = new Client({
+  auth: process.env.CRM_NOTION_TOKEN ?? process.env.NOTION_API_KEY,
+});
 
 // CRM_顧客データベース（不動産CRM配下）。envで差し替え可能にしつつ既定値を持つ。
 const CRM_DATABASE_ID =
