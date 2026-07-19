@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import CopyBlock from "./CopyBlock";
 
 export const metadata: Metadata = {
   title: "MD NEXT秘書 — 機能ガイド",
@@ -31,12 +32,14 @@ type ChatMsg = {
 type Feature = {
   id: string; // アンカーID（URL の #id）
   tag: string; // 種別ラベル（Mail / Task / CRM ...）
+  nav: string; // 上部タブに出す短い日本語ラベル（切れない長さで）
   tint: string; // アクセント色のCSS変数名
   title: string;
   sub: string;
   card: string; // 目次カードの短い説明
   says?: { label: string; text: string }[]; // 「こう話しかける」例
   points?: { b: string; rest: string }[]; // ポイント（太字リード + 説明）
+  templates?: { label: string; code: string }[]; // コピペで使える雛形
   mechanism?: { title: string; body: string; link?: { href: string; label: string } };
   note?: string;
   chat: ChatMsg[];
@@ -48,10 +51,25 @@ const FEATURES: Feature[] = [
   {
     id: "email",
     tag: "Mail",
+    nav: "メール",
     tint: "--t-mail",
     title: "メールを作って送る",
     card: "「◯◯さんにメール送って」で下書き作成 →「送信」で確定。",
     sub: "「メール送って」と伝えるだけ。宛名・名乗り・本文・署名まで整えた下書きを出し、あなたが「送信」と返して初めて送られます。",
+    templates: [
+      {
+        label: "基本形（宛先・用件を指定）",
+        code: "［会社名］の［お名前］さんに、［用件］の件でメールを送っておいて。",
+      },
+      {
+        label: "差出人・名義を指定して送る",
+        code: "会社のアドレスから、社長名義で［用件］のお礼メールを送って。",
+      },
+      {
+        label: "返信をお願いする",
+        code: "［お名前］さんに、［内容］の件でメールで返信して。丁寧めのトーンで。",
+      },
+    ],
     says: [
       {
         label: "例1・ふつうに依頼",
@@ -105,11 +123,22 @@ const FEATURES: Feature[] = [
   {
     id: "card",
     tag: "Card",
+    nav: "名刺送付",
     tint: "--t-card",
     title: "名刺から宛先を読む・資料を添付する",
     card: "名刺の写真/PDFを送って「この方に送って」。宛先入力は不要。",
     sub: "名刺の写真やPDFを送っておき、「この名刺の方に送って」と言うだけ。宛先の入力は不要です。資料PDFも一緒に添付できます。",
     reversed: true,
+    templates: [
+      {
+        label: "名刺＋資料を送ったあとに（この一言）",
+        code: "この名刺の方に、この資料を送っておいて。",
+      },
+      {
+        label: "名刺だけ送って宛先にする",
+        code: "この名刺の方に、［用件］の件でメールを送って。",
+      },
+    ],
     points: [
       { b: "名刺（写真 or PDF）を送る", rest: "→ 秘書は黙って控えます（毎回は反応しません）。" },
       { b: "資料PDFも送る", rest: "続けて送るだけ。" },
@@ -138,10 +167,21 @@ const FEATURES: Feature[] = [
   {
     id: "task",
     tag: "Task",
+    nav: "タスク",
     tint: "--t-task",
     title: "タスクを登録する",
     card: "「◯◯を明日までに」でNotionに担当・期日つきで登録。",
     sub: "やることを普通に書くだけ。秘書が「これはタスクだ」と判断し、担当者・期日つきでNotionに登録します。@メンションで担当者を指定できます。",
+    templates: [
+      {
+        label: "担当と期日を指定",
+        code: "@［担当者］ ［やること］を［期日：明日15時 など］までにお願い。",
+      },
+      {
+        label: "案件名つきで登録",
+        code: "［物件名・案件］の［作業内容］、［期日］までにやっておいて。",
+      },
+    ],
     says: [
       {
         label: "例・担当と期日つき",
@@ -186,11 +226,22 @@ const FEATURES: Feature[] = [
   {
     id: "crm",
     tag: "CRM",
+    nav: "顧客登録",
     tint: "--t-crm",
     title: "顧客を登録する（CRM）",
     card: "「#新規」に続けて情報を書くと顧客リストへ登録。",
     sub: "紹介客が出たら、#新規 に続けて分かる範囲で情報を書くだけ。連絡先が電話だけ・メールだけ・「まだ聞けてない」でもOK。秘書が読み取って顧客リストに登録します。",
     reversed: true,
+    templates: [
+      {
+        label: "フル項目（全部わかっているとき）",
+        code: "#新規 ［お名前］様／フリガナ：［ヨミ］／電話：［090-0000-0000］／［購入 or 売却］希望／時期：［3ヶ月以内 など］／担当：［有吉 or 杉山］／紹介元：［紹介者名］",
+      },
+      {
+        label: "最小（わかる分だけでOK）",
+        code: "#新規 ［お名前］さん ［電話 or メール］ ［購入/売却などの相談内容］",
+      },
+    ],
     says: [
       {
         label: "合図は #新規",
@@ -225,6 +276,7 @@ const FEATURES: Feature[] = [
   {
     id: "clarify",
     tag: "Assist",
+    nav: "確認フロー",
     tint: "--t-mail",
     title: "迷ったら、秘書が聞いてくれる",
     card: "曖昧な指示のときだけ①〜④で確認。はっきりした指示は自動。",
@@ -341,7 +393,7 @@ export default function OverviewPage() {
           <div className="tb-links">
             {FEATURES.map((f) => (
               <a key={f.id} href={`#${f.id}`}>
-                {f.title.replace(/（.*?）/g, "").split("・")[0].slice(0, 6)}
+                {f.nav}
               </a>
             ))}
             <a href="#start">始め方</a>
@@ -427,6 +479,15 @@ export default function OverviewPage() {
                         </div>
                       ))}
                     </div>
+                  </>
+                )}
+                {f.templates && f.templates.length > 0 && (
+                  <>
+                    <h4>
+                      そのままコピペで使える雛形
+                      <span className="h4-hint">［　］を書き換えて送るだけ</span>
+                    </h4>
+                    <CopyBlock items={f.templates} />
                   </>
                 )}
                 {f.points && f.points.length > 0 && (
@@ -587,15 +648,39 @@ const CSS = `
 
 #hisho .topbar{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
   backdrop-filter:saturate(1.4) blur(10px);border-bottom:1px solid var(--line);}
-#hisho .tb-inner{max-width:1120px;margin:0 auto;padding:11px 24px;display:flex;align-items:center;gap:20px;}
+#hisho .tb-inner{max-width:1120px;margin:0 auto;padding:10px 24px;display:flex;align-items:center;gap:18px;}
 #hisho .brand{display:flex;align-items:center;gap:9px;flex:none;}
 #hisho .bmark{display:inline-flex;line-height:0;filter:drop-shadow(0 2px 4px rgba(31,111,235,.3));}
 #hisho .brand-tx{display:flex;flex-direction:column;line-height:1.05;}
 #hisho .brand-tx b{font-weight:800;font-size:14px;letter-spacing:.01em;}
 #hisho .brand-tx i{font-style:normal;font-size:10.5px;color:var(--muted);font-weight:600;letter-spacing:.06em;}
-#hisho .tb-links{display:flex;gap:6px;margin-left:auto;overflow-x:auto;-webkit-overflow-scrolling:touch;}
-#hisho .tb-links a{font-size:13px;color:var(--muted);font-weight:600;padding:6px 11px;border-radius:8px;white-space:nowrap;transition:background .15s,color .15s;}
+#hisho .tb-links{display:flex;gap:2px;margin-left:auto;min-width:0;overflow-x:auto;-webkit-overflow-scrolling:touch;
+  scrollbar-width:none;-ms-overflow-style:none;
+  -webkit-mask-image:linear-gradient(90deg,transparent 0,#000 12px,#000 calc(100% - 12px),transparent 100%);}
+#hisho .tb-links::-webkit-scrollbar{display:none;}
+#hisho .tb-links a{flex:0 0 auto;font-size:13.5px;color:var(--muted);font-weight:600;padding:7px 12px;border-radius:9px;
+  white-space:nowrap;transition:background .15s,color .15s;}
 #hisho .tb-links a:hover{background:var(--accent-soft);color:var(--accent-ink);}
+@media (max-width:560px){
+  #hisho .brand-tx i{display:none;}
+  #hisho .tb-links a{padding:7px 10px;font-size:13px;}
+}
+/* コピペ雛形ブロック */
+#hisho .h4-hint{font-family:var(--mono);font-size:11px;font-weight:600;color:var(--faint);letter-spacing:.02em;margin-left:10px;text-transform:none;}
+#hisho .tpl{display:flex;flex-direction:column;gap:12px;}
+#hisho .tpl-item{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--surface);box-shadow:var(--shadow);}
+#hisho .tpl-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 10px 9px 14px;
+  background:var(--surface-2);border-bottom:1px solid var(--line);}
+#hisho .tpl-lbl{font-size:12.5px;font-weight:700;color:var(--tint,var(--accent));}
+#hisho .copy-btn{flex:0 0 auto;background:var(--tint,var(--accent));color:#fff;border:0;border-radius:8px;padding:6px 13px;
+  font-size:12px;font-weight:700;cursor:pointer;font-family:var(--jp);white-space:nowrap;transition:opacity .15s,background .15s,transform .1s;}
+#hisho .copy-btn:hover{opacity:.9;}
+#hisho .copy-btn:active{transform:translateY(1px);}
+#hisho .copy-btn.done{background:#06c755;}
+#hisho .copy-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+#hisho .tpl-code{margin:0;padding:13px 15px;font-family:var(--mono);font-size:12.5px;line-height:1.75;color:var(--ink);
+  white-space:pre-wrap;word-break:break-word;overflow-x:auto;}
+#hisho .tpl-code code{font-family:inherit;}
 
 #hisho .hero{position:relative;overflow:hidden;padding:56px 0 60px;background:var(--hero-1);isolation:isolate;}
 #hisho .hero-bg{position:absolute;inset:0;z-index:-1;
