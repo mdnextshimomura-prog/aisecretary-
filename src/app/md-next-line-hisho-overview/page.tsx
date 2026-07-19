@@ -270,6 +270,41 @@ const SAFETY = [
   },
 ];
 
+/* 会社ロゴのスロット。正式ロゴが届いたら、この中身を <img src="/logo.svg" …/> に
+ * 差し替えるだけで全ページ（上部バー・ヒーロー・トーク画面のアイコン）が切り替わります。
+ * 現在は暫定のワードマーク（ブルー系）。 */
+function BrandMark({ size = 34 }: { size?: number }) {
+  return (
+    <span className="bmark" aria-hidden="true" style={{ width: size, height: size }}>
+      <svg viewBox="0 0 40 40" width={size} height={size} role="img">
+        <defs>
+          <linearGradient id="bm-g" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="#3b8bff" />
+            <stop offset="1" stopColor="#1550b3" />
+          </linearGradient>
+        </defs>
+        <rect x="0" y="0" width="40" height="40" rx="11" fill="url(#bm-g)" />
+        <path
+          d="M12 12.5 L19.5 20 L12 27.5"
+          fill="none"
+          stroke="#fff"
+          strokeWidth="3.3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M20.5 12.5 L28 20 L20.5 27.5"
+          fill="none"
+          stroke="#bcd7ff"
+          strokeWidth="3.3"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </span>
+  );
+}
+
 function Bubble({ m }: { m: ChatMsg }) {
   const cls = ["b", m.menu ? "sysmenu" : "", m.file ? "fileb" : ""]
     .filter(Boolean)
@@ -297,8 +332,11 @@ export default function OverviewPage() {
       <nav className="topbar">
         <div className="tb-inner">
           <a href="#top" className="brand">
-            <span className="brand-mark">秘</span>
-            <span>MD NEXT 秘書</span>
+            <BrandMark size={30} />
+            <span className="brand-tx">
+              <b>MD&nbsp;NEXT</b>
+              <i>秘書</i>
+            </span>
           </a>
           <div className="tb-links">
             {FEATURES.map((f) => (
@@ -312,8 +350,16 @@ export default function OverviewPage() {
       </nav>
 
       <header className="hero" id="top">
-        <div className="wrap col">
-          <span className="eyebrow">MD NEXT 秘書 / 社内利用ガイド</span>
+        <div className="hero-bg" aria-hidden="true" />
+        <div className="wrap col hero-inner">
+          <div className="hero-lockup">
+            <BrandMark size={48} />
+            <div className="hl-tx">
+              <b>MD NEXT</b>
+              <span>AI SECRETARY · 秘書</span>
+            </div>
+          </div>
+          <span className="eyebrow">社内利用ガイド / Feature Overview</span>
           <h1>
             LINEに話しかけるだけで、
             <br />
@@ -510,12 +556,13 @@ export default function OverviewPage() {
 
 const CSS = `
 #hisho{
-  --bg:#f4f6f3; --surface:#fff; --surface-2:#eef1ec; --ink:#17201a; --muted:#5b665d;
-  --faint:#8a948b; --line:#dde3dc; --accent:#157a54; --accent-ink:#0d5b3d; --accent-soft:#e2efe8;
-  --chat-bg:#d7e3da; --send:#06c755; --recv:#fff;
-  --shadow:0 1px 2px rgba(20,40,28,.06),0 8px 24px rgba(20,40,28,.06);
-  --shadow-lg:0 4px 12px rgba(20,40,28,.08),0 24px 60px rgba(20,40,28,.12);
-  --t-mail:#157a54; --t-card:#0f7a86; --t-task:#b06a12; --t-crm:#6a4bb0;
+  --bg:#f3f7fd; --surface:#fff; --surface-2:#eaf1fb; --ink:#0c1c33; --muted:#51617a;
+  --faint:#8593a8; --line:#dbe4f2; --accent:#1f6feb; --accent-ink:#134fb0; --accent-soft:#e6effd;
+  --chat-bg:#d9e5f4; --send:#06c755; --recv:#fff;
+  --hero-1:#0a1a33; --hero-2:#123a7a; --hero-3:#1f6feb;
+  --shadow:0 1px 2px rgba(13,40,80,.06),0 8px 24px rgba(13,40,80,.07);
+  --shadow-lg:0 4px 12px rgba(13,40,80,.09),0 24px 60px rgba(13,40,80,.14);
+  --t-mail:#1f6feb; --t-card:#0d97b8; --t-task:#3f57d6; --t-crm:#7a52d9;
   --radius:16px;
   --jp:"Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic","YuGothic","Noto Sans JP","Meiryo",system-ui,sans-serif;
   --mono:ui-monospace,"SF Mono","SFMono-Regular","Menlo","Consolas",monospace;
@@ -524,12 +571,13 @@ const CSS = `
 }
 @media (prefers-color-scheme:dark){
   #hisho{
-    --bg:#10140f; --surface:#181d17; --surface-2:#1f261e; --ink:#e9efe8; --muted:#a3b0a4;
-    --faint:#77857a; --line:#2b332a; --accent:#4fce97; --accent-ink:#7fe0b3; --accent-soft:#16281f;
-    --chat-bg:#10231a; --recv:#232a22;
-    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);
-    --shadow-lg:0 4px 12px rgba(0,0,0,.5),0 24px 60px rgba(0,0,0,.55);
-    --t-mail:#4fce97; --t-card:#43c3d1; --t-task:#e0a54e; --t-crm:#a98fe6;
+    --bg:#070d17; --surface:#0f1826; --surface-2:#152135; --ink:#e6eefb; --muted:#9fb0c9;
+    --faint:#6b7d98; --line:#20304a; --accent:#5c9bff; --accent-ink:#8fbaff; --accent-soft:#12233f;
+    --chat-bg:#0c1728; --recv:#1a2942;
+    --hero-1:#050c18; --hero-2:#0e2a55; --hero-3:#1f6feb;
+    --shadow:0 1px 2px rgba(0,0,0,.5),0 8px 24px rgba(0,0,0,.4);
+    --shadow-lg:0 4px 12px rgba(0,0,0,.55),0 24px 60px rgba(0,0,0,.6);
+    --t-mail:#5c9bff; --t-card:#37c7dd; --t-task:#7b8cf0; --t-crm:#a98cf0;
   }
 }
 #hisho *{box-sizing:border-box;}
@@ -540,23 +588,46 @@ const CSS = `
 #hisho .topbar{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--bg) 88%,transparent);
   backdrop-filter:saturate(1.4) blur(10px);border-bottom:1px solid var(--line);}
 #hisho .tb-inner{max-width:1120px;margin:0 auto;padding:11px 24px;display:flex;align-items:center;gap:20px;}
-#hisho .brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:15px;letter-spacing:-.01em;flex:none;}
-#hisho .brand-mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(145deg,#1f5b3f,#0d3524);
-  color:#eafff3;display:grid;place-items:center;font-size:13px;font-weight:800;}
+#hisho .brand{display:flex;align-items:center;gap:9px;flex:none;}
+#hisho .bmark{display:inline-flex;line-height:0;filter:drop-shadow(0 2px 4px rgba(31,111,235,.3));}
+#hisho .brand-tx{display:flex;flex-direction:column;line-height:1.05;}
+#hisho .brand-tx b{font-weight:800;font-size:14px;letter-spacing:.01em;}
+#hisho .brand-tx i{font-style:normal;font-size:10.5px;color:var(--muted);font-weight:600;letter-spacing:.06em;}
 #hisho .tb-links{display:flex;gap:6px;margin-left:auto;overflow-x:auto;-webkit-overflow-scrolling:touch;}
 #hisho .tb-links a{font-size:13px;color:var(--muted);font-weight:600;padding:6px 11px;border-radius:8px;white-space:nowrap;transition:background .15s,color .15s;}
 #hisho .tb-links a:hover{background:var(--accent-soft);color:var(--accent-ink);}
 
-#hisho .hero{padding:64px 0 24px;}
+#hisho .hero{position:relative;overflow:hidden;padding:56px 0 60px;background:var(--hero-1);isolation:isolate;}
+#hisho .hero-bg{position:absolute;inset:0;z-index:-1;
+  background:
+    radial-gradient(120% 90% at 82% -10%, color-mix(in srgb,var(--hero-3) 55%,transparent) 0%, transparent 55%),
+    radial-gradient(90% 80% at 6% 8%, color-mix(in srgb,var(--hero-2) 80%,transparent) 0%, transparent 60%),
+    linear-gradient(160deg, var(--hero-1) 0%, var(--hero-2) 140%);}
+#hisho .hero-bg::after{content:"";position:absolute;inset:0;
+  background-image:linear-gradient(color-mix(in srgb,#fff 6%,transparent) 1px,transparent 1px),
+    linear-gradient(90deg,color-mix(in srgb,#fff 6%,transparent) 1px,transparent 1px);
+  background-size:52px 52px;mask-image:radial-gradient(120% 80% at 70% 0%,#000 0%,transparent 70%);opacity:.5;}
+#hisho .hero-inner{position:relative;}
+#hisho .hero-lockup{display:flex;align-items:center;gap:14px;margin-bottom:26px;}
+#hisho .hero-lockup .bmark{filter:drop-shadow(0 4px 14px rgba(31,111,235,.5));}
+#hisho .hl-tx{display:flex;flex-direction:column;line-height:1.1;}
+#hisho .hl-tx b{color:#fff;font-weight:800;font-size:19px;letter-spacing:.02em;}
+#hisho .hl-tx span{color:#9fc0f5;font-size:11px;font-family:var(--mono);letter-spacing:.18em;font-weight:600;margin-top:2px;}
+#hisho .hero .eyebrow{color:#8fb8f5;}
+#hisho .hero .eyebrow::before{background:#8fb8f5;}
+#hisho .hero h1{color:#fff;}
+#hisho .hero .lead{color:#c2d3ec;}
 #hisho .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);
   font-weight:600;display:inline-flex;align-items:center;gap:9px;}
 #hisho .eyebrow::before{content:"";width:22px;height:1.5px;background:var(--accent);display:inline-block;}
-#hisho h1{font-size:clamp(30px,5.2vw,50px);line-height:1.18;margin:18px 0 0;font-weight:800;letter-spacing:-.01em;text-wrap:balance;}
+#hisho h1{font-size:clamp(31px,5.4vw,52px);line-height:1.16;margin:18px 0 0;font-weight:800;letter-spacing:-.015em;text-wrap:balance;}
 #hisho .lead{font-size:clamp(16px,2vw,19px);color:var(--muted);margin:20px 0 0;max-width:62ch;}
-#hisho .oneline{margin-top:30px;display:inline-flex;align-items:center;gap:14px;flex-wrap:wrap;background:var(--surface);
-  border:1px solid var(--line);border-radius:999px;padding:11px 20px 11px 15px;box-shadow:var(--shadow);font-weight:600;font-size:15px;}
-#hisho .oneline .dot{width:9px;height:9px;border-radius:50%;background:var(--send);box-shadow:0 0 0 4px color-mix(in srgb,var(--send) 22%,transparent);}
-#hisho .oneline .mono{font-family:var(--mono);font-size:13px;color:var(--muted);font-weight:500;}
+#hisho .oneline{margin-top:30px;display:inline-flex;align-items:center;gap:14px;flex-wrap:wrap;
+  background:color-mix(in srgb,#fff 12%,transparent);color:#eaf1ff;
+  border:1px solid color-mix(in srgb,#fff 22%,transparent);border-radius:999px;padding:11px 20px 11px 15px;
+  backdrop-filter:blur(6px);font-weight:600;font-size:15px;}
+#hisho .oneline .dot{width:9px;height:9px;border-radius:50%;background:var(--send);box-shadow:0 0 0 4px color-mix(in srgb,var(--send) 30%,transparent);}
+#hisho .oneline .mono{font-family:var(--mono);font-size:13px;color:#9fc0f5;font-weight:500;}
 
 #hisho section{padding:46px 0;border-top:1px solid var(--line);scroll-margin-top:64px;}
 #hisho .nav-section{border-top:0;}
@@ -608,14 +679,14 @@ const CSS = `
 #hisho .chat{background:var(--chat-bg);border-radius:20px;overflow:hidden;box-shadow:var(--shadow-lg);border:1px solid var(--line);position:sticky;top:76px;}
 @media (max-width:820px){#hisho .chat{position:static;}}
 #hisho .chat-bar{background:var(--surface);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:11px;padding:12px 16px;}
-#hisho .chat-bar .av{width:30px;height:30px;border-radius:50%;background:linear-gradient(145deg,#1f5b3f,#0d3524);display:grid;place-items:center;color:#eafff3;font-weight:800;font-size:12px;flex:none;}
+#hisho .chat-bar .av{width:30px;height:30px;border-radius:50%;background:linear-gradient(145deg,#3b8bff,#134fb0);display:grid;place-items:center;color:#eaf3ff;font-weight:800;font-size:12px;flex:none;}
 #hisho .chat-bar .nm{font-weight:700;font-size:14px;}
 #hisho .chat-bar .st{font-size:11px;color:var(--faint);margin-left:auto;font-family:var(--mono);letter-spacing:.04em;}
 #hisho .stream{padding:18px 16px 20px;display:flex;flex-direction:column;gap:14px;}
 #hisho .msg{display:flex;gap:9px;max-width:92%;}
 #hisho .msg.in{align-self:flex-start;}
 #hisho .msg.out{align-self:flex-end;flex-direction:row-reverse;}
-#hisho .msg .ava{width:26px;height:26px;border-radius:50%;flex:none;background:linear-gradient(145deg,#1f5b3f,#0d3524);display:grid;place-items:center;color:#eafff3;font-size:10px;font-weight:800;}
+#hisho .msg .ava{width:26px;height:26px;border-radius:50%;flex:none;background:linear-gradient(145deg,#3b8bff,#134fb0);display:grid;place-items:center;color:#eaf3ff;font-size:10px;font-weight:800;}
 #hisho .b{border-radius:15px;padding:9px 13px;font-size:13.5px;line-height:1.6;white-space:pre-line;word-break:normal;overflow-wrap:anywhere;}
 #hisho .msg.in .b{background:var(--recv);color:var(--ink);border-top-left-radius:4px;box-shadow:0 1px 1px rgba(0,0,0,.05);}
 #hisho .msg.out .b{background:var(--send);color:#032b16;border-top-right-radius:4px;font-weight:500;}
