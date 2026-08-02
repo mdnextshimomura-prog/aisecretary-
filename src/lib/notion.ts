@@ -187,6 +187,22 @@ export async function updateTaskAssignee(
   });
 }
 
+// タスクを完了にする。取り消し（archiveTask＝ページごと削除）と違い、
+// 記録を残したまま一覧から外れる。LINEからの「完了」報告で呼ばれる。
+export async function completeTask(pageId: string): Promise<void> {
+  await notion.pages.update({
+    page_id: pageId,
+    properties: {
+      ステータス: { select: { name: "完了" } },
+    },
+  });
+}
+
+// リマインド対象のタスク。
+// 「期日が明日まで」かつ「未完了」。下限を設けていないのは意図的で、
+// 期限を過ぎたタスクも拾うため（以前は on_or_after: 今日 で絞っていたため、
+// 期限切れが二度と通知されず静かに埋もれていた）。
+// 期日の古い順に返すので、呼び出し側で 期限超過／本日／明日 に振り分ける。
 export async function getUpcomingTasks(): Promise<
   Array<{
     id: string;
@@ -198,11 +214,11 @@ export async function getUpcomingTasks(): Promise<
     url: string;
   }>
 > {
-  const todayStr = jstDateStr(0);
   const tomorrowStr = jstDateStr(1);
 
   const response = await notion.databases.query({
     database_id: DATABASE_ID,
+    sorts: [{ property: "期日", direction: "ascending" }],
     filter: {
       and: [
         {
@@ -212,10 +228,6 @@ export async function getUpcomingTasks(): Promise<
         {
           property: "ステータス",
           select: { does_not_equal: "完了" },
-        },
-        {
-          property: "期日",
-          date: { on_or_after: todayStr },
         },
       ],
     },

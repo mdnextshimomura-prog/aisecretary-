@@ -8,6 +8,7 @@ import {
   findTaskByMessageId,
   updateTaskAssignee,
   archiveTask,
+  completeTask,
 } from "@/lib/notion";
 
 // 「これはタスクじゃない／取り消したい」意図の判定（引用リプライ時のみ使用）
@@ -27,6 +28,42 @@ const CANCEL_PHRASES = [
 function isCancelIntent(text: string): boolean {
   const t = text.replace(/\s/g, "");
   return CANCEL_PHRASES.some((p) => t.includes(p));
+}
+
+// 「終わった」意図の判定（引用リプライ時のみ使用）。
+// 取り消し（＝そもそもタスクではなかった）と違い、記録を残したまま完了にする。
+const COMPLETE_PHRASES = [
+  "完了",
+  "完了しました",
+  "終わりました",
+  "おわりました",
+  "終わった",
+  "終了",
+  "済み",
+  "済です",
+  "対応済",
+  "対応しました",
+  "やりました",
+  "done",
+  // 「OK」「了解」は入れない。着手の返事（了解、やります）と区別できないため。
+];
+// 「まだ完了してない」を完了と誤認しないための否定表現
+const NEGATION_PHRASES = [
+  "まだ",
+  "未完了",
+  "未済",
+  "してない",
+  "していない",
+  "できてない",
+  "できていない",
+  "ません",
+  "ないです",
+];
+function isCompleteIntent(text: string): boolean {
+  const t = text.replace(/\s/g, "");
+  if (NEGATION_PHRASES.some((p) => t.includes(p))) return false;
+  const lower = t.toLowerCase();
+  return COMPLETE_PHRASES.some((p) => lower.includes(p.toLowerCase()));
 }
 
 interface LineMentionee {
@@ -106,6 +143,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             );
           } catch (err) {
             console.error("タスク取り消しエラー:", err);
+          }
+          continue;
+        }
+        // (a2) 「完了／終わりました」→ ステータスを完了にする（記録は残す）
+        if (isCompleteIntent(stripMentions(event.message))) {
+          try {
+            await completeTask(task.id);
+            await sendLineMessage(
+              replyToken,
+              `☑️ 完了にしました\n📋 ${task.title}`
+            );
+          } catch (err) {
+            console.error("タスク完了エラー:", err);
+            await sendLineMessage(
+              replyToken,
+              "⚠️ 完了処理中にエラーが発生しました。もう一度お試しください。"
+            );
           }
           continue;
         }
