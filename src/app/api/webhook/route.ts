@@ -9,6 +9,8 @@ import {
   updateTaskAssignee,
   archiveTask,
   completeTask,
+  findTaskByRemindNumber,
+  countRemainingTasks,
 } from "@/lib/notion";
 
 // 「これはタスクじゃない／取り消したい」意図の判定（引用リプライ時のみ使用）
@@ -64,6 +66,39 @@ function isCompleteIntent(text: string): boolean {
   if (NEGATION_PHRASES.some((p) => t.includes(p))) return false;
   const lower = t.toLowerCase();
   return COMPLETE_PHRASES.some((p) => lower.includes(p.toLowerCase()));
+}
+
+// リマインドの番号を指定した完了報告（「3済」「1,2完了」「4おわった」）を解釈する。
+// 誤爆を避けるため、次を全て満たすときだけコマンドとみなす:
+//   ・短い文であること（長文は通常の依頼として扱う）
+//   ・完了を表す語を含むこと（数字だけの「3」には反応しない）
+//   ・否定表現を含まないこと
+// さらに「番号と完了語と区切り文字を取り除いたら、ほぼ何も残らない」ことも条件にする。
+// これが無いと「3件の資料をまとめて明日までに完了させてください」のような
+// 数字と『完了』を含む“依頼文”を、3番の完了報告と誤認してしまう。
+const NUM_COMPLETE_RE = /(済|完了|終わ|おわ|終了|done)/i;
+const NUM_COMPLETE_RE_G = /(済|完了|終わ|おわ|終了|done)/gi;
+const COMMAND_NOISE_RE = /[\d、,，。.・とや&＆\s!！?？「」]/g;
+const MAX_COMMAND_LENGTH = 40;
+const MAX_COMMAND_RESIDUE = 6;
+function parseNumberedCompletion(text: string): number[] | null {
+  // 全角数字（１２３）でも拾えるように半角へ寄せる
+  const normalized = text.replace(/[０-９]/g, (c) =>
+    String.fromCharCode(c.charCodeAt(0) - 0xfee0)
+  );
+  const t = normalized.replace(/\s/g, "");
+  if (t.length === 0 || t.length > MAX_COMMAND_LENGTH) return null;
+  if (NEGATION_PHRASES.some((p) => t.includes(p))) return null;
+  if (!NUM_COMPLETE_RE.test(t)) return null;
+  // 番号・完了語・区切りを除いた残りが長い＝コマンドではなく文章とみなす
+  const residue = t.replace(NUM_COMPLETE_RE_G, "").replace(COMMAND_NOISE_RE, "");
+  if (residue.length > MAX_COMMAND_RESIDUE) return null;
+  // 数字の抽出は空白を残したまま行う。先に空白を削ると「1 2 3」が123になってしまう。
+  const nums = (normalized.match(/\d+/g) ?? [])
+    .map(Number)
+    .filter((n) => n >= 1 && n <= 99);
+  const uniq = nums.filter((n, i) => nums.indexOf(n) === i);
+  return uniq.length > 0 ? uniq : null;
 }
 
 interface LineMentionee {
@@ -123,6 +158,47 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (event.type !== "message" || event.message?.type !== "text") continue;
 
     const replyToken = event.replyToken!;
+
+    // 番号での完了報告（「3済」「1,2完了」）。リマインドを引用しなくても返せるようにする。
+    // 引用リプライより先に判定するのは、番号の指定のほうが対象が明確なため。
+    const numbers = parseNumberedCompletion(stripMentions(event.message));
+    if (numbers) {
+      try {
+        const done: string[] = [];
+        const notFound: number[] = [];
+        for (const n of numbers) {
+          const t = await findTaskByRemindNumber(n);
+          if (!t) {
+            notFound.push(n);
+            continue;
+          }
+          await completeTask(t.id);
+          done.push(`${n}. ${t.title}`);
+        }
+
+        const lines: string[] = [];
+        if (done.length > 0) {
+          lines.push(`☑️ 完了にしました（${done.length}件）`, ...done);
+          const remaining = await countRemainingTasks();
+          lines.push("", remaining > 0 ? `残り${remaining}件です。` : "残りはありません。お疲れさまです。");
+        }
+        if (notFound.length > 0) {
+          if (done.length > 0) lines.push("");
+          lines.push(
+            `⚠️ ${notFound.join("・")}番は見つかりませんでした`,
+            "（完了済みか、直近のリマインドに無い番号です）"
+          );
+        }
+        await sendLineMessage(replyToken, lines.join("\n"));
+      } catch (err) {
+        console.error("番号での完了処理エラー:", err);
+        await sendLineMessage(
+          replyToken,
+          "⚠️ 完了処理中にエラーが発生しました。もう一度お試しください。"
+        );
+      }
+      continue;
+    }
 
     // 引用リプライ → 既存タスクへの操作（取り消し／担当者の後付け・変更）として扱う。
     // 元の依頼メッセージ or Botの「✅タスク登録しました」への引用のどちらでも特定できる。

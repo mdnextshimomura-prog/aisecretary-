@@ -1,4 +1,4 @@
-import { getUpcomingTasks, jstDateStr } from "./notion";
+import { getUpcomingTasks, jstDateStr, setRemindNumber } from "./notion";
 import { pushLineMessageWithMentions, sanitizeForTextV2 } from "./line";
 
 // リマインドの送信先＝会社グループ。反響通知と同じグループに送る。
@@ -45,9 +45,17 @@ export async function sendDailyReminders(): Promise<void> {
   const mentions: Record<string, string> = {}; // {key} -> userId
   let mentionCount = 0;
 
+  // 実際に本文へ載せたタスク（この順に1から番号を振り、番号で完了できるようにする）。
+  // 期限超過は表示を打ち切るため、載らなかった分には番号を振らない
+  // （見えていない番号を指定されても引けないため）。
+  const shown: UpcomingTask[] = [];
+
   // タスク1件を本文に追記し、担当者がメンション可能ならtextV2の置換キーを埋め込む
   const appendTask = (t: UpcomingTask, suffix?: string) => {
-    text += `\n・${sanitizeForTextV2(t.title)}（${suffix ?? t.urgency}）`;
+    shown.push(t);
+    text += `\n${shown.length}. ${sanitizeForTextV2(t.title)}（${
+      suffix ?? t.urgency
+    }）`;
     if (t.assigneeUserId && t.assignee && mentionCount < MAX_MENTIONS) {
       mentionCount += 1;
       const key = `m${mentionCount}`;
@@ -79,6 +87,15 @@ export async function sendDailyReminders(): Promise<void> {
     text += "\n\n【明日期限】";
     for (const t of tomorrowTasks) appendTask(t);
   }
+
+  text +=
+    "\n\n──────────\n" +
+    "終わったものは番号で返信してください\n" +
+    "例：「3済」「1,2完了」「4おわった」";
+
+  // 本文に載せた順で番号を確定させてから送る。
+  // 送信後に番号を振ると、先に返信されたときに引けないため順序が重要。
+  await Promise.all(shown.map((t, i) => setRemindNumber(t.id, i + 1)));
 
   await pushLineMessageWithMentions(LINE_GROUP_ID, text, mentions);
 }

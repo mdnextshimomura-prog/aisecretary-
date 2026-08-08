@@ -198,6 +198,61 @@ export async function completeTask(pageId: string): Promise<void> {
   });
 }
 
+// リマインドに載せた順番（1始まり）を書き込む。
+// これがあることで「3済」のような番号指定で完了にできる。毎回のリマインドで振り直す。
+export async function setRemindNumber(
+  pageId: string,
+  num: number
+): Promise<void> {
+  await notion.pages.update({
+    page_id: pageId,
+    properties: { リマインド番号: { number: num } },
+  });
+}
+
+// リマインド番号からタスクを引く。
+// 「未完了」かつ「期日が明日まで」＝リマインドに載る範囲に限定しているため、
+// 過去に振られた古い番号を誤って拾うことがない（範囲内のタスクは毎回振り直されるため）。
+export async function findTaskByRemindNumber(
+  num: number
+): Promise<{ id: string; title: string } | null> {
+  const response = await notion.databases.query({
+    database_id: DATABASE_ID,
+    page_size: 1,
+    filter: {
+      and: [
+        { property: "リマインド番号", number: { equals: num } },
+        { property: "ステータス", select: { does_not_equal: "完了" } },
+        { property: "期日", date: { on_or_before: jstDateStr(1) } },
+      ],
+    },
+  });
+
+  const page = response.results[0];
+  if (!page) return null;
+  const props =
+    ((page as Record<string, unknown>).properties as Record<string, unknown>) ??
+    {};
+  const titleProp = props["名前"] as
+    | { title: Array<{ plain_text: string }> }
+    | undefined;
+  return { id: page.id, title: titleProp?.title[0]?.plain_text ?? "（無題）" };
+}
+
+// 未完了で残っているタスクの件数（完了報告への返信で「残りN件」を出すのに使う）
+export async function countRemainingTasks(): Promise<number> {
+  const response = await notion.databases.query({
+    database_id: DATABASE_ID,
+    filter: {
+      and: [
+        { property: "期日", date: { on_or_before: jstDateStr(1) } },
+        { property: "ステータス", select: { does_not_equal: "完了" } },
+      ],
+    },
+  });
+  return response.results.length;
+}
+
 // リマインド対象のタスク。
 // 「期日が明日まで」かつ「未完了」。下限を設けていないのは意図的で、
 // 期限を過ぎたタスクも拾うため（以前は on_or_after: 今日 で絞っていたため、
