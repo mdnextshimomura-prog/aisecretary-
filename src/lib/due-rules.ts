@@ -44,8 +44,11 @@ interface Rule {
   time: string;
   /** 返信に出す説明。「〜で設定しました」に続く形で書く */
   label: string;
-  /** 午後に受信したら1日後ろにずらすか（当日納期のものだけ true） */
-  shiftIfAfternoon?: boolean;
+  /**
+   * 当日納期の締切時刻（時）。この時刻以降に受信したら翌日にずらす。
+   * 例: 18 なら「18時までに来た依頼は当日、18時以降は翌日」。
+   */
+  sameDayCutoffHour?: number;
   /** 値が未確定で、実務に合わせて要調整のもの */
   provisional?: boolean;
 }
@@ -68,8 +71,8 @@ const TYPE_RULES: Record<RequestType, Rule> = {
   物件資料: {
     days: 0,
     time: DEFAULT_DUE_TIME,
-    label: "資料作成の標準納期",
-    shiftIfAfternoon: true, // 午前着=当日 / 午後着=翌日
+    label: "資料作成の標準納期（当日）",
+    sameDayCutoffHour: 18, // 18時までの受信は当日、18時以降は翌日（2026-08-08 決定）
   },
 
   // ★要確定 — 実務の感覚に合わせて days / time を調整してください（2026-08-08 時点は暫定値）
@@ -121,10 +124,14 @@ export function resolveDue(
   let days = rule.days;
   let reason = rule.label;
 
-  // 当日納期のものだけ、午後受信なら翌日にずらす（午前中に来た依頼は当日中に返す運用）
-  if (rule.shiftIfAfternoon && days === 0 && receivedAtJst.getUTCHours() >= 12) {
+  // 当日納期のものは、締切時刻を過ぎて受信したら翌日にずらす
+  if (
+    rule.sameDayCutoffHour != null &&
+    days === 0 &&
+    receivedAtJst.getUTCHours() >= rule.sameDayCutoffHour
+  ) {
     days = 1;
-    reason = `${rule.label}・午後受信のため翌日`;
+    reason = `${rule.label}・${rule.sameDayCutoffHour}時以降の受信のため翌日`;
   }
 
   return {
