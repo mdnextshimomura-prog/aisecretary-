@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage } from "@/lib/line";
 import { parseTaskFromMessage, TASK_CONFIDENCE_THRESHOLD } from "@/lib/claude";
+import { resolveDue, DEFAULT_DUE_TIME } from "@/lib/due-rules";
 import { isNewCustomerCommand, handleNewCustomer } from "@/lib/crm";
 import {
   createNotionTask,
@@ -279,10 +280,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     // JST（日本時間）の日時を渡す。UTCのままだと朝9時まで前日扱いになる上、
     // 午前/午後で期日を変えるルールの判定に受信時刻が必要。
-    const today = new Date(Date.now() + 9 * 60 * 60 * 1000)
-      .toISOString()
-      .slice(0, 16)
-      .replace("T", " ");
+    const jstNow = new Date(Date.now() + 9 * 60 * 60 * 1000);
+    const today = jstNow.toISOString().slice(0, 16).replace("T", " ");
 
     // 1. Claude でタスク判定＋解析。解析自体が失敗した発言は雑談扱いで黙ってスキップ。
     let parsed;
@@ -296,6 +295,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // タスクでない、または確信度が低い発言は登録しない（雑談・相槌・報告など）
     if (!parsed.isTask || parsed.confidence < TASK_CONFIDENCE_THRESHOLD) {
       continue;
+    }
+
+    // 期日の確定。メッセージに明示があればそれが最優先、無ければ標準納期表から決める。
+    // Claude に日付を推測させないことで、同じ依頼には必ず同じ期日が出るようにする。
+    if (parsed.dueDate) {
+      parsed.dueTime = parsed.dueTime ?? DEFAULT_DUE_TIME;
+      parsed.dueReason = "メッセージの指定";
+    } else {
+      const decided = resolveDue(parsed.requestType, jstNow, parsed.urgentHint);
+      parsed.dueDate = decided.dueDate;
+      parsed.dueTime = parsed.dueTime ?? decided.dueTime;
+      parsed.urgency = decided.urgency;
+      parsed.dueReason = decided.reason;
     }
 
     // メンションがあれば、その名前を担当者として優先採用（ボット自身のメンションは除く）

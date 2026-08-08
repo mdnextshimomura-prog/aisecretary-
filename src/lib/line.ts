@@ -118,9 +118,12 @@ export function sanitizeForTextV2(s: string): string {
 
 // タスク登録完了メッセージ生成
 export function buildTaskRegisteredMessage(task: ParsedTask): string {
+  // 期日は「いつ・何時まで」と「なぜその日か」をセットで出す。
+  // 根拠を出さないと、自動で決まった期日が納得できず結局Notionを見に行くことになる。
   const dueLine = task.dueDate
-    ? `📅 期日：${formatDate(task.dueDate)}`
+    ? `📅 期日：${formatDate(task.dueDate)}${task.dueTime ? ` ${task.dueTime}` : ""}`
     : null;
+  const reasonLine = task.dueDate && task.dueReason ? `　└ ${task.dueReason}` : null;
   const assigneeLine = task.assignee
     ? `👤 担当：${task.assignee}`
     : null;
@@ -132,13 +135,17 @@ export function buildTaskRegisteredMessage(task: ParsedTask): string {
     `🏷 種別：${task.category}`,
     `🔥 緊急度：${task.urgency}`,
     dueLine,
+    reasonLine,
     assigneeLine,
   ].filter(Boolean);
 
   return lines.join("\n");
 }
 
+const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
+
 function formatDate(isoDate: string): string {
-  const d = new Date(isoDate);
-  return `${d.getMonth() + 1}月${d.getDate()}日`;
+  // "YYYY-MM-DD" は UTC 解釈されるため、曜日がずれないよう JST 正午として扱う
+  const d = new Date(`${isoDate.slice(0, 10)}T12:00:00+09:00`);
+  return `${d.getMonth() + 1}月${d.getDate()}日(${WEEKDAYS[d.getDay()]})`;
 }
