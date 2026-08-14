@@ -117,19 +117,32 @@ export async function resolveMember(
   // 1文字の名前は誤爆する（「原」が「野原」に当たる等）ので照合しない
   if (target.length < 2) return null;
 
-  const candidates = (m: Member) => [m.name, ...m.aliases].map(normalizeName);
+  const candidates = (m: Member) =>
+    [m.name, ...m.aliases].map(normalizeName).filter((c) => c.length >= 2);
 
   const exact = members.find((m) => candidates(m).includes(target));
   if (exact) return exact;
 
-  // 「前田社長」→「前田」のように、片方がもう片方を含むケースを救う。
-  // 短い方を2文字以上に限ることで、無関係な部分一致を避ける。
-  const partial = members.find((m) =>
-    candidates(m).some(
-      (c) => c.length >= 2 && (c.includes(target) || target.includes(c))
-    )
-  );
-  return partial ?? null;
+  // 部分一致は「最初に見つかった人」ではなく「最も確からしい人」を選ぶ。
+  //
+  // 実データで起きた事故: 「有吉勇弥 / Ayu Yamaguchi」という壊れた表記
+  // （姓名は有吉さん、ローマ字は山口さんのもの）が、名簿の並び順のせいで
+  // 山口さんに割り当たった。単純な find では誤った人に振られる。
+  //
+  // 日本語の氏名は姓から始まり、LINEの表示名も「姓名　Romaji」の並びなので、
+  // **先頭が一致するもの**を最優先し、その中で最も長く一致するものを採る。
+  const score = (c: string): number => {
+    if (target.startsWith(c) || c.startsWith(target)) return 1000 + c.length;
+    if (target.includes(c) || c.includes(target)) return c.length;
+    return 0;
+  };
+
+  let best: { member: Member; score: number } | null = null;
+  for (const m of members) {
+    const s = Math.max(0, ...candidates(m).map(score));
+    if (s > 0 && (!best || s > best.score)) best = { member: m, score: s };
+  }
+  return best?.member ?? null;
 }
 
 /**
