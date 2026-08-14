@@ -1,42 +1,72 @@
 import { NextRequest, NextResponse } from "next/server";
-import { PrismaClient } from "@prisma/client";
+import { listTasks, setTaskStatus, archiveTask } from "@/lib/notion";
 
-const prisma = new PrismaClient();
+// ダッシュボード用のAPI。
+// 以前はPrisma(SQLite)を見ていたが、Vercelのサーバーレスではファイルに書けず
+// 中身が常に空・GETは500で落ちていた。永続化はNotionに一本化済みなのでそちらを読む。
+// ※ このルートは middleware でログイン必須にしてある。
+
+const STATUS_OPTIONS = ["未着手", "進行中", "完了"];
 
 export async function GET(): Promise<NextResponse> {
-  const tasks = await prisma.task.findMany({
-    orderBy: [
-      { status: "asc" },
-      { dueDate: "asc" },
-      { createdAt: "desc" },
-    ],
-  });
-  return NextResponse.json(tasks);
+  try {
+    return NextResponse.json(await listTasks());
+  } catch (err) {
+    console.error("タスク一覧の取得エラー:", err);
+    return NextResponse.json(
+      { error: "タスクの取得に失敗しました" },
+      { status: 500 }
+    );
+  }
 }
 
 export async function PATCH(req: NextRequest): Promise<NextResponse> {
-  const { id, status } = await req.json();
+  const { id, status } = (await req.json()) as {
+    id?: string;
+    status?: string;
+  };
 
   if (!id || !status) {
-    return NextResponse.json({ error: "id and status are required" }, { status: 400 });
+    return NextResponse.json(
+      { error: "id と status は必須です" },
+      { status: 400 }
+    );
+  }
+  // Notionのセレクト選択肢に無い値を送ると、Notion側に勝手な選択肢が増えてしまう
+  if (!STATUS_OPTIONS.includes(status)) {
+    return NextResponse.json(
+      { error: `status は ${STATUS_OPTIONS.join(" / ")} のいずれかです` },
+      { status: 400 }
+    );
   }
 
-  const updated = await prisma.task.update({
-    where: { id },
-    data: { status },
-  });
-
-  return NextResponse.json(updated);
+  try {
+    await setTaskStatus(id, status);
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    console.error("ステータス更新エラー:", err);
+    return NextResponse.json(
+      { error: "ステータスの更新に失敗しました" },
+      { status: 500 }
+    );
+  }
 }
 
 export async function DELETE(req: NextRequest): Promise<NextResponse> {
-  const { searchParams } = new URL(req.url);
-  const id = searchParams.get("id");
-
+  const id = new URL(req.url).searchParams.get("id");
   if (!id) {
-    return NextResponse.json({ error: "id is required" }, { status: 400 });
+    return NextResponse.json({ error: "id は必須です" }, { status: 400 });
   }
 
-  await prisma.task.delete({ where: { id } });
-  return NextResponse.json({ status: "deleted" });
+  try {
+    // Notionページをアーカイブする（LINEの「取り消し」と同じ挙動）
+    await archiveTask(id);
+    return NextResponse.json({ ok: true });
+  } catch (err) {
+    console.error("タスク削除エラー:", err);
+    return NextResponse.json(
+      { error: "タスクの削除に失敗しました" },
+      { status: 500 }
+    );
+  }
 }

@@ -12,9 +12,8 @@ interface Task {
   assignee: string | null;
   status: string;
   rawMessage: string;
-  notionId: string | null;
-  calendarId: string | null;
   createdAt: string;
+  url: string; // Notionページへのリンク
 }
 
 const STATUS_OPTIONS = ["未着手", "進行中", "完了"];
@@ -29,9 +28,20 @@ const URGENCY_COLORS: Record<string, string> = {
   来週以降: "bg-gray-100 text-gray-600",
 };
 
+// JST基準の今日。期限超過の判定に使う（UTCのままだと朝9時まで前日扱いになる）
+function jstToday(): string {
+  return new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+// 期日は時刻付き（"2026-08-02T15:00:00+09:00"）で入ることがあるので日付だけで比べる
+function isOverdue(task: Task): boolean {
+  if (!task.dueDate || task.status === "完了") return false;
+  return task.dueDate.slice(0, 10) < jstToday();
+}
+
 export default function Dashboard() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("全て");
 
   useEffect(() => {
@@ -40,26 +50,47 @@ export default function Dashboard() {
 
   async function fetchTasks() {
     setLoading(true);
-    const res = await fetch("/api/tasks");
-    const data = await res.json();
-    setTasks(data);
-    setLoading(false);
+    setError(null);
+    try {
+      const res = await fetch("/api/tasks");
+      const data = await res.json();
+      // 失敗時は配列ではなくエラーJSONが返る。そのまま入れると描画時に落ちる
+      if (!res.ok || !Array.isArray(data)) {
+        setError((data as { error?: string })?.error ?? "タスクを取得できませんでした");
+        setTasks([]);
+        return;
+      }
+      setTasks(data);
+    } catch {
+      setError("通信に失敗しました");
+      setTasks([]);
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function updateStatus(id: string, status: string) {
-    await fetch("/api/tasks", {
+    const prev = tasks;
+    // 先に画面を更新し、失敗したら戻す（Notionへの往復を待たせない）
+    setTasks((ts) => ts.map((t) => (t.id === id ? { ...t, status } : t)));
+    const res = await fetch("/api/tasks", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, status }),
     });
-    setTasks((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, status } : t))
-    );
+    if (!res.ok) {
+      setTasks(prev);
+      setError("ステータスの更新に失敗しました");
+    }
   }
 
   async function deleteTask(id: string) {
-    if (!confirm("このタスクを削除しますか？")) return;
-    await fetch(`/api/tasks?id=${id}`, { method: "DELETE" });
+    if (!confirm("このタスクを削除しますか？（Notionからも消えます）")) return;
+    const res = await fetch(`/api/tasks?id=${id}`, { method: "DELETE" });
+    if (!res.ok) {
+      setError("タスクの削除に失敗しました");
+      return;
+    }
     setTasks((prev) => prev.filter((t) => t.id !== id));
   }
 
@@ -124,6 +155,12 @@ export default function Dashboard() {
           ))}
         </div>
 
+        {error && (
+          <div className="mb-4 text-sm text-red-700 bg-red-50 border border-red-100 rounded-lg px-4 py-3">
+            {error}
+          </div>
+        )}
+
         {loading ? (
           <div className="text-center py-20 text-gray-400">読み込み中...</div>
         ) : displayed.length === 0 ? (
@@ -157,9 +194,14 @@ function TaskCard({
   onDelete: (id: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const overdue = isOverdue(task);
 
   return (
-    <div className="bg-white rounded-xl border border-gray-100 p-4 shadow-sm">
+    <div
+      className={`bg-white rounded-xl border p-4 shadow-sm ${
+        overdue ? "border-red-200 bg-red-50/40" : "border-gray-100"
+      }`}
+    >
       <div className="flex items-start gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap mb-1">
@@ -177,7 +219,10 @@ function TaskCard({
           </div>
           <div className="flex items-center gap-3 text-xs text-gray-400">
             {task.dueDate && (
-              <span>📅 {formatDate(task.dueDate)}</span>
+              <span className={overdue ? "text-red-600 font-semibold" : ""}>
+                📅 {formatDate(task.dueDate)}
+                {overdue && "（期限超過）"}
+              </span>
             )}
             {task.assignee && <span>👤 {task.assignee}</span>}
             <span>{formatDateTime(task.createdAt)}</span>
@@ -198,9 +243,9 @@ function TaskCard({
               </option>
             ))}
           </select>
-          {task.notionId && (
+          {task.url && (
             <a
-              href={`https://notion.so/${task.notionId.replace(/-/g, "")}`}
+              href={task.url}
               target="_blank"
               rel="noopener noreferrer"
               className="text-gray-400 hover:text-gray-600 text-sm"

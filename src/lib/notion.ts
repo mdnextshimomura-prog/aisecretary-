@@ -253,6 +253,94 @@ export async function countRemainingTasks(): Promise<number> {
   return response.results.length;
 }
 
+// ── ダッシュボード（/dashboard）用 ──────────────────────────────
+// 画面はもともとSQLiteを見ていたが、永続化はNotionに一本化済みで
+// SQLiteには何も書かれていない（Vercelでは書けない）ため常に空だった。
+// Notionを直接読むように差し替える。
+
+export interface DashboardTask {
+  id: string;
+  title: string;
+  category: string;
+  urgency: string;
+  dueDate: string | null;
+  assignee: string | null;
+  status: string;
+  rawMessage: string;
+  createdAt: string;
+  url: string;
+}
+
+// タスクを新しい順に返す。Notionは1回100件までしか返さないので続きも辿る。
+// （1ページで打ち切ると「未着手が100件」のように件数を誤認する）
+// 上限は暴走防止。ここに達したら台帳が溜まりすぎているサイン。
+const NOTION_PAGE_SIZE = 100;
+const MAX_TASKS = 500;
+
+export async function listTasks(): Promise<DashboardTask[]> {
+  const results: unknown[] = [];
+  let cursor: string | undefined = undefined;
+
+  do {
+    const response = await notion.databases.query({
+      database_id: DATABASE_ID,
+      page_size: NOTION_PAGE_SIZE,
+      start_cursor: cursor,
+      sorts: [{ timestamp: "created_time", direction: "descending" }],
+    });
+    results.push(...response.results);
+    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+  } while (cursor && results.length < MAX_TASKS);
+
+  return results.map((page) => {
+    const p = page as unknown as {
+      id: string;
+      url?: string;
+      created_time: string;
+      properties: Record<string, unknown>;
+    };
+    const props = p.properties ?? {};
+    const title = props["名前"] as
+      | { title: Array<{ plain_text: string }> }
+      | undefined;
+    const sel = (key: string) =>
+      (props[key] as { select: { name: string } | null } | undefined)?.select
+        ?.name ?? null;
+    const rich = (key: string) =>
+      ((props[key] as { rich_text: Array<{ plain_text: string }> } | undefined)
+        ?.rich_text ?? [])
+        .map((t) => t.plain_text)
+        .join("");
+
+    return {
+      id: p.id,
+      title: title?.title[0]?.plain_text ?? "（無題）",
+      category: sel("種別") ?? "",
+      urgency: sel("緊急度") ?? "",
+      dueDate:
+        (props["期日"] as { date: { start: string } | null } | undefined)?.date
+          ?.start ?? null,
+      assignee: sel("担当者"),
+      status: sel("ステータス") ?? "未着手",
+      rawMessage: rich("元メッセージ"),
+      createdAt: p.created_time,
+      url: p.url ?? "",
+    };
+  });
+}
+
+// ダッシュボードからのステータス変更。完了以外（未着手/進行中）にも戻せるよう
+// completeTask とは別にしている。
+export async function setTaskStatus(
+  pageId: string,
+  status: string
+): Promise<void> {
+  await notion.pages.update({
+    page_id: pageId,
+    properties: { ステータス: { select: { name: status } } },
+  });
+}
+
 // リマインド対象のタスク。
 // 「期日が明日まで」かつ「未完了」。下限を設けていないのは意図的で、
 // 期限を過ぎたタスクも拾うため（以前は on_or_after: 今日 で絞っていたため、
