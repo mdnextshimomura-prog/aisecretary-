@@ -1,0 +1,137 @@
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const MODEL = "claude-sonnet-4-6";
+
+// LINEの依頼文から抽出する「メール要求」。
+// to は宛先の人物名 or アドレスの生テキスト（アドレス解決は contacts.ts が担当）。
+export interface EmailRequest {
+  to: string;
+  cc: string[];
+  subject_hint: string; // 件名のヒント（無ければ空文字）
+  purpose: string; // 用件・伝えたい内容
+  tone: string; // トーン（丁寧/カジュアル等。無指定なら空文字）
+  from: string; // 送信元アドレスの指定（例: 会社 / 自分 / 下村 / メールアドレス）。無指定なら空文字
+  as: string; // 署名（名義）の指定（例: 社長名義で / 下村の署名で）。無指定なら空文字
+}
+
+const EXTRACT_PROMPT = `あなたは不動産会社の秘書です。
+社内担当者からのLINE依頼文を読み、メール送信に必要な情報を抽出してください。
+
+抽出する項目（JSON）:
+- to: 宛先。人物名（「山田不動産の田中さん」等）またはメールアドレス。1件のみ。不明なら空文字。
+- cc: CCに入れる宛先の配列（人物名 or アドレス）。無ければ空配列。
+- subject_hint: 件名のヒント。依頼文から読み取れる範囲で。無ければ空文字。
+- purpose: メールで伝えたい用件・内容を簡潔に。
+- tone: 希望するトーン（例: 丁寧、カジュアル、フォーマル）。指定が無ければ空文字。
+- from: どのメールアドレス（送信元）から送るかの指定。「会社から」「自分のアドレスで」「下村から」等があればその語（例: 会社 / 自分 / 下村）を、無ければ空文字。
+- as: どの署名・名義で締めるかの指定。「社長名義で」「下村の署名で」「社長として」等があればその語（例: 社長 / 下村）を、無ければ空文字。
+  ※ from（送信元アドレス）と as（署名の名義）は別物。「会社から社長名義で」なら from=会社, as=社長。
+
+JSONのみを返してください。前置き・説明文・マークダウン記法（\`\`\`など）は一切禁止です。
+例: {"to": "田中さん", "cc": [], "subject_hint": "内見日程", "purpose": "今週土曜の内見可否を確認", "tone": "丁寧", "from": "会社", "as": "社長"}`;
+
+export async function extractEmailRequest(text: string): Promise<EmailRequest> {
+  const response = await client.messages.create({
+    model: MODEL,
+    max_tokens: 512,
+    system: EXTRACT_PROMPT,
+    messages: [{ role: "user", content: `依頼文:\n${text}` }],
+  });
+
+  const out = response.content
+    .filter((b) => b.type === "text")
+    .map((b) => (b as { type: "text"; text: string }).text)
+    .join("");
+
+  const jsonMatch = out.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error("メール要求の抽出に失敗しました");
+  }
+  const p = JSON.parse(jsonMatch[0]) as Partial<EmailRequest>;
+  return {
+    to: (p.to ?? "").toString(),
+    cc: Array.isArray(p.cc) ? p.cc.map(String) : [],
+    subject_hint: (p.subject_hint ?? "").toString(),
+    purpose: (p.purpose ?? "").toString(),
+    tone: (p.tone ?? "").toString(),
+    from: (p.from ?? "").toString(),
+    as: (p.as ?? "").toString(),
+  };
+}
+
+export interface EmailDraft {
+  subject: string;
+  body: string;
+}
+
+const DRAFT_PROMPT = `あなたは不動産会社の秘書です。日本のビジネスメールとして自然な文面を作成します。
+
+差出人: {company} の {sender}
+
+制約:
+- 件名は簡潔に（20文字前後）。
+- 宛名（「〇〇様」「〇〇御中」等）は本文に書かないこと。宛名はシステムが本文の冒頭に自動で付けます。
+- 本文はあいさつから始め、あいさつの中で会社名と差出人名を名乗ること
+  （例:「お世話になっております。{company}の{sender}と申します。」。
+   名字だけのほうが自然な場合は名字のみでよい。既知の相手への返信なら「〜です。」でもよい）。
+- あいさつ・名乗り→用件→結び、の順。最後は「よろしくお願いいたします。」等の結びのあいさつで終える。
+  ※署名（会社名・役職・氏名・住所・電話・メール）は書かないこと。署名はシステムが自動で付けます。
+- 過度な敬語の重複や冗長表現は避け、読みやすく。
+- トーン指定があれば従う。
+- 事実が不明な箇所（日時・金額・物件名など）は勝手に創作せず、
+  依頼内容から確実に言える範囲だけ書く。曖昧な部分は自然な言い回しで濁す。
+
+JSONのみを返してください。前置き・説明文・マークダウン記法（\`\`\`など）は一切禁止です。
+本文中の改行は \\n で表現してください。
+例: {"subject": "内見日程のご相談", "body": "お世話になっております。{company}の{sender}と申します。..."}`;
+
+// 追加指示（下書きの修正依頼）があれば editInstruction に渡す。
+export async function generateEmailDraft(
+  req: EmailRequest,
+  senderName: string,
+  editInstruction?: string,
+  previous?: EmailDraft
+): Promise<EmailDraft> {
+  const parts = [
+    `宛先: ${req.to || "（未指定）"}`,
+    req.cc.length ? `CC: ${req.cc.join(", ")}` : null,
+    req.subject_hint ? `件名ヒント: ${req.subject_hint}` : null,
+    `用件: ${req.purpose}`,
+    req.tone ? `トーン: ${req.tone}` : null,
+  ].filter(Boolean);
+
+  let userContent = parts.join("\n");
+  if (previous && editInstruction) {
+    userContent +=
+      `\n\n--- 現在の下書き ---\n件名: ${previous.subject}\n本文:\n${previous.body}` +
+      `\n\n--- 修正指示 ---\n${editInstruction}\n上記の修正を反映した完成版を返してください。`;
+  }
+
+  // 名乗りに使う会社名（envで上書き可能）
+  const company = process.env.COMPANY_NAME ?? "MD NEXT株式会社";
+  const response = await client.messages.create({
+    model: MODEL,
+    max_tokens: 1500,
+    system: DRAFT_PROMPT.replace(/\{sender\}/g, senderName).replace(
+      /\{company\}/g,
+      company
+    ),
+    messages: [{ role: "user", content: userContent }],
+  });
+
+  const out = response.content
+    .filter((b) => b.type === "text")
+    .map((b) => (b as { type: "text"; text: string }).text)
+    .join("");
+
+  const jsonMatch = out.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error("メール下書きの生成に失敗しました");
+  }
+  const d = JSON.parse(jsonMatch[0]) as Partial<EmailDraft>;
+  return {
+    subject: (d.subject ?? "").toString(),
+    body: (d.body ?? "").toString(),
+  };
+}
