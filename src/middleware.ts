@@ -22,7 +22,10 @@ import { NextRequest, NextResponse } from "next/server";
  *   設定後は再デプロイで有効になる。
  */
 
-const REALM = "MD NEXT AI秘書";
+// realm は必ずASCIIにする。HTTPヘッダーはByteString（1文字=1バイト）しか持てず、
+// 日本語を入れるとヘッダー生成が例外になり、WWW-Authenticate が欠けた401だけが返る。
+// そうなるとブラウザにログイン窓が出ず、誰も入れない画面になる。
+const REALM = "MD NEXT AI Secretary";
 
 // 長さの違いで早期リターンしない比較（総当たりの手掛かりを減らす）
 function safeEqual(a: string, b: string): boolean {
