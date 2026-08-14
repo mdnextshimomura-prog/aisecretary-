@@ -3,6 +3,7 @@ import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage } from
 import { parseTaskFromMessage, TASK_CONFIDENCE_THRESHOLD, type ParsedTask } from "@/lib/claude";
 import { resolveDue, DEFAULT_DUE_TIME } from "@/lib/due-rules";
 import { isNewCustomerCommand, handleNewCustomer } from "@/lib/crm";
+import { canonicalAssignee } from "@/lib/members";
 import {
   classifyIntent,
   looksLikeEmailCommand,
@@ -382,10 +383,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           const name = raw.startsWith("@") ? raw.slice(1) : raw;
           if (name) {
             try {
-              await updateTaskAssignee(task.id, name, m.userId ?? null);
+              // 後付けの担当者指定も名簿の正式氏名に寄せる（登録時と同じ扱いにする）
+              const c = await canonicalAssignee(m.userId ?? null, name);
+              await updateTaskAssignee(task.id, c.name ?? name, c.userId);
               await sendLineMessage(
                 replyToken,
-                `👤 担当者を ${name} さんに設定しました\n📋 ${task.title}`
+                `👤 担当者を ${c.name ?? name} さんに設定しました\n📋 ${task.title}`
               );
             } catch (err) {
               console.error("担当者更新エラー:", err);
@@ -497,6 +500,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // リマインド時にLINEメンション（@通知）するため userId も保存する
         if (m.userId) parsed.assigneeUserId = m.userId;
       }
+    }
+
+    // 担当者をメンバー名簿の正式氏名に寄せる。
+    // LINEの表示名をそのまま入れると、同じ人が何通りもの表記でNotionに増える。
+    // 名簿に無い人は元の表記のまま通す（新任者の担当が空になるのを避ける）。
+    {
+      const c = await canonicalAssignee(parsed.assigneeUserId, parsed.assignee);
+      parsed.assignee = c.name;
+      parsed.assigneeUserId = c.userId;
     }
 
     try {
