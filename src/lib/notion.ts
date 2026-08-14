@@ -265,6 +265,9 @@ export interface DashboardTask {
   urgency: string;
   dueDate: string | null;
   assignee: string | null;
+  // 担当者のLINE userId。@メンションで指定された時だけ入る。
+  // 表示名は本人がいつでも変えられるので、人の同定はこちらを軸にする。
+  assigneeUserId: string | null;
   status: string;
   rawMessage: string;
   createdAt: string;
@@ -321,6 +324,7 @@ export async function listTasks(): Promise<DashboardTask[]> {
         (props["期日"] as { date: { start: string } | null } | undefined)?.date
           ?.start ?? null,
       assignee: sel("担当者"),
+      assigneeUserId: rich("担当者ID") || null,
       status: sel("ステータス") ?? "未着手",
       rawMessage: rich("元メッセージ"),
       createdAt: p.created_time,
