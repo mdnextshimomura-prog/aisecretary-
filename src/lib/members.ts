@@ -34,13 +34,22 @@ export interface Member {
 const CACHE_TTL_MS = 5 * 60 * 1000;
 let cache: { at: number; members: Member[] } | null = null;
 
-/** 全角/半角・数学用英数字記号・敬称・空白のゆれを吸収して比較用の形にする */
+/**
+ * 全角/半角・数学用英数字記号・敬称・空白のゆれを吸収して比較用の形にする。
+ *
+ * 社名（MD NEXT）は表示名の頭に付いているだけで**人を識別しない**ので落とす。
+ * 落とさないと「MD NEXT」という指定が、社名で始まる誰か（実際に
+ * 「MD NEXT山口さん【会社】」）に前方一致して誤って割り当たる。
+ */
+const COMPANY_NOISE = /(mdnext|ｍｄｎｅｘｔ)/g;
+
 export function normalizeName(s: string): string {
   return (s ?? "")
     // 𝐴𝑦𝑢 のような数学用英数字記号を通常の英字に寄せる（NFKCが変換する）
     .normalize("NFKC")
     .toLowerCase()
     .replace(/[\s　]/g, "")
+    .replace(COMPANY_NOISE, "")
     .replace(/(さん|様|君|くん|ちゃん|社長|部長|課長|専務|常務)$/, "");
 }
 
