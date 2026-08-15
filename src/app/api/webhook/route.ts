@@ -4,6 +4,7 @@ import { parseTaskFromMessage, TASK_CONFIDENCE_THRESHOLD, type ParsedTask } from
 import { resolveDue, DEFAULT_DUE_TIME } from "@/lib/due-rules";
 import { isNewCustomerCommand, handleNewCustomer } from "@/lib/crm";
 import { canonicalAssignee } from "@/lib/members";
+import { loadRecentAttachments, consumeRecentAttachments } from "@/lib/media";
 import {
   classifyIntent,
   looksLikeEmailCommand,
@@ -401,80 +402,113 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // メンションは必須ではない。全発言をClaudeに渡し、タスクかどうかを判定させる。
     const text = stripMentions(event.message);
-    if (!text) continue;
 
-    // ④ 曖昧確認への返答（「①」「メール」等）→ 保留していた発言を選んだフローへ流す。
-    const pendingClar = await getPendingClarification(
-      source.groupId,
-      source.userId
+    // ④ 「資料の写真を送る → 担当者をメンションする」がこのグループの依頼の主な形。
+    //    （履歴の実測: 社長の発言3,394件中571件が画像で、直後は「@杉山 舜」等のひと言だけ）
+    //
+    //    重要: 「@杉山 舜」だけの発言は stripMentions 後に **本文が空になる**。
+    //    以前はここで空文字を捨てていたため、最頻の依頼パターンが丸ごと素通りしていた。
+    //    添付があるなら本文が空でも依頼として扱う。
+    const mentionsSomeone = (event.message.mention?.mentionees ?? []).some(
+      (m) => m.type === "all" || (m.type === "user" && m.userId !== BOT_USER_ID)
     );
-    if (pendingClar) {
-      const choice = interpretClarification(text);
-      if (choice) {
-        await deletePendingClarification(source.groupId, source.userId);
-        if (choice === "none") {
-          await sendLineMessage(replyToken, "了解しました。今回は何もしません。");
-        } else if (choice === "email") {
-          await startEmailFlow(pendingClar, source, replyToken);
-        } else if (choice === "crm") {
-          await registerCustomer(pendingClar, replyToken);
-        } else {
-          await registerTaskFromText(pendingClar, replyToken);
+    // 本文もメンションも無ければ何もしない（添付の取得はまだ行わない）
+    if (!text && !mentionsSomeone) continue;
+
+    // ⑤ 本文があるときだけ、テキスト前提の分岐にかける
+    if (text) {
+      // 曖昧確認への返答（「①」「メール」等）→ 保留していた発言を選んだフローへ流す。
+      const pendingClar = await getPendingClarification(
+        source.groupId,
+        source.userId
+      );
+      if (pendingClar) {
+        const choice = interpretClarification(text);
+        if (choice) {
+          await deletePendingClarification(source.groupId, source.userId);
+          if (choice === "none") {
+            await sendLineMessage(replyToken, "了解しました。今回は何もしません。");
+          } else if (choice === "email") {
+            await startEmailFlow(pendingClar, source, replyToken);
+          } else if (choice === "crm") {
+            await registerCustomer(pendingClar, replyToken);
+          } else {
+            await registerTaskFromText(pendingClar, replyToken);
+          }
+          continue;
         }
+        // 選択と解釈できない返答 → 保留を解除し、この新しい発言を通常処理する
+        await deletePendingClarification(source.groupId, source.userId);
+      }
+
+      // 「#新規」コマンド → 紹介客をCRM_顧客へ登録（タスク分類には流さない）
+      if (isNewCustomerCommand(text)) {
+        await registerCustomer(text, replyToken);
         continue;
       }
-      // 選択と解釈できない返答 → 保留を解除し、この新しい発言を通常処理する
-      await deletePendingClarification(source.groupId, source.userId);
-    }
 
-    // ⑤ 「#新規」コマンド → 紹介客をCRM_顧客へ登録（タスク分類には流さない）
-    if (isNewCustomerCommand(text)) {
-      await registerCustomer(text, replyToken);
-      continue;
-    }
-
-    // ⑥ 「メール送って」等の明確なメール指示は、AI判定より前に確定でメールへ。
-    //    （AIが稀にタスクと誤判定するのを防ぐ）
-    if (looksLikeEmailCommand(text)) {
-      await startEmailFlow(text, source, replyToken);
-      continue;
-    }
-
-    // ⑥+ 直近に画像/PDFが届いている文脈での「この名刺の方にPDFを送って」等も
-    //     確定でメールへ（「メール」という単語が無くても曖昧メニューを出さない）。
-    if (looksLikeSendWithMaterial(text) && (await hasPendingEmailContext(source))) {
-      await startEmailFlow(text, source, replyToken);
-      continue;
-    }
-
-    // ⑦ 上記に当てはまらない場合、AIで意図判定。
-    //     ・曖昧（メール/タスク/顧客のどれとも取れる）→ どう対応するか確認する
-    //     ・emailかつ確信度が高い → メールフロー
-    //     ・それ以外（task/other/判定失敗）→ 既存タスク処理へ
-    try {
-      const intent = await classifyIntent(text);
-      if (intent.ambiguous) {
-        await savePendingClarification(source.groupId, source.userId, text);
-        await sendLineMessage(replyToken, buildClarificationMenu());
+      // 「メール送って」等の明確なメール指示は、AI判定より前に確定でメールへ。
+      // （AIが稀にタスクと誤判定するのを防ぐ）
+      if (looksLikeEmailCommand(text)) {
+        await startEmailFlow(text, source, replyToken);
         continue;
       }
+
+      // 直近に画像/PDFが届いている文脈での「この名刺の方にPDFを送って」等も
+      // 確定でメールへ（「メール」という単語が無くても曖昧メニューを出さない）。
       if (
-        intent.intent === "email" &&
-        intent.confidence >= EMAIL_INTENT_THRESHOLD
+        looksLikeSendWithMaterial(text) &&
+        (await hasPendingEmailContext(source))
       ) {
         await startEmailFlow(text, source, replyToken);
         continue;
       }
-    } catch (err) {
-      console.error("intent判定エラー（タスク処理へフォールバック）:", err);
+    }
+
+    // ⑥ ここまでで処理されなかった＝タスク候補。ここで初めて添付を取りに行く。
+    //    先に取ると「@下村亮太 この名刺の方にメール送って」のようなメール指示でも
+    //    画像をダウンロードしてしまい、無駄に遅くなる。
+    const attachments = mentionsSomeone
+      ? await loadRecentAttachments(source)
+      : [];
+    if (!text && attachments.length === 0) continue;
+
+    // ⑦ 添付が無い場合だけAIで意図判定する。
+    //     ・曖昧（メール/タスク/顧客のどれとも取れる）→ どう対応するか確認する
+    //     ・emailかつ確信度が高い → メールフロー
+    //     ・それ以外（task/other/判定失敗）→ 既存タスク処理へ
+    //    添付＋メンションは依頼と分かっているので、確認メニューを挟まず直接タスクへ回す。
+    if (attachments.length === 0) {
+      try {
+        const intent = await classifyIntent(text);
+        if (intent.ambiguous) {
+          await savePendingClarification(source.groupId, source.userId, text);
+          await sendLineMessage(replyToken, buildClarificationMenu());
+          continue;
+        }
+        if (
+          intent.intent === "email" &&
+          intent.confidence >= EMAIL_INTENT_THRESHOLD
+        ) {
+          await startEmailFlow(text, source, replyToken);
+          continue;
+        }
+      } catch (err) {
+        console.error("intent判定エラー（タスク処理へフォールバック）:", err);
+      }
     }
 
     const now = jstNow();
 
-    // ⑧ Claude でタスク判定＋解析。解析自体が失敗した発言は雑談扱いで黙ってスキップ。
+    // ⑦ Claude でタスク判定＋解析。解析自体が失敗した発言は雑談扱いで黙ってスキップ。
+    //    本文が空（メンションだけ）のときは、添付が依頼の中身であることを伝える。
     let parsed;
     try {
-      parsed = await parseTaskFromMessage(text, todayLabel(now));
+      parsed = await parseTaskFromMessage(
+        text || "（本文なし・担当者へのメンションのみ）",
+        todayLabel(now),
+        attachments
+      );
     } catch (err) {
       console.error("タスク解析エラー（スキップ）:", err);
       continue;
@@ -513,7 +547,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     try {
       // Notion に登録
-      const pageId = await createNotionTask(parsed, text);
+      // 「元メッセージ」は後から人が経緯を追うための欄。本文が空でも
+      // 「画像だけ届いた」と分かるようにしておく（空欄だと何も追えない）。
+      const rawForNotion =
+        text || `（本文なし・添付${attachments.length}件＋担当者へのメンション）`;
+      const pageId = await createNotionTask(parsed, rawForNotion);
 
       // LINE に「登録しました」と返信
       const reply = buildTaskRegisteredMessage(parsed);
@@ -525,6 +563,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         pageId,
         [event.message.id, botMsgId ?? ""].filter(Boolean)
       );
+
+      // 使った添付は捨てる。残すと同じ画像が後続の発言にも繰り返し添付され、
+      // 無関係な発言がその画像の依頼として登録されてしまう。
+      if (attachments.length > 0) await consumeRecentAttachments(source);
     } catch (err) {
       console.error("タスク登録エラー:", err);
       await sendLineMessage(

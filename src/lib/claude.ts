@@ -69,23 +69,62 @@ isTaskがtrueのとき、以下も抽出してください（falseのときは�
 - dueDate: 明示があれば "YYYY-MM-DD"、無ければ null
 - dueTime: 「17時までに」「13時集合」など時刻の明示があれば "HH:mm"、無ければ null
 
+**画像やPDFが添付されている場合**、それが依頼の中身そのものです。
+このグループでは「資料の写真を送って、担当者をメンションするだけ」という形の依頼が
+最も多く、文字は「@杉山 舜 お願いします」程度しかありません。
+添付を読み、何についての依頼かを具体的にタイトルへ落としてください。
+例:「@小笠原　陸」＋ 販売図面の写真 →「三国本町マンションの販売図面の確認・修正」
+物件名・住所・金額など、添付から読み取れた手掛かりは memo に残してください。
+添付が業務と無関係（雑談の写真・スクリーンショットの共有のみ）なら isTask は false にします。
+
 JSONのみを返してください。説明文は不要です。
 例: {"isTask": true, "confidence": 0.9, "title": "...", "category": "売買", "requestType": "査定書", "urgentHint": false, "urgency": "今週中", "dueDate": null, "dueTime": null, "assignee": null, "memo": null}`;
 
+/** タスク判定に添える添付（LINEで直前に届いた画像・PDF） */
+export interface TaskAttachment {
+  kind: "image" | "pdf";
+  mediaType: string;
+  base64: string;
+}
+
 export async function parseTaskFromMessage(
   message: string,
-  today: string
+  today: string,
+  attachments: TaskAttachment[] = []
 ): Promise<ParsedTask> {
+  const content: Anthropic.MessageParam["content"] = [];
+  for (const a of attachments) {
+    if (a.kind === "image") {
+      content.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: a.mediaType as "image/jpeg" | "image/png" | "image/webp" | "image/gif",
+          data: a.base64,
+        },
+      });
+    } else {
+      content.push({
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: a.base64 },
+      });
+    }
+  }
+  content.push({
+    type: "text",
+    text:
+      `今日の日時（日本時間・受信時刻）: ${today}\n\n` +
+      (attachments.length > 0
+        ? `※このメッセージの直前に、上の添付（${attachments.length}件）が同じ人から送られています。依頼の中身は添付にあります。\n\n`
+        : "") +
+      `LINEメッセージ:\n${message}`,
+  });
+
   const response = await client.messages.create({
     model: "claude-sonnet-4-6",
     max_tokens: 1024,
     system: SYSTEM_PROMPT,
-    messages: [
-      {
-        role: "user",
-        content: `今日の日時（日本時間・受信時刻）: ${today}\n\nLINEメッセージ:\n${message}`,
-      },
-    ],
+    messages: [{ role: "user", content }],
   });
 
   const text = response.content
