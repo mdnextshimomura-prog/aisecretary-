@@ -35,6 +35,8 @@ export interface ReportResult {
   before: number;
   during: number;
   unassigned: number;
+  /** dryRun のときだけ入る。実際に送られる本文 */
+  preview?: string;
 }
 
 /**
@@ -44,7 +46,9 @@ export interface ReportResult {
  */
 export async function sendClosureStocktake(
   closureName: string,
-  closureStart: string
+  closureStart: string,
+  // 送らずに本文だけ返す。番号も振らない（動作確認・文面の事前確認に使う）
+  dryRun = false
 ): Promise<ReportResult> {
   const today = jstDateStr(0);
   const tasks = await getUpcomingTasksAll();
@@ -57,8 +61,14 @@ export async function sendClosureStocktake(
   const during = tasks.filter((t) => t.createdTime.slice(0, 10) >= closureStart);
   const unassigned = tasks.filter((t) => !t.assignee).length;
 
-  // 期日の古い順（放置が長いものほど上）
-  const byDue = (a: Task, b: Task) => dueOnly(a).localeCompare(dueOnly(b));
+  // 期日の古い順（放置が長いものほど上）。
+  // 期日なしは末尾へ。空文字のまま並べると最も古い扱いになり、
+  // 何も情報のないタスクが一番上に出てしまう。
+  const byDue = (a: Task, b: Task) => {
+    const da = dueOnly(a) || "9999-12-31";
+    const db = dueOnly(b) || "9999-12-31";
+    return da.localeCompare(db);
+  };
   before.sort(byDue);
   during.sort(byDue);
 
@@ -117,6 +127,16 @@ export async function sendClosureStocktake(
     "\n\n──────────\n" +
     "終わったものは番号で返信してください\n" +
     "例：「3済」「1,2完了」「4おわった」";
+
+  if (dryRun) {
+    return {
+      sent: false,
+      before: before.length,
+      during: during.length,
+      unassigned,
+      preview: text,
+    };
+  }
 
   // 本文に載せた順で番号を確定させてから送る（送信後だと先に返信されたとき引けない）
   await Promise.all(shown.map((t, i) => setRemindNumber(t.id, i + 1)));

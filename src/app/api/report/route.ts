@@ -13,6 +13,7 @@ import { jstDateStr } from "@/lib/notion";
  * 朝の番号で返信した人が別のタスクを完了にしてしまうため。
  *
  * `?force=1` を付けると休業明けでなくても送る（動作確認用）。
+ * `?dry=1` を付けると送らずに本文だけ返す（文面の事前確認用）。
  */
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const authHeader = req.headers.get("authorization");
@@ -23,7 +24,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const today = jstDateStr(0);
   const closures = await loadClosures();
   const closureName = firstBusinessDayAfterClosure(today, closures);
-  const force = new URL(req.url).searchParams.get("force") === "1";
+  const params = new URL(req.url).searchParams;
+  const dry = params.get("dry") === "1";
+  const force = params.get("force") === "1" || dry;
 
   if (!closureName && !force) {
     console.log(`[report] ${today} は休業明けではないため送らない`);
@@ -36,7 +39,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const start = closure?.start ?? today;
 
   try {
-    const result = await sendClosureStocktake(name, start);
+    const result = await sendClosureStocktake(name, start, dry);
     console.log(`[report] ${name}明けの棚卸しを送信:`, result);
     return NextResponse.json({ status: "ok", today, closure: name, ...result });
   } catch (err) {
