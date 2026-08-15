@@ -1,5 +1,6 @@
 import { getUpcomingTasks, jstDateStr, setRemindNumber } from "./notion";
 import { pushLineMessageWithMentions, sanitizeForTextV2 } from "./line";
+import { todayClosure } from "./closures";
 
 // リマインドの送信先＝会社グループ。反響通知と同じグループに送る。
 const LINE_GROUP_ID =
@@ -30,11 +31,20 @@ function daysOverdue(dueStr: string, todayStr: string): number {
 }
 
 export async function sendDailyReminders(): Promise<void> {
+  const todayStr = jstDateStr(0);
+
+  // 会社が休みの日は送らない。誰も対応できない日に
+  // 「期限超過30件」を毎朝投げても、読まれなくなるだけ。
+  const closure = await todayClosure(todayStr);
+  if (closure) {
+    console.log(`[remind] ${closure}のため送信しない (${todayStr})`);
+    return;
+  }
+
   // 期日が明日まで・未完了のタスク（期限超過を含む）を期日の古い順で取得
   const tasks = await getUpcomingTasks();
   if (tasks.length === 0) return;
 
-  const todayStr = jstDateStr(0);
   const tomorrowStr = jstDateStr(1);
 
   const overdueTasks = tasks.filter((t) => dueDateOnly(t) < todayStr);

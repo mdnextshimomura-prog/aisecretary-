@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage } from "@/lib/line";
 import { parseTaskFromMessage, TASK_CONFIDENCE_THRESHOLD, type ParsedTask } from "@/lib/claude";
 import { resolveDue, DEFAULT_DUE_TIME } from "@/lib/due-rules";
+import { loadClosures, shiftToBusinessDay } from "@/lib/closures";
 import { isNewCustomerCommand, handleNewCustomer } from "@/lib/crm";
 import { canonicalAssignee } from "@/lib/members";
 import { loadRecentAttachments, consumeRecentAttachments } from "@/lib/media";
@@ -182,17 +183,46 @@ function todayLabel(now: Date): string {
 // Claude に日付を推測させないことで、同じ依頼には必ず同じ期日が出るようにする。
 // タスク登録の入口が複数（通常フロー／曖昧確認からの選択）あるため関数に切り出す。
 // ここを通さずに起票すると期日が空のまま登録されるので、必ず経由すること。
-function finalizeDue(parsed: ParsedTask, now: Date): void {
+async function finalizeDue(parsed: ParsedTask, now: Date): Promise<void> {
   if (parsed.dueDate) {
     parsed.dueTime = parsed.dueTime ?? DEFAULT_DUE_TIME;
     parsed.dueReason = "メッセージの指定";
-    return;
+  } else {
+    const decided = resolveDue(parsed.requestType, now, parsed.urgentHint);
+    parsed.dueDate = decided.dueDate;
+    parsed.dueTime = parsed.dueTime ?? decided.dueTime;
+    parsed.urgency = decided.urgency;
+    parsed.dueReason = decided.reason;
   }
-  const decided = resolveDue(parsed.requestType, now, parsed.urgentHint);
-  parsed.dueDate = decided.dueDate;
-  parsed.dueTime = parsed.dueTime ?? decided.dueTime;
-  parsed.urgency = decided.urgency;
-  parsed.dueReason = decided.reason;
+
+  // 会社の休業日（お盆・年末年始など）に当たっていたら翌営業日へ送る。
+  // 休業中に期日を置いても誰も対応できないため。
+  // メッセージで日付を明示された場合もずらす（本人が休業を失念している可能性が高く、
+  // 気づけるよう返信に理由を出す）。
+  try {
+    const shifted = shiftToBusinessDay(parsed.dueDate, await loadClosures());
+    if (shifted.reason) {
+      parsed.dueDate = shifted.date;
+      parsed.dueReason = `${parsed.dueReason}／${shifted.reason}`;
+      parsed.urgency = urgencyFromDue(parsed.dueDate, now);
+    }
+  } catch (err) {
+    // 休業日カレンダーが引けなくても登録は続ける
+    console.error("休業日の判定に失敗（元の期日のまま）:", err);
+  }
+}
+
+/** 期日がずれたときに緊急度を付け直す（期日と緊急度が食い違わないように） */
+function urgencyFromDue(dueDate: string, now: Date): ParsedTask["urgency"] {
+  const today = now.toISOString().slice(0, 10);
+  const days = Math.round(
+    (Date.parse(`${dueDate.slice(0, 10)}T00:00:00Z`) -
+      Date.parse(`${today}T00:00:00Z`)) /
+      86_400_000
+  );
+  if (days <= 0) return "今日中";
+  if (days <= 7) return "今週中";
+  return "来週以降";
 }
 
 // テキストからタスクを登録して返信する（曖昧確認で「タスク」を選ばれた時に使う）。
@@ -211,7 +241,7 @@ async function registerTaskFromText(
     await sendLineMessage(replyToken, "⚠️ タスクの解析に失敗しました。");
     return;
   }
-  finalizeDue(parsed, now);
+  await finalizeDue(parsed, now);
   try {
     await createNotionTask(parsed, text);
     await sendLineMessage(replyToken, buildTaskRegisteredMessage(parsed));
@@ -519,7 +549,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       continue;
     }
 
-    finalizeDue(parsed, now);
+    await finalizeDue(parsed, now);
 
     // メンションがあれば、その名前を担当者として優先採用（ボット自身のメンションは除く）
     if (event.message.mention) {
