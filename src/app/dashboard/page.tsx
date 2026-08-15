@@ -14,6 +14,8 @@ interface Task {
   rawMessage: string;
   createdAt: string;
   url: string; // Notionページへのリンク
+  propertyName: string | null;
+  propertyKey: string | null; // 表記ゆれを吸収した照合キー。同じ物件をまとめるのに使う
 }
 
 const STATUS_OPTIONS = ["未着手", "進行中", "完了"];
@@ -43,6 +45,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("全て");
+  const [propertyFilter, setPropertyFilter] = useState<string | null>(null);
 
   useEffect(() => {
     fetchTasks();
@@ -94,8 +97,13 @@ export default function Dashboard() {
     setTasks((prev) => prev.filter((t) => t.id !== id));
   }
 
-  const displayed =
-    filter === "全て" ? tasks : tasks.filter((t) => t.status === filter);
+  // 物件で絞り込む。表記ゆれがあっても同じ物件が並ぶよう、表示名ではなくキーで比べる
+  const displayed = tasks
+    .filter((t) => (filter === "全て" ? true : t.status === filter))
+    .filter((t) => (propertyFilter ? t.propertyKey === propertyFilter : true));
+
+  const propertyLabel =
+    tasks.find((t) => t.propertyKey === propertyFilter)?.propertyName ?? "";
 
   const counts = STATUS_OPTIONS.reduce(
     (acc, s) => ({ ...acc, [s]: tasks.filter((t) => t.status === s).length }),
@@ -155,6 +163,21 @@ export default function Dashboard() {
           ))}
         </div>
 
+        {propertyFilter && (
+          <div className="mb-4 flex items-center gap-2 text-sm bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5">
+            <span className="text-amber-900">
+              🏠 <span className="font-semibold">{propertyLabel}</span> のタスクだけ表示中（
+              {displayed.length}件）
+            </span>
+            <button
+              onClick={() => setPropertyFilter(null)}
+              className="ml-auto text-amber-700 hover:text-amber-900 underline"
+            >
+              解除
+            </button>
+          </div>
+        )}
+
         {error && (
           <div className="mb-4 text-sm text-red-700 bg-red-50 border border-red-100 rounded-lg px-4 py-3">
             {error}
@@ -175,6 +198,7 @@ export default function Dashboard() {
                 task={task}
                 onStatusChange={updateStatus}
                 onDelete={deleteTask}
+                onPropertyClick={setPropertyFilter}
               />
             ))}
           </div>
@@ -188,10 +212,12 @@ function TaskCard({
   task,
   onStatusChange,
   onDelete,
+  onPropertyClick,
 }: {
   task: Task;
   onStatusChange: (id: string, status: string) => void;
   onDelete: (id: string) => void;
+  onPropertyClick: (key: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const overdue = isOverdue(task);
@@ -216,6 +242,15 @@ function TaskCard({
             <span className="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-700">
               {task.category}
             </span>
+            {task.propertyName && task.propertyKey && (
+              <button
+                onClick={() => onPropertyClick(task.propertyKey!)}
+                title="この物件のタスクだけ表示"
+                className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 hover:bg-amber-200 transition-colors"
+              >
+                🏠 {task.propertyName}
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-3 text-xs text-gray-400">
             {task.dueDate && (

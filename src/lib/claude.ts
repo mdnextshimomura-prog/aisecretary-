@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { REQUEST_TYPES, type RequestType } from "./due-rules";
+import { cleanPropertyName, normalizeProperty } from "./property";
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -22,6 +23,10 @@ export interface ParsedTask {
   // Claudeの出力には含まれず、Webhook受信時にメンション情報から補完する。
   // リマインド時にこのIDでLINEメンション（@通知）するために保存する。
   assigneeUserId?: string | null;
+  // 物件名（原文の表記のまま）。同じ物件のタスクを串刺しにするために使う。
+  // 照合用のキーは property.ts で作り、webhook 側で埋める。
+  propertyName?: string | null;
+  propertyKey?: string | null;
   memo: string | null;
 }
 
@@ -50,6 +55,12 @@ isTaskがtrueのとき、以下も抽出してください（falseのときは�
 - dueTime: 期日の時刻（"HH:mm" 24時間表記）。「17時までに」「13時集合」など
   メッセージに時刻の明示があるときだけ設定し、無ければnull。
 - assignee: 担当者名（自分・メンバー名、不明な場合はnull）
+- propertyName: 対象の物件名。**メッセージや添付に書かれている表記をそのまま**入れる
+  （勝手に正式名称へ直さない。表記ゆれの吸収はこちらで行う）。
+  建物名＋部屋番号（例:「メロディハイム豊中泉ヶ丘626」）、
+  戸建・土地は町名＋丁目（例:「上野東2丁目3-4」）。
+  複数物件が出てくる場合は依頼の主対象1件だけ。分からなければ null。
+  会社名・業者名・人名を物件名に入れないこと。
 - memo: 詳細メモ（元メッセージから補足情報を抽出）
 
 - requestType: 依頼の種類。次のいずれか1つ。
@@ -78,7 +89,7 @@ isTaskがtrueのとき、以下も抽出してください（falseのときは�
 添付が業務と無関係（雑談の写真・スクリーンショットの共有のみ）なら isTask は false にします。
 
 JSONのみを返してください。説明文は不要です。
-例: {"isTask": true, "confidence": 0.9, "title": "...", "category": "売買", "requestType": "査定書", "urgentHint": false, "urgency": "今週中", "dueDate": null, "dueTime": null, "assignee": null, "memo": null}`;
+例: {"isTask": true, "confidence": 0.9, "title": "...", "category": "売買", "requestType": "査定書", "urgentHint": false, "urgency": "今週中", "dueDate": null, "dueTime": null, "assignee": null, "propertyName": "メロディハイム豊中泉ヶ丘626", "memo": null}`;
 
 /** タスク判定に添える添付（LINEで直前に届いた画像・PDF） */
 export interface TaskAttachment {
@@ -145,5 +156,9 @@ export async function parseTaskFromMessage(
   if (!REQUEST_TYPES.includes(parsed.requestType)) {
     parsed.requestType = "その他";
   }
+
+  // 物件名を掃除し、表記ゆれを吸収した照合キーを作る
+  parsed.propertyName = cleanPropertyName(parsed.propertyName);
+  parsed.propertyKey = normalizeProperty(parsed.propertyName) || null;
   return parsed;
 }

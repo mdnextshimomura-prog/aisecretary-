@@ -41,6 +41,14 @@ export async function createNotionTask(
           rich_text: [{ text: { content: task.assigneeUserId } }],
         },
       }),
+      // 物件名は原文の表記のまま、キーは表記ゆれを吸収した照合用。
+      // 2つ持つのは、ルールを変えたときにキーだけ作り直せるようにするため。
+      ...(task.propertyName && {
+        物件名: { rich_text: [{ text: { content: task.propertyName } }] },
+      }),
+      ...(task.propertyKey && {
+        物件キー: { rich_text: [{ text: { content: task.propertyKey } }] },
+      }),
       ステータス: {
         select: { name: "未着手" },
       },
@@ -268,6 +276,8 @@ export interface DashboardTask {
   // 担当者のLINE userId。@メンションで指定された時だけ入る。
   // 表示名は本人がいつでも変えられるので、人の同定はこちらを軸にする。
   assigneeUserId: string | null;
+  propertyName: string | null;
+  propertyKey: string | null;
   status: string;
   rawMessage: string;
   createdAt: string;
@@ -325,11 +335,28 @@ export async function listTasks(): Promise<DashboardTask[]> {
           ?.start ?? null,
       assignee: sel("担当者"),
       assigneeUserId: rich("担当者ID") || null,
+      propertyName: rich("物件名") || null,
+      propertyKey: rich("物件キー") || null,
       status: sel("ステータス") ?? "未着手",
       rawMessage: rich("元メッセージ"),
       createdAt: p.created_time,
       url: p.url ?? "",
     };
+  });
+}
+
+// 物件名を後から埋める（既存タスクの遡り補完に使う）
+export async function setTaskProperty(
+  pageId: string,
+  name: string,
+  key: string
+): Promise<void> {
+  await notion.pages.update({
+    page_id: pageId,
+    properties: {
+      物件名: { rich_text: [{ text: { content: name } }] },
+      物件キー: { rich_text: [{ text: { content: key } }] },
+    },
   });
 }
 
