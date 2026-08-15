@@ -345,6 +345,60 @@ export async function listTasks(): Promise<DashboardTask[]> {
   });
 }
 
+// 未完了タスクを全件返す（棚卸しレポート用）。
+// getUpcomingTasks は「期日が明日まで」で絞るため、休業明けの棚卸しには使えない
+// （休業中に登録された分は期日が先になっていて拾えない）。
+export async function getUpcomingTasksAll(): Promise<
+  Array<{
+    id: string;
+    title: string;
+    dueDate: string;
+    assignee: string | null;
+    assigneeUserId: string | null;
+    propertyName: string | null;
+    createdTime: string;
+  }>
+> {
+  const results: unknown[] = [];
+  let cursor: string | undefined = undefined;
+  do {
+    const response = await notion.databases.query({
+      database_id: DATABASE_ID,
+      page_size: NOTION_PAGE_SIZE,
+      start_cursor: cursor,
+      sorts: [{ property: "期日", direction: "ascending" }],
+      filter: { property: "ステータス", select: { does_not_equal: "完了" } },
+    });
+    results.push(...response.results);
+    cursor = response.has_more ? (response.next_cursor ?? undefined) : undefined;
+  } while (cursor && results.length < MAX_TASKS);
+
+  return results.map((page) => {
+    const p = page as Record<string, unknown>;
+    const props = (p.properties as Record<string, unknown>) ?? {};
+    const rich = (key: string) =>
+      ((props[key] as { rich_text: Array<{ plain_text: string }> } | undefined)
+        ?.rich_text ?? [])
+        .map((t) => t.plain_text)
+        .join("");
+    return {
+      id: p.id as string,
+      title:
+        (props["名前"] as { title: Array<{ plain_text: string }> } | undefined)
+          ?.title[0]?.plain_text ?? "（無題）",
+      dueDate:
+        (props["期日"] as { date: { start: string } | null } | undefined)?.date
+          ?.start ?? "",
+      assignee:
+        (props["担当者"] as { select: { name: string } | null } | undefined)
+          ?.select?.name ?? null,
+      assigneeUserId: rich("担当者ID") || null,
+      propertyName: rich("物件名") || null,
+      createdTime: p.created_time as string,
+    };
+  });
+}
+
 // 物件名を後から埋める（既存タスクの遡り補完に使う）
 export async function setTaskProperty(
   pageId: string,

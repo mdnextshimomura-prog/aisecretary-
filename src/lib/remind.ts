@@ -1,6 +1,6 @@
 import { getUpcomingTasks, jstDateStr, setRemindNumber } from "./notion";
 import { pushLineMessageWithMentions, sanitizeForTextV2 } from "./line";
-import { todayClosure } from "./closures";
+import { loadClosures, closureOn, firstBusinessDayAfterClosure } from "./closures";
 
 // リマインドの送信先＝会社グループ。反響通知と同じグループに送る。
 const LINE_GROUP_ID =
@@ -35,9 +35,19 @@ export async function sendDailyReminders(): Promise<void> {
 
   // 会社が休みの日は送らない。誰も対応できない日に
   // 「期限超過30件」を毎朝投げても、読まれなくなるだけ。
-  const closure = await todayClosure(todayStr);
+  const closures = await loadClosures().catch(() => []);
+  const closure = closureOn(todayStr, closures);
   if (closure) {
     console.log(`[remind] ${closure}のため送信しない (${todayStr})`);
+    return;
+  }
+
+  // 休業明けの初日は、10時の棚卸し（/api/report）に任せて朝は送らない。
+  // 両方送ると番号が二重に振られ、朝の番号で返信した人が
+  // 別のタスクを完了にしてしまう。
+  const back = firstBusinessDayAfterClosure(todayStr, closures);
+  if (back) {
+    console.log(`[remind] ${back}明けの初日。10時の棚卸しに任せる (${todayStr})`);
     return;
   }
 

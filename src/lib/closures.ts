@@ -149,6 +149,22 @@ export function shiftToBusinessDay(
   return { date: dueDate, reason: null };
 }
 
+/**
+ * 今日が「休業明けの初日」か。該当すればその休業の名前を返す。
+ * 昨日が休業で今日が営業日なら初日、という単純な判定にしてある。
+ *
+ * この日は朝のリマインドを止め、代わりに10時の棚卸しを送る。
+ * 両方送ると番号が二重に振られ、朝の番号で返信した人が
+ * 別のタスクを完了にしてしまう。
+ */
+export function firstBusinessDayAfterClosure(
+  todayJst: string,
+  closures: Closure[]
+): string | null {
+  if (closureOn(todayJst, closures)) return null; // 今日がまだ休業中
+  return closureOn(addDays(todayJst, -1), closures);
+}
+
 /** 今日が休業日か（朝のリマインドを止めるのに使う） */
 export async function todayClosure(todayJst: string): Promise<string | null> {
   try {
