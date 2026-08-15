@@ -29,15 +29,56 @@ export interface Closure {
 const CACHE_TTL_MS = 5 * 60 * 1000;
 let cache: { at: number; closures: Closure[] } | null = null;
 
+/**
+ * 予備の設定。Notionの休業日カレンダーが**まだ共有されていない／引けない**ときだけ使う。
+ * Notionが読めればそちらが常に優先で、これは無視される（正は1つに保つ）。
+ *   CLOSURE_DATES='[{"name":"お盆休み 2026","start":"2026-08-13","end":"2026-08-19"}]'
+ */
+function fallbackClosures(): Closure[] {
+  const raw = process.env.CLOSURE_DATES;
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw) as Closure[];
+    return Array.isArray(arr)
+      ? arr.filter((c) => c?.start).map((c) => ({
+          name: c.name ?? "休業",
+          start: c.start.slice(0, 10),
+          end: (c.end ?? c.start).slice(0, 10),
+        }))
+      : [];
+  } catch (err) {
+    console.error("CLOSURE_DATES のJSON解析に失敗:", err);
+    return [];
+  }
+}
+
 export async function loadClosures(): Promise<Closure[]> {
-  if (!CLOSURES_DB_ID) return [];
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.closures;
 
-  const res = await notion.databases.query({
-    database_id: CLOSURES_DB_ID,
-    page_size: 100,
-    filter: { property: "有効", checkbox: { equals: true } },
-  });
+  if (!CLOSURES_DB_ID) {
+    const fb = fallbackClosures();
+    cache = { at: Date.now(), closures: fb };
+    return fb;
+  }
+
+  let res;
+  try {
+    res = await notion.databases.query({
+      database_id: CLOSURES_DB_ID,
+      page_size: 100,
+      filter: { property: "有効", checkbox: { equals: true } },
+    });
+  } catch (err) {
+    // まだ共有されていない等で読めない場合は予備の設定で動かす。
+    // 休業日が読めないだけで期日計算を止めない。
+    const fb = fallbackClosures();
+    console.warn(
+      `休業日カレンダーを読めないため予備の設定を使う（${fb.length}件）:`,
+      err instanceof Error ? err.message : err
+    );
+    cache = { at: Date.now(), closures: fb };
+    return fb;
+  }
 
   const closures: Closure[] = [];
   for (const page of res.results) {
