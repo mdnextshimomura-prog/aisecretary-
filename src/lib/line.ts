@@ -149,3 +149,15 @@ function formatDate(isoDate: string): string {
   const d = new Date(`${isoDate.slice(0, 10)}T12:00:00+09:00`);
   return `${d.getMonth() + 1}月${d.getDate()}日(${WEEKDAYS[d.getDay()]})`;
 }
+
+// 分割した本文を順に送る。
+// 1リクエストにまとめず1通ずつ送るのは、途中で失敗しても
+// そこまでは届く（全部落ちない）ようにするため。
+export async function pushLineChunks(
+  to: string,
+  chunks: Array<{ text: string; mentions: Record<string, string> }>
+): Promise<void> {
+  for (const c of chunks) {
+    await pushLineMessageWithMentions(to, c.text, c.mentions);
+  }
+}
