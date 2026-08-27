@@ -489,8 +489,10 @@ export async function getPendingTaskConfirm(
   if (items.length === 0) return null;
 
   if (quotedMessageId) {
-    const byMsg = items.find((i) => i.botMessageId === quotedMessageId);
-    if (byMsg) return byMsg;
+    // **引用先が特定できなければ、直近に当てない。**
+    // 無関係な発言を引用しただけで「直近の確認への回答」と見なされ、
+    // 別依頼がそのタスクに吸い込まれて登録されなくなる。
+    return items.find((i) => i.botMessageId === quotedMessageId) ?? null;
   }
   return items.sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
 }
@@ -578,8 +580,15 @@ export async function reserveMessage(messageId: string): Promise<ReserveResult> 
     const cur = await readClaim(key);
     if (!cur) return { proceed: true }; // 直前に失効した
     if (cur.state === "done") return { proceed: false, pageId: cur.pageId };
-    // 処理中でも猶予を過ぎていれば、落ちたものとして引き継ぐ
+    // 処理中でも猶予を過ぎていれば、落ちたものとして引き継ぐ。
+    // 引き継ぎ自体を read-then-write でやると、複数インスタンスが
+    // 同じ失効claimを読んで全員が引き継いでしまう。別キーのNXで1つに絞る。
     if (now - cur.at > CLAIM_LEASE_MS) {
+      const lease = await kv.set(`${key}:takeover`, now, {
+        nx: true,
+        ex: Math.ceil(CLAIM_LEASE_MS / 1000),
+      });
+      if (lease !== "OK") return { proceed: false };
       await writeClaim(key, { state: "processing", at: now });
       return { proceed: true };
     }
@@ -623,6 +632,9 @@ export async function releaseMessage(messageId: string): Promise<void> {
 // 送信に失敗したまま確認状態を消すと、条件は固まったのに担当者へ
 // 永久に伝わらない。翌朝のリマインドは期日が明日までのものしか出さないため、
 // 納期の長いタスクは何日も表に出てこない。再送待ちとして別に持つ。
+// 休業（お盆・年末年始）をまたぐと日次ジョブが走らない日が続く。
+// 24時間で失効させると、その間に積んだ引き渡しが消えて誰にも伝わらない。
+const HANDOFF_TTL_SECONDS = 60 * 60 * 24 * 30;
 const HANDOFF_PREFIX = "handoffpending";
 const handoffMem = new Map<string, { value: PendingTaskConfirm[]; expireAt: number }>();
 
@@ -637,8 +649,8 @@ export async function addPendingHandoff(
   const key = handoffKey(groupId);
   const cur = await getPendingHandoffs(groupId);
   const next = [value, ...cur.filter((v) => v.pageId !== value.pageId)].slice(0, 50);
-  if (kvEnabled()) await kv.set(key, next, { ex: CONFIRM_TTL_SECONDS });
-  else handoffMem.set(key, { value: next, expireAt: Date.now() + CONFIRM_TTL_SECONDS * 1000 });
+  if (kvEnabled()) await kv.set(key, next, { ex: HANDOFF_TTL_SECONDS });
+  else handoffMem.set(key, { value: next, expireAt: Date.now() + HANDOFF_TTL_SECONDS * 1000 });
 }
 
 export async function getPendingHandoffs(
@@ -657,6 +669,6 @@ export async function removePendingHandoff(
 ): Promise<void> {
   const key = handoffKey(groupId);
   const next = (await getPendingHandoffs(groupId)).filter((v) => v.pageId !== pageId);
-  if (kvEnabled()) await kv.set(key, next, { ex: CONFIRM_TTL_SECONDS });
-  else handoffMem.set(key, { value: next, expireAt: Date.now() + CONFIRM_TTL_SECONDS * 1000 });
+  if (kvEnabled()) await kv.set(key, next, { ex: HANDOFF_TTL_SECONDS });
+  else handoffMem.set(key, { value: next, expireAt: Date.now() + HANDOFF_TTL_SECONDS * 1000 });
 }

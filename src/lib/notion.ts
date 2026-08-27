@@ -6,7 +6,15 @@ const DATABASE_ID = process.env.NOTION_DATABASE_ID!;
 
 export async function createNotionTask(
   task: ParsedTask,
-  rawMessage: string
+  rawMessage: string,
+  /**
+   * 発端になったLINEメッセージID。**作成時に一緒に書き込む**。
+   *
+   * 作成後に別途書き込む作りだと、作成の応答だけが失われたときに
+   * 「このメッセージのタスクは既にあるか？」を問い合わせても見つからず、
+   * 再送で同じ依頼が二重に登録される。
+   */
+  sourceMessageId?: string
 ): Promise<string> {
   const response = await notion.pages.create({
     parent: { database_id: DATABASE_ID },
@@ -55,6 +63,11 @@ export async function createNotionTask(
       元メッセージ: {
         rich_text: [{ text: { content: rawMessage } }],
       },
+      ...(sourceMessageId && {
+        メッセージID: {
+          rich_text: [{ text: { content: sourceMessageId } }],
+        },
+      }),
     },
   });
 

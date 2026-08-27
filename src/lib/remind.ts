@@ -20,15 +20,22 @@ async function retryPendingHandoffs(): Promise<void> {
   const pendings = await getPendingHandoffs(LINE_GROUP_ID).catch(() => []);
   if (pendings.length === 0) return;
 
-  // 既に完了・削除されたタスクへは送らない
-  const alive = new Map(
-    (await listTasks().catch(() => []))
-      .filter((t) => t.status !== "完了")
-      .map((t) => [t.id, t])
-  );
+  // 既に完了・削除されたタスクへは送らない。
+  // ただしNotionを引けなかった場合に「全部完了した」と解釈してはいけない。
+  // 空リストとして扱うと、再送待ちを全件破棄して引き渡しが永久に失われる。
+  let alive: Map<string, unknown> | null = null;
+  try {
+    alive = new Map(
+      (await listTasks())
+        .filter((t) => t.status !== "完了")
+        .map((t) => [t.id, t])
+    );
+  } catch (e) {
+    console.error("[remind] タスク一覧を引けないため、生存確認を省いて再送する:", e);
+  }
 
   for (const p of pendings) {
-    if (!alive.has(p.pageId)) {
+    if (alive && !alive.has(p.pageId)) {
       await removePendingHandoff(LINE_GROUP_ID, p.pageId).catch(() => undefined);
       continue;
     }
@@ -78,6 +85,13 @@ function daysOverdue(dueStr: string, todayStr: string): number {
 export async function sendDailyReminders(): Promise<void> {
   const todayStr = jstDateStr(0);
 
+  // 引き渡しの再送は休業判定より**前**に行う。
+  // 休業を挟むと日次ジョブが何日も先に飛び、その間まだ担当者は
+  // 条件が固まったことを知らないままになる。
+  await retryPendingHandoffs().catch((e) =>
+    console.error("[remind] 引き渡し再送でエラー:", e)
+  );
+
   // 会社が休みの日は送らない。誰も対応できない日に
   // 「期限超過30件」を毎朝投げても、読まれなくなるだけ。
   const closures = await loadClosures().catch(() => []);
@@ -95,12 +109,6 @@ export async function sendDailyReminders(): Promise<void> {
     console.log(`[remind] ${back}明けの初日。10時の棚卸しに任せる (${todayStr})`);
     return;
   }
-
-  // 送れていない引き渡しを先に片付ける。リマインド本体より優先度が高い
-  // （担当者がまだ着手を知らない状態なので）
-  await retryPendingHandoffs().catch((e) =>
-    console.error("[remind] 引き渡し再送でエラー:", e)
-  );
 
   // 期日が明日まで・未完了のタスク（期限超過を含む）を期日の古い順で取得
   const tasks = await getUpcomingTasks();

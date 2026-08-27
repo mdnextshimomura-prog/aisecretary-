@@ -44,6 +44,10 @@ async function main() {
   const last = await getPendingTaskConfirm(G, null, "page-60");
   ok("最新も引ける", last?.pageId === "page-60");
 
+  // ── 引用が解決しないときは直近に当てない（レビュー4巡目の指摘）──
+  const bogus = await getPendingTaskConfirm(G, "無関係なメッセージID", null);
+  ok("引用先が特定できなければ null", bogus === null, `got=${bogus?.pageId ?? "null"}`);
+
   // ── 引用なしなら直近 ──
   const latest = await getPendingTaskConfirm(G);
   ok("引用なしは直近を返す", latest?.pageId === "page-60", `got=${latest?.pageId}`);

@@ -257,10 +257,18 @@ async function handoffToAssignee(
     // ただし**再送待ちとして積む**。ここで捨てると、条件は固まったのに
     // 担当者へ永久に伝わらない。日次リマインドの前に再送を試みる。
     console.error("担当者への引き渡し通知に失敗:", pending.pageId);
-    await addPendingHandoff(groupId, pending).catch(() => undefined);
+    const queued = await addPendingHandoff(groupId, pending)
+      .then(() => true)
+      .catch((e) => {
+        console.error("引き渡しの再送待ちへの登録にも失敗:", e);
+        return false;
+      });
     await appendTaskNote(pending.pageId, [
       `⚠️ ${jstDateStr(0)} 担当者への引き渡し通知をLINEへ送れませんでした。`,
-      `・条件は確定済みです。再送待ちに積みました（翌営業日の朝に再試行します）。`,
+      queued
+        ? `・条件は確定済みです。再送待ちに積みました（次の日次ジョブで再試行します）。`
+        : `・⚠️ 再送待ちにも積めませんでした。**担当者へ手動で共有してください。**`,
+      ...(pending.assignee ? [`・担当：${pending.assignee}`] : []),
     ]).catch(() => undefined);
     return;
   }
@@ -548,6 +556,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
       // 引用先が「確認待ちではない既存タスク」なら、③の取消/完了/担当者に任せる
       const quotedIsOther = Boolean(quotedTask && pending?.pageId !== quotedTask.id);
+      // 引用がこの確認を指していると確認できた場合だけ「引用リプライ」として扱う。
+      // 無関係な発言を引用しただけで拾い直しを許すと、別依頼が吸い込まれる。
+      const quoteResolved =
+        Boolean(quotedId) &&
+        Boolean(pending) &&
+        (quotedTask?.id === pending?.pageId || pending?.botMessageId === quotedId);
 
       if (pending && !quotedIsOther) {
         const body = stripMentions(event.message);
@@ -606,7 +620,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           pending.fields,
           pending.settled,
           pending.title,
-          Boolean(quotedId)
+          quoteResolved
         );
 
         // 「新しい依頼を吸い込まない」の安全弁は isNewRequest に置く。
@@ -925,9 +939,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         continue;
       }
 
+      // 予約に勝っても、猶予切れの引き継ぎ等で既に作られている可能性がある。
+      // 作成時にメッセージIDを書いているので、ここで確実に拾える。
+      const existing = await findTaskByMessageId(event.message.id).catch(() => null);
+      if (existing) {
+        await completeMessage(event.message.id, existing.id).catch(() => undefined);
+        console.log("既に登録済みのためスキップ:", existing.id);
+        continue;
+      }
+
       let pageId: string;
       try {
-        pageId = await createNotionTask(parsed, rawForNotion);
+        // メッセージIDを**作成時に**書き込む。後付けだと、応答が失われたときに
+        // 「既に作られているか」を問い合わせても見つからず二重登録になる。
+        pageId = await createNotionTask(parsed, rawForNotion, event.message.id);
       } catch (err) {
         // 応答が失われただけで、Notion側には出来ていることがある。
         // 確かめずに解放すると、再送で同じタスクが二重に作られる。
