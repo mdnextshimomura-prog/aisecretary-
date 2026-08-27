@@ -527,24 +527,136 @@ export async function deletePendingTaskConfirm(
  *
  * @returns 予約できた（＝自分が処理すべき）なら true
  */
-const seenMem = new Map<string, number>();
-export async function reserveMessage(messageId: string): Promise<boolean> {
-  const key = `msgseen:${messageId}`;
-  const ttl = 60 * 60 * 24;
-  if (kvEnabled()) {
-    const res = await kv.set(key, 1, { nx: true, ex: ttl });
-    return res === "OK";
-  }
+interface MsgClaim {
+  state: "processing" | "done";
+  pageId?: string;
+  at: number;
+}
+
+/** 処理中とみなす猶予。これを過ぎた予約は落ちたものとして引き継ぐ */
+const CLAIM_LEASE_MS = 3 * 60 * 1000;
+const CLAIM_TTL_SECONDS = 60 * 60 * 24;
+const claimMem = new Map<string, MsgClaim>();
+
+async function readClaim(key: string): Promise<MsgClaim | null> {
+  if (kvEnabled()) return (await kv.get<MsgClaim>(key)) ?? null;
+  return claimMem.get(key) ?? null;
+}
+async function writeClaim(key: string, c: MsgClaim): Promise<void> {
+  if (kvEnabled()) await kv.set(key, c, { ex: CLAIM_TTL_SECONDS });
+  else claimMem.set(key, c);
+}
+
+export interface ReserveResult {
+  /** 自分が登録処理を進めてよいか */
+  proceed: boolean;
+  /** 既に登録済みのページID（done のとき） */
+  pageId?: string;
+}
+
+/**
+ * LINEメッセージIDの**原子的な予約**。
+ *
+ * LINEは2xxを返さないとWebhookを再送する。「Notionを検索して無ければ作る」だけだと
+ * 同時到達で両方がすり抜け、同じ依頼が二重に登録される。KVのNXで旗を立てる。
+ *
+ * ただの24時間フラグにすると、予約直後に関数が落ちた場合に
+ * **以降の再送が全部スキップされ、依頼が永久に登録されない**。
+ * そのため「処理中」には猶予（lease）を持たせ、猶予切れは引き継げるようにする。
+ */
+export async function reserveMessage(messageId: string): Promise<ReserveResult> {
+  const key = `msgclaim:${messageId}`;
   const now = Date.now();
-  const hit = seenMem.get(key);
-  if (hit && now < hit) return false;
-  seenMem.set(key, now + ttl * 1000);
-  return true;
+
+  if (kvEnabled()) {
+    const won = await kv.set(key, { state: "processing", at: now }, {
+      nx: true,
+      ex: CLAIM_TTL_SECONDS,
+    });
+    if (won === "OK") return { proceed: true };
+
+    const cur = await readClaim(key);
+    if (!cur) return { proceed: true }; // 直前に失効した
+    if (cur.state === "done") return { proceed: false, pageId: cur.pageId };
+    // 処理中でも猶予を過ぎていれば、落ちたものとして引き継ぐ
+    if (now - cur.at > CLAIM_LEASE_MS) {
+      await writeClaim(key, { state: "processing", at: now });
+      return { proceed: true };
+    }
+    return { proceed: false };
+  }
+
+  const cur = claimMem.get(key);
+  if (!cur) {
+    claimMem.set(key, { state: "processing", at: now });
+    return { proceed: true };
+  }
+  if (cur.state === "done") return { proceed: false, pageId: cur.pageId };
+  if (now - cur.at > CLAIM_LEASE_MS) {
+    claimMem.set(key, { state: "processing", at: now });
+    return { proceed: true };
+  }
+  return { proceed: false };
+}
+
+/** 登録完了を記録する（以後の再送はこのページIDで既登録と判断できる） */
+export async function completeMessage(
+  messageId: string,
+  pageId: string
+): Promise<void> {
+  await writeClaim(`msgclaim:${messageId}`, {
+    state: "done",
+    pageId,
+    at: Date.now(),
+  });
 }
 
 /** 予約を取り消す（登録に失敗したときに、再送でやり直せるようにする） */
 export async function releaseMessage(messageId: string): Promise<void> {
-  const key = `msgseen:${messageId}`;
+  const key = `msgclaim:${messageId}`;
   if (kvEnabled()) await kv.del(key);
-  else seenMem.delete(key);
+  else claimMem.delete(key);
+}
+
+// ── 引き渡し（担当者への通知）の再送待ち ──
+//
+// 送信に失敗したまま確認状態を消すと、条件は固まったのに担当者へ
+// 永久に伝わらない。翌朝のリマインドは期日が明日までのものしか出さないため、
+// 納期の長いタスクは何日も表に出てこない。再送待ちとして別に持つ。
+const HANDOFF_PREFIX = "handoffpending";
+const handoffMem = new Map<string, { value: PendingTaskConfirm[]; expireAt: number }>();
+
+function handoffKey(groupId: string | undefined): string {
+  return `${HANDOFF_PREFIX}:${groupId ?? "direct"}`;
+}
+
+export async function addPendingHandoff(
+  groupId: string | undefined,
+  value: PendingTaskConfirm
+): Promise<void> {
+  const key = handoffKey(groupId);
+  const cur = await getPendingHandoffs(groupId);
+  const next = [value, ...cur.filter((v) => v.pageId !== value.pageId)].slice(0, 50);
+  if (kvEnabled()) await kv.set(key, next, { ex: CONFIRM_TTL_SECONDS });
+  else handoffMem.set(key, { value: next, expireAt: Date.now() + CONFIRM_TTL_SECONDS * 1000 });
+}
+
+export async function getPendingHandoffs(
+  groupId: string | undefined
+): Promise<PendingTaskConfirm[]> {
+  const key = handoffKey(groupId);
+  if (kvEnabled()) return (await kv.get<PendingTaskConfirm[]>(key)) ?? [];
+  const hit = handoffMem.get(key);
+  if (!hit || Date.now() > hit.expireAt) return [];
+  return hit.value;
+}
+
+export async function removePendingHandoff(
+  groupId: string | undefined,
+  pageId: string
+): Promise<void> {
+  const key = handoffKey(groupId);
+  const next = (await getPendingHandoffs(groupId)).filter((v) => v.pageId !== pageId);
+  if (kvEnabled()) await kv.set(key, next, { ex: CONFIRM_TTL_SECONDS });
+  else handoffMem.set(key, { value: next, expireAt: Date.now() + CONFIRM_TTL_SECONDS * 1000 });
 }

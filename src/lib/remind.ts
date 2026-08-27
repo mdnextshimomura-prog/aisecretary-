@@ -3,6 +3,56 @@ import { pushLineChunks, sanitizeForTextV2 } from "./line";
 import { buildChunks, type ChunkItem } from "./chunk";
 import { STATUS_PENDING } from "./clarify";
 import { loadClosures, closureOn, firstBusinessDayAfterClosure } from "./closures";
+import { buildHandoffMessage } from "./clarify";
+import { pushLineMessage, pushLineMessageWithMentions } from "./line";
+import { getPendingHandoffs, removePendingHandoff } from "./email/session";
+import { listTasks } from "./notion";
+
+/**
+ * 送信に失敗した「担当者への引き渡し」を送り直す。
+ *
+ * 通常のリマインドは**期日が明日までのタスクしか出さない**ため、
+ * 納期の長いタスク（査定書は7日）は何日も表に出てこない。
+ * 引き渡しの失敗をリマインド任せにすると、条件は固まったのに
+ * 担当者が何日も気づかないことになる。ここで独立に再送する。
+ */
+async function retryPendingHandoffs(): Promise<void> {
+  const pendings = await getPendingHandoffs(LINE_GROUP_ID).catch(() => []);
+  if (pendings.length === 0) return;
+
+  // 既に完了・削除されたタスクへは送らない
+  const alive = new Map(
+    (await listTasks().catch(() => []))
+      .filter((t) => t.status !== "完了")
+      .map((t) => [t.id, t])
+  );
+
+  for (const p of pendings) {
+    if (!alive.has(p.pageId)) {
+      await removePendingHandoff(LINE_GROUP_ID, p.pageId).catch(() => undefined);
+      continue;
+    }
+    const hasMention = Boolean(p.assigneeUserId);
+    const text = buildHandoffMessage(
+      p.title,
+      p.propertyName ?? null,
+      p.settled,
+      p.fields,
+      p.assignee ?? null,
+      hasMention
+    );
+    const ok = await (hasMention && p.assigneeUserId
+      ? pushLineMessageWithMentions(LINE_GROUP_ID, text, { assignee: p.assigneeUserId })
+      : pushLineMessage(LINE_GROUP_ID, text)
+    ).catch(() => false);
+    if (ok) {
+      console.log("[remind] 引き渡しを再送しました:", p.pageId);
+      await removePendingHandoff(LINE_GROUP_ID, p.pageId).catch(() => undefined);
+    } else {
+      console.error("[remind] 引き渡しの再送に失敗（次回に持ち越し）:", p.pageId);
+    }
+  }
+}
 
 // リマインドの送信先＝会社グループ。反響通知と同じグループに送る。
 const LINE_GROUP_ID =
@@ -45,6 +95,12 @@ export async function sendDailyReminders(): Promise<void> {
     console.log(`[remind] ${back}明けの初日。10時の棚卸しに任せる (${todayStr})`);
     return;
   }
+
+  // 送れていない引き渡しを先に片付ける。リマインド本体より優先度が高い
+  // （担当者がまだ着手を知らない状態なので）
+  await retryPendingHandoffs().catch((e) =>
+    console.error("[remind] 引き渡し再送でエラー:", e)
+  );
 
   // 期日が明日まで・未完了のタスク（期限超過を含む）を期日の古い順で取得
   const tasks = await getUpcomingTasks();

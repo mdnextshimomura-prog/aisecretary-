@@ -46,6 +46,9 @@ import {
   deletePendingTaskConfirm,
   reserveMessage,
   releaseMessage,
+  completeMessage,
+  addPendingHandoff,
+  removePendingHandoff,
   type PendingTaskConfirm,
 } from "@/lib/email/session";
 import {
@@ -251,15 +254,17 @@ async function handoffToAssignee(
 
   if (!ok) {
     // 送信に失敗しても状態は戻さない（条件は本当に揃っているため）。
-    // ただし「誰にも伝わっていない」ことが後から分かるようNotionに残す。
-    // これが無いと、条件は固まったのに担当者が知らないまま止まる。
+    // ただし**再送待ちとして積む**。ここで捨てると、条件は固まったのに
+    // 担当者へ永久に伝わらない。日次リマインドの前に再送を試みる。
     console.error("担当者への引き渡し通知に失敗:", pending.pageId);
+    await addPendingHandoff(groupId, pending).catch(() => undefined);
     await appendTaskNote(pending.pageId, [
       `⚠️ ${jstDateStr(0)} 担当者への引き渡し通知をLINEへ送れませんでした。`,
-      `・条件は確定済みです。翌朝のリマインドで担当者にメンションされます。`,
-      `・急ぎの場合は口頭・別経路で共有してください。`,
+      `・条件は確定済みです。再送待ちに積みました（翌営業日の朝に再試行します）。`,
     ]).catch(() => undefined);
+    return;
   }
+  await removePendingHandoff(groupId, pending.pageId).catch(() => undefined);
 }
 
 async function finalizeDue(parsed: ParsedTask, now: Date): Promise<void> {
@@ -596,7 +601,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // (b) 具体的な回答か、無関係な別依頼かを判定する。
         //     新規依頼と判定されたものは絶対に吸い込まない。ここで吸い込むと
         //     **その依頼は登録すらされずに消える**（確認の取りこぼしより損害が大きい）。
-        const ans = await interpretAnswer(body, pending.fields, pending.settled, pending.title);
+        const ans = await interpretAnswer(
+          body,
+          pending.fields,
+          pending.settled,
+          pending.title,
+          Boolean(quotedId)
+        );
 
         // 「新しい依頼を吸い込まない」の安全弁は isNewRequest に置く。
         // 確信度だけで切ると、「名義を仲介会社宛てに変えて」のような
@@ -908,8 +919,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         text || `（本文なし・添付${attachments.length}件＋担当者へのメンション）`;
       // LINEはWebhookが2xxを返さないと再送する。「検索して無ければ作る」だけだと
       // 同時到達で両方がすり抜けて二重登録になるため、先に原子的に予約する。
-      if (!(await reserveMessage(event.message.id))) {
-        console.log("再送または処理中とみなしてスキップ:", event.message.id);
+      const claim = await reserveMessage(event.message.id);
+      if (!claim.proceed) {
+        console.log("再送または処理中とみなしてスキップ:", event.message.id, claim.pageId ?? "");
         continue;
       }
 
@@ -917,14 +929,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       try {
         pageId = await createNotionTask(parsed, rawForNotion);
       } catch (err) {
-        // 作成そのものに失敗した場合だけ予約を解放する。
-        // 解放しないと、再送しても「処理済み」と見なされて永久に登録されない。
+        // 応答が失われただけで、Notion側には出来ていることがある。
+        // 確かめずに解放すると、再送で同じタスクが二重に作られる。
+        const created = await findTaskByMessageId(event.message.id).catch(() => null);
+        if (created) {
+          await completeMessage(event.message.id, created.id).catch(() => undefined);
+          console.error("作成応答は失敗したが登録済みだった:", created.id);
+          continue;
+        }
+        // 本当に出来ていない場合だけ解放し、再送でやり直せるようにする
         await releaseMessage(event.message.id).catch(() => undefined);
         throw err;
       }
 
       // ★ここから先は何が失敗しても「登録失敗」と返さない。
       // 返してしまうと手で再投稿され、同じ依頼が二重に登録される。
+      // 登録済みを確定させる。以後の再送はここで止まり、二重登録にならない。
+      await completeMessage(event.message.id, pageId).catch(() => undefined);
       await setTaskMessageIds(pageId, [event.message.id]).catch((e) =>
         console.error("メッセージIDの紐づけに失敗（登録は完了）:", e)
       );

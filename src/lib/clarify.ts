@@ -351,7 +351,7 @@ export interface AnswerResult {
    */
   isNewRequest: boolean;
   confidence: number;
-  /** key -> 確定値 */
+  /** key -> 確定値。必須項目は発言に根拠がある場合だけ入る */
   updates: Record<string, string>;
   /** 既に決まっていた値を上書きした key */
   overrides: string[];
@@ -368,6 +368,9 @@ const ANSWER_PROMPT = `あなたは不動産会社の営業事務です。
 - 「〜に変えて」「〜ではなく〜で」は、**既存の値を上書きする回答**として扱う
 - 確認項目と関係のない新しい依頼・別物件の話・雑談は「回答ではない」
 - 迷ったら isAnswer は false にする（誤って回答扱いにすると、新しい依頼が失われる）
+
+updates の evidence は**発言に実在する文字列をそのまま**入れてください。
+要約・言い換え・自分で書いた文は不可です。根拠を示せない項目は updates に入れないでください。
 
 confidence は**「確認中のタスクに関する発言かどうか」の確信度**です。
 指示の中身の解釈に迷う場合でも、そのタスクについての発言だと分かるなら高い値にしてください
@@ -392,7 +395,7 @@ amendment はそのままLINEで社長に返信されます。**40字以内の�
   "isNewRequest": true/false,
   "confidence": 0〜1の数値,   // 「この発言が確認中のタスクに関するものだ」という確信度。
                             // 値の解釈が曖昧でも、そのタスクの話だと分かるなら高くする
-  "updates": { "項目key": "確定した値" },
+  "updates": { "項目key": { "value": "確定した値", "evidence": "その値の根拠になった発言中の文字列をそのまま抜き出す" } },
   "overrides": ["上書きした項目key"],
   "amendment": "項目に収まらない修正指示の要約 または null"
 }`;
@@ -401,7 +404,16 @@ export async function interpretAnswer(
   text: string,
   fields: RequiredField[],
   settled: Record<string, string>,
-  taskTitle: string
+  taskTitle: string,
+  /**
+   * 引用リプライか。
+   *
+   * 引用が無い発言では「回答ではない」という判定を覆さない。
+   * 確認待ちの最中に来た別依頼（「請求書の宛先をA社に変えて」など）が
+   * 修正指示に見えることがあり、覆すと**その依頼が登録されずに消える**。
+   * 引用があれば対象が明示されているので、覆してよい。
+   */
+  isQuotedReply = false
 ): Promise<AnswerResult> {
   const miss: AnswerResult = {
     isAnswer: false,
@@ -465,8 +477,10 @@ export async function interpretAnswer(
     //
     // 拾い直すのは amendment がある場合だけにする。amendment は定義上
     // 「このタスクへの修正指示」なので、別依頼と取り違える余地が小さい。
-    const isAnswer = Boolean(parsed.isAnswer) || Boolean(amendment);
-    const raised = !parsed.isAnswer && Boolean(amendment);
+    // 引用が無い場合、モデルが「回答ではない」と言ったものは覆さない
+    const mayReclassify = isQuotedReply && Boolean(amendment);
+    const isAnswer = Boolean(parsed.isAnswer) || mayReclassify;
+    const raised = !parsed.isAnswer && mayReclassify;
 
     return {
       isAnswer,
@@ -475,7 +489,7 @@ export async function interpretAnswer(
         ? Math.max(Number(parsed.confidence ?? 0), 0.7)
         : Number(parsed.confidence ?? 0),
       // 回答でないものの updates は捨てる。呼び出し側へ渡すと事故の元になる
-      updates: isAnswer ? parsed.updates ?? {} : {},
+      updates: isAnswer ? verifyUpdates(parsed.updates, fields, text) : {},
       overrides: isAnswer ? parsed.overrides ?? [] : [],
       amendment,
     };
@@ -485,6 +499,51 @@ export async function interpretAnswer(
     console.error("[clarify] 回答の解釈に失敗（通常解析へ）:", err);
     return miss;
   }
+}
+
+/**
+ * 回答の updates を検査して、採用してよい値だけを返す。
+ *
+ * **必須項目は、発言そのものに根拠がある場合だけ採用する。**
+ * ここを通さないと、モデルが推測した金額や名義がそのまま確定し、
+ * 担当者が誤った条件で書類を作ることになる。
+ * 必須でない項目は提案値で埋まる前提なので、根拠までは求めない。
+ */
+function verifyUpdates(
+  raw: unknown,
+  fields: RequiredField[],
+  answerText: string
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!raw || typeof raw !== "object") return out;
+  const hay = normalizeForMatch(answerText);
+
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const field = fields.find((f) => f.key === k);
+    if (!field) continue;
+
+    const isObj = v && typeof v === "object";
+    const value = String(
+      (isObj ? (v as { value?: unknown }).value : v) ?? ""
+    ).trim();
+    if (!value) continue;
+
+    if (field.critical) {
+      const ev = String(
+        (isObj ? (v as { evidence?: unknown }).evidence : "") ?? ""
+      ).trim();
+      // 根拠そのもの、または値自体が発言に出ていれば採用する
+      const supported =
+        (ev && hay.includes(normalizeForMatch(ev))) ||
+        hay.includes(normalizeForMatch(value));
+      if (!supported) {
+        console.warn(`[clarify] 必須項目 ${k} を根拠なしと判断して採用しなかった`);
+        continue;
+      }
+    }
+    out[k] = value;
+  }
+  return out;
 }
 
 /** 回答が反映された結果をLINEに返す文面 */

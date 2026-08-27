@@ -11,6 +11,10 @@ import {
   countPendingTaskConfirms,
   reserveMessage,
   releaseMessage,
+  completeMessage,
+  addPendingHandoff,
+  getPendingHandoffs,
+  removePendingHandoff,
   type PendingTaskConfirm,
 } from "../src/lib/email/session";
 
@@ -66,17 +70,31 @@ async function main() {
     `${before} -> ${await countPendingTaskConfirms(G)}`);
 
   // ── メッセージIDの予約（二重登録防止）──
-  ok("初回は予約できる", (await reserveMessage("m-1")) === true);
-  ok("2回目は予約できない", (await reserveMessage("m-1")) === false);
+  ok("初回は予約できる", (await reserveMessage("m-1")).proceed === true);
+  ok("2回目は予約できない", (await reserveMessage("m-1")).proceed === false);
   // 同時到達の再現：同じIDで並行に予約を試す → 1つだけ通る
   const results = await Promise.all(
     Array.from({ length: 8 }, () => reserveMessage("m-concurrent"))
   );
   ok("同時8件で予約できるのは1つだけ",
-    results.filter(Boolean).length === 1, `通過=${results.filter(Boolean).length}`);
+    results.filter((r) => r.proceed).length === 1,
+    `通過=${results.filter((r) => r.proceed).length}`);
+
+  // 登録完了を記録したら、再送はページIDを添えて止まる
+  await completeMessage("m-1", "page-created");
+  const after = await reserveMessage("m-1");
+  ok("完了後は進めない", after.proceed === false);
+  ok("既存ページIDを返す", after.pageId === "page-created", `got=${after.pageId}`);
+
   // 登録に失敗したときは解放して再送でやり直せる
   await releaseMessage("m-1");
-  ok("解放後は再度予約できる", (await reserveMessage("m-1")) === true);
+  ok("解放後は再度予約できる", (await reserveMessage("m-1")).proceed === true);
+
+  // ── 引き渡しの再送待ち ──
+  await addPendingHandoff(G, mk(90));
+  ok("再送待ちに積める", (await getPendingHandoffs(G)).some((v) => v.pageId === "page-90"));
+  await removePendingHandoff(G, "page-90");
+  ok("送れたら消える", !(await getPendingHandoffs(G)).some((v) => v.pageId === "page-90"));
 
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);
