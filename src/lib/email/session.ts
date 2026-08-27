@@ -554,6 +554,14 @@ export interface ReserveResult {
   proceed: boolean;
   /** 既に登録済みのページID（done のとき） */
   pageId?: string;
+  /**
+   * 他のインスタンスが処理中で、まだ完了していない状態か。
+   *
+   * これを 200 で握り潰してはいけない。処理中の側が落ちていた場合、
+   * LINEは再送をやめ、猶予が切れても誰も引き継がず**依頼が永久に消える**。
+   * 呼び出し側は再送されるよう非2xxを返すこと。
+   */
+  inProgress?: boolean;
 }
 
 /**
@@ -588,11 +596,11 @@ export async function reserveMessage(messageId: string): Promise<ReserveResult> 
         nx: true,
         ex: Math.ceil(CLAIM_LEASE_MS / 1000),
       });
-      if (lease !== "OK") return { proceed: false };
+      if (lease !== "OK") return { proceed: false, inProgress: true };
       await writeClaim(key, { state: "processing", at: now });
       return { proceed: true };
     }
-    return { proceed: false };
+    return { proceed: false, inProgress: true };
   }
 
   const cur = claimMem.get(key);
@@ -605,7 +613,7 @@ export async function reserveMessage(messageId: string): Promise<ReserveResult> 
     claimMem.set(key, { state: "processing", at: now });
     return { proceed: true };
   }
-  return { proceed: false };
+  return { proceed: false, inProgress: true };
 }
 
 /** 登録完了を記録する（以後の再送はこのページIDで既登録と判断できる） */
@@ -636,39 +644,69 @@ export async function releaseMessage(messageId: string): Promise<void> {
 // 24時間で失効させると、その間に積んだ引き渡しが消えて誰にも伝わらない。
 const HANDOFF_TTL_SECONDS = 60 * 60 * 24 * 30;
 const HANDOFF_PREFIX = "handoffpending";
-const handoffMem = new Map<string, { value: PendingTaskConfirm[]; expireAt: number }>();
 
-function handoffKey(groupId: string | undefined): string {
-  return `${HANDOFF_PREFIX}:${groupId ?? "direct"}`;
+// 配列を読んで書き戻す作りだと、同時に複数の送信が失敗したときに
+// 互いの追加を消してしまう（送信失敗はネットワーク障害でまとめて起きる）。
+// 確認待ちと同じく、ページ単位の独立キー＋索引にする。
+function handoffItemKey(groupId: string | undefined, pageId: string): string {
+  return `${HANDOFF_PREFIX}:${groupId ?? "direct"}:${pageId}`;
 }
+function handoffIndexKey(groupId: string | undefined): string {
+  return `${HANDOFF_PREFIX}idx:${groupId ?? "direct"}`;
+}
+
+const handoffItemMem = new Map<string, PendingTaskConfirm>();
+const handoffIdxMem = new Map<string, string[]>();
 
 export async function addPendingHandoff(
   groupId: string | undefined,
   value: PendingTaskConfirm
 ): Promise<void> {
-  const key = handoffKey(groupId);
-  const cur = await getPendingHandoffs(groupId);
-  const next = [value, ...cur.filter((v) => v.pageId !== value.pageId)].slice(0, 50);
-  if (kvEnabled()) await kv.set(key, next, { ex: HANDOFF_TTL_SECONDS });
-  else handoffMem.set(key, { value: next, expireAt: Date.now() + HANDOFF_TTL_SECONDS * 1000 });
+  const ik = handoffItemKey(groupId, value.pageId);
+  if (kvEnabled()) await kv.set(ik, value, { ex: HANDOFF_TTL_SECONDS });
+  else handoffItemMem.set(ik, value);
+
+  const xk = handoffIndexKey(groupId);
+  const cur = kvEnabled()
+    ? (await kv.get<string[]>(xk)) ?? []
+    : handoffIdxMem.get(xk) ?? [];
+  const next = [value.pageId, ...cur.filter((id) => id !== value.pageId)];
+  if (kvEnabled()) await kv.set(xk, next, { ex: HANDOFF_TTL_SECONDS });
+  else handoffIdxMem.set(xk, next);
 }
 
 export async function getPendingHandoffs(
   groupId: string | undefined
 ): Promise<PendingTaskConfirm[]> {
-  const key = handoffKey(groupId);
-  if (kvEnabled()) return (await kv.get<PendingTaskConfirm[]>(key)) ?? [];
-  const hit = handoffMem.get(key);
-  if (!hit || Date.now() > hit.expireAt) return [];
-  return hit.value;
+  const xk = handoffIndexKey(groupId);
+  const ids = kvEnabled()
+    ? (await kv.get<string[]>(xk)) ?? []
+    : handoffIdxMem.get(xk) ?? [];
+  const out: PendingTaskConfirm[] = [];
+  for (const id of ids) {
+    const ik = handoffItemKey(groupId, id);
+    const v = kvEnabled()
+      ? await kv.get<PendingTaskConfirm>(ik)
+      : handoffItemMem.get(ik);
+    if (v) out.push(v);
+  }
+  return out;
 }
 
 export async function removePendingHandoff(
   groupId: string | undefined,
   pageId: string
 ): Promise<void> {
-  const key = handoffKey(groupId);
-  const next = (await getPendingHandoffs(groupId)).filter((v) => v.pageId !== pageId);
-  if (kvEnabled()) await kv.set(key, next, { ex: HANDOFF_TTL_SECONDS });
-  else handoffMem.set(key, { value: next, expireAt: Date.now() + HANDOFF_TTL_SECONDS * 1000 });
+  const ik = handoffItemKey(groupId, pageId);
+  if (kvEnabled()) await kv.del(ik);
+  else handoffItemMem.delete(ik);
+
+  const xk = handoffIndexKey(groupId);
+  const cur = kvEnabled()
+    ? (await kv.get<string[]>(xk)) ?? []
+    : handoffIdxMem.get(xk) ?? [];
+  const next = cur.filter((id) => id !== pageId);
+  if (kvEnabled()) await kv.set(xk, next, { ex: HANDOFF_TTL_SECONDS });
+  else handoffIdxMem.set(xk, next);
 }
+

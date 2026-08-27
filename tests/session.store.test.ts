@@ -100,6 +100,29 @@ async function main() {
   await removePendingHandoff(G, "page-90");
   ok("送れたら消える", !(await getPendingHandoffs(G)).some((v) => v.pageId === "page-90"));
 
+  // 障害時は複数の送信がまとめて失敗する。同時に積んでも互いを消さないこと
+  await Promise.all([91, 92, 93, 94, 95].map((n) => addPendingHandoff(G, mk(n))));
+  const queued = await getPendingHandoffs(G);
+  ok("同時に積んでも消えない",
+    [91, 92, 93, 94, 95].every((n) => queued.some((v) => v.pageId === `page-${n}`)),
+    `件数=${queued.length}`);
+
+  // 追加と削除が同時に走っても、残すべきものが消えないこと
+  await Promise.all([
+    addPendingHandoff(G, mk(96)),
+    removePendingHandoff(G, "page-91"),
+  ]);
+  const after2 = await getPendingHandoffs(G);
+  ok("追加と削除が競合しても新規は残る", after2.some((v) => v.pageId === "page-96"));
+
+  // ── 処理中は「登録済み」と区別できること（200で握り潰さないため）──
+  await reserveMessage("m-busy");
+  const busy = await reserveMessage("m-busy");
+  ok("処理中は inProgress を返す", busy.inProgress === true && busy.proceed === false);
+  await completeMessage("m-busy", "page-done");
+  const done = await reserveMessage("m-busy");
+  ok("完了後は inProgress ではない", !done.inProgress && done.pageId === "page-done");
+
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);
 }

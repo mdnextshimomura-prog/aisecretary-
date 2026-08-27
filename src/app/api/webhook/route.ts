@@ -256,18 +256,11 @@ async function handoffToAssignee(
     // 送信に失敗しても状態は戻さない（条件は本当に揃っているため）。
     // ただし**再送待ちとして積む**。ここで捨てると、条件は固まったのに
     // 担当者へ永久に伝わらない。日次リマインドの前に再送を試みる。
-    console.error("担当者への引き渡し通知に失敗:", pending.pageId);
-    const queued = await addPendingHandoff(groupId, pending)
-      .then(() => true)
-      .catch((e) => {
-        console.error("引き渡しの再送待ちへの登録にも失敗:", e);
-        return false;
-      });
+    // 送信前に再送待ちへ積んである（write-ahead）。ここでは消さずに残すだけ。
+    console.error("担当者への引き渡し通知に失敗（再送待ちに残す）:", pending.pageId);
     await appendTaskNote(pending.pageId, [
       `⚠️ ${jstDateStr(0)} 担当者への引き渡し通知をLINEへ送れませんでした。`,
-      queued
-        ? `・条件は確定済みです。再送待ちに積みました（次の日次ジョブで再試行します）。`
-        : `・⚠️ 再送待ちにも積めませんでした。**担当者へ手動で共有してください。**`,
+      `・条件は確定済みです。次の日次ジョブで再送します。`,
       ...(pending.assignee ? [`・担当：${pending.assignee}`] : []),
     ]).catch(() => undefined);
     return;
@@ -419,29 +412,67 @@ function urgencyFromDue(dueDate: string, now: Date): ParsedTask["urgency"] {
 async function registerTaskFromText(
   text: string,
   replyToken: string,
-  groupId: string | undefined
-): Promise<void> {
+  groupId: string | undefined,
+  /** 選択の返答メッセージID。二重登録を防ぐ予約キーに使う */
+  sourceMessageId: string
+): Promise<"ok" | "retry"> {
+  // 通常経路と同じ予約を通す。ここを素通しにすると、同時到達で
+  // 同じ依頼が2つ登録される（選択状態は片方が消す前に両方読める）。
+  const claim = await reserveMessage(sourceMessageId);
+  if (!claim.proceed) {
+    if (claim.inProgress) return "retry";
+    return "ok"; // 既に登録済み
+  }
+
   const now = jstNow();
   let parsed;
   try {
     parsed = await parseTaskFromMessage(text, todayLabel(now));
   } catch (err) {
     console.error("タスク解析エラー:", err);
+    await releaseMessage(sourceMessageId).catch(() => undefined);
     await sendLineMessage(replyToken, "⚠️ タスクの解析に失敗しました。");
-    return;
+    return "ok";
   }
   await finalizeDue(parsed, now);
+
+  let existing: { id: string } | null = null;
+  try {
+    existing = await findTaskByMessageId(sourceMessageId);
+  } catch {
+    await releaseMessage(sourceMessageId).catch(() => undefined);
+    return "retry";
+  }
+  if (existing) {
+    await completeMessage(sourceMessageId, existing.id).catch(() => undefined);
+    return "ok";
+  }
+
   let pageId: string;
   try {
-    pageId = await createNotionTask(parsed, text);
+    pageId = await createNotionTask(parsed, text, sourceMessageId);
   } catch (err) {
     console.error("タスク登録エラー:", err);
+    let created: { id: string } | null = null;
+    let lookupOk = true;
+    try {
+      created = await findTaskByMessageId(sourceMessageId);
+    } catch {
+      lookupOk = false;
+    }
+    if (created) {
+      await completeMessage(sourceMessageId, created.id).catch(() => undefined);
+      return "ok";
+    }
+    if (!lookupOk) return "retry"; // 出来たか不明。予約は残して再送に回す
+    await releaseMessage(sourceMessageId).catch(() => undefined);
     await sendLineMessage(
       replyToken,
       "⚠️ タスクの登録中にエラーが発生しました。もう一度お試しください。"
     );
-    return;
+    return "ok";
   }
+  await completeMessage(sourceMessageId, pageId).catch(() => undefined);
 
   // 通常経路と同じ初動確認をかける。ここを飛ばすと、曖昧確認メニュー経由の
   // 依頼だけ聞き返しが働かず、同じ「これ買いたい」でも挙動が変わってしまう。
@@ -459,6 +490,7 @@ async function registerTaskFromText(
     () => undefined
   );
   await rememberConfirmMessage(groupId, pageId, botMsgId ?? null);
+  return "ok";
 }
 
 // 顧客登録の入口。#新規 の書式で無い場合は handleNewCustomer が
@@ -484,6 +516,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   const body: LineWebhookBody = JSON.parse(rawBody);
+
+  // 処理を完了できなかったイベントがあれば非2xxを返してLINEに再送させる。
+  // 200で返すとLINEは再送をやめるため、処理中の側が落ちていた場合に
+  // 誰も引き継がず依頼が永久に消える。
+  let needsRetry = false;
 
   for (const event of body.events) {
     if (event.type !== "message" || !event.message) continue;
@@ -583,6 +620,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             ...extraNote,
           ]);
           if (r.complete) {
+            // **引き渡し待ちを先に積んでから**確認状態を消す。
+            // 逆順だと、消した直後に落ちた場合に確認も引き渡しも残らず、
+            // 条件は固まったのに担当者へ永久に伝わらない。
+            await addPendingHandoff(source.groupId, pending);
             await setTaskStatus(pending.pageId, "未着手");
             await deletePendingTaskConfirm(source.groupId, pending.pageId);
           } else {
@@ -805,15 +846,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (pendingClar) {
         const choice = interpretClarification(text);
         if (choice) {
-          await deletePendingClarification(source.groupId, source.userId);
           if (choice === "none") {
+            await deletePendingClarification(source.groupId, source.userId);
             await sendLineMessage(replyToken, "了解しました。今回は何もしません。");
           } else if (choice === "email") {
+            await deletePendingClarification(source.groupId, source.userId);
             await startEmailFlow(pendingClar, source, replyToken);
           } else if (choice === "crm") {
+            await deletePendingClarification(source.groupId, source.userId);
             await registerCustomer(pendingClar, replyToken);
           } else {
-            await registerTaskFromText(pendingClar, replyToken, source.groupId);
+            // タスク登録も通常経路と同じ冪等化を通す。
+            // 選択状態を先に消すと、同時到達の両方が登録に進んで二重になる。
+            const r = await registerTaskFromText(
+              pendingClar,
+              replyToken,
+              source.groupId,
+              event.message.id
+            );
+            if (r === "retry") {
+              needsRetry = true;
+              continue;
+            }
+            await deletePendingClarification(source.groupId, source.userId);
           }
           continue;
         }
@@ -935,13 +990,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 同時到達で両方がすり抜けて二重登録になるため、先に原子的に予約する。
       const claim = await reserveMessage(event.message.id);
       if (!claim.proceed) {
-        console.log("再送または処理中とみなしてスキップ:", event.message.id, claim.pageId ?? "");
+        if (claim.inProgress) {
+          // 他が処理中。**200で握り潰さない。**処理中の側が落ちていると
+          // 再送が止まり、猶予切れ後も誰も引き継がず依頼が消える。
+          console.log("他インスタンスが処理中。再送を要求:", event.message.id);
+          needsRetry = true;
+        } else {
+          console.log("登録済みのためスキップ:", event.message.id, claim.pageId ?? "");
+        }
         continue;
       }
 
       // 予約に勝っても、猶予切れの引き継ぎ等で既に作られている可能性がある。
       // 作成時にメッセージIDを書いているので、ここで確実に拾える。
-      const existing = await findTaskByMessageId(event.message.id).catch(() => null);
+      //
+      // 照会そのものが失敗した場合は「無かった」と決めつけない。
+      // 決めつけて作ると、実際には在る場合に二重登録になる。
+      let existing: { id: string } | null = null;
+      try {
+        existing = await findTaskByMessageId(event.message.id);
+      } catch (err) {
+        console.error("既存確認に失敗。作成せず再送に回す:", err);
+        await releaseMessage(event.message.id).catch(() => undefined);
+        needsRetry = true;
+        continue;
+      }
       if (existing) {
         await completeMessage(event.message.id, existing.id).catch(() => undefined);
         console.log("既に登録済みのためスキップ:", existing.id);
@@ -956,13 +1029,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       } catch (err) {
         // 応答が失われただけで、Notion側には出来ていることがある。
         // 確かめずに解放すると、再送で同じタスクが二重に作られる。
-        const created = await findTaskByMessageId(event.message.id).catch(() => null);
+        let created: { id: string } | null = null;
+        let lookupOk = true;
+        try {
+          created = await findTaskByMessageId(event.message.id);
+        } catch {
+          lookupOk = false;
+        }
         if (created) {
           await completeMessage(event.message.id, created.id).catch(() => undefined);
           console.error("作成応答は失敗したが登録済みだった:", created.id);
           continue;
         }
-        // 本当に出来ていない場合だけ解放し、再送でやり直せるようにする
+        if (!lookupOk) {
+          // 出来たかどうか分からない。解放すると二重登録の恐れがあるので
+          // 予約は残したまま再送に回す。猶予切れ後に引き継がれて再確認される。
+          console.error("作成結果を確認できず。予約を残して再送に回す:", err);
+          needsRetry = true;
+          continue;
+        }
+        // 照会が成功して「無い」と確認できた場合だけ解放する
         await releaseMessage(event.message.id).catch(() => undefined);
         throw err;
       }
@@ -1015,5 +1101,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
   }
 
+  if (needsRetry) {
+    // LINEは非2xxで再送する。既に登録できたイベントは予約で二重登録を防いである。
+    return NextResponse.json({ status: "retry" }, { status: 503 });
+  }
   return NextResponse.json({ status: "ok" });
 }
