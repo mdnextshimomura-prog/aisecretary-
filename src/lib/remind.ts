@@ -1,6 +1,7 @@
 import { getUpcomingTasks, jstDateStr, setRemindNumber } from "./notion";
 import { pushLineChunks, sanitizeForTextV2 } from "./line";
 import { buildChunks, type ChunkItem } from "./chunk";
+import { STATUS_PENDING } from "./clarify";
 import { loadClosures, closureOn, firstBusinessDayAfterClosure } from "./closures";
 
 // リマインドの送信先＝会社グループ。反響通知と同じグループに送る。
@@ -50,9 +51,16 @@ export async function sendDailyReminders(): Promise<void> {
   if (tasks.length === 0) return;
 
   const tomorrowStr = jstDateStr(1);
-  const overdueTasks = tasks.filter((t) => dueDateOnly(t) < todayStr);
-  const todayTasks = tasks.filter((t) => dueDateOnly(t) === todayStr);
-  const tomorrowTasks = tasks.filter((t) => dueDateOnly(t) === tomorrowStr);
+
+  // 初動確認の回答待ち。期日の枠に混ぜず先頭に独立させる。
+  // 混ぜると「担当者がやっていない」ように見えるが、実際は
+  // **依頼者の回答が無くて着手できない**状態で、動かすべき人が違う。
+  const pendingTasks = tasks.filter((t) => t.status === STATUS_PENDING);
+  const actionable = tasks.filter((t) => t.status !== STATUS_PENDING);
+
+  const overdueTasks = actionable.filter((t) => dueDateOnly(t) < todayStr);
+  const todayTasks = actionable.filter((t) => dueDateOnly(t) === todayStr);
+  const tomorrowTasks = actionable.filter((t) => dueDateOnly(t) === tomorrowStr);
 
   // 本文に載せる順（この順に1から番号を振る）
   const shown: UpcomingTask[] = [];
@@ -65,6 +73,12 @@ export async function sendDailyReminders(): Promise<void> {
     if (t.assignee && !t.assigneeUserId) text += `（担当：${t.assignee}）`;
     items.push({ text, userId: t.assigneeUserId });
   };
+
+  // 確認待ちを最上段に出す。ここが詰まっている限り担当者は手を出せない。
+  if (pendingTasks.length > 0) {
+    items.push({ text: `\n❓ 条件の確認待ち（${pendingTasks.length}件）` });
+    for (const t of pendingTasks) push(t, "回答待ち");
+  }
 
   // 期限超過を最初に出す。放置されているものほど上に来るよう古い順のまま。
   // 以前は10件で打ち切って「…ほか18件（Notionで確認）」としていたが、

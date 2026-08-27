@@ -348,3 +348,75 @@ export async function deletePendingClarification(
   }
   clarMemStore.delete(key);
 }
+
+// ── タスクの初動確認（clarify.ts）の「回答待ち」を保持する ──
+//
+// メールの下書き確認（30分）と違い、こちらは**社長が数時間後に答える**前提。
+// 短いTTLだと「はい」が届く前に失効し、確認が宙に浮く。24時間持たせる。
+// 失効しても引用リプライ経由（messageId → Notionページ）で辿れるため、
+// これはあくまで「直後に一言で答えられる」ための近道。
+const CONFIRM_TTL_SECONDS = 60 * 60 * 24;
+const CONFIRM_PREFIX = "taskconfirm";
+
+export interface PendingTaskConfirm {
+  pageId: string;
+  title: string;
+  /** 提案のまま承認された場合にメモへ書き込む内容 */
+  proposals: string[];
+  /** 提案では埋まらず、指示を待っている項目 */
+  awaiting: string[];
+  createdAt: number;
+}
+
+const confirmMemStore = new Map<
+  string,
+  { value: PendingTaskConfirm; expireAt: number }
+>();
+
+function confirmKey(groupId: string | undefined): string {
+  // 依頼者ではなく**グループ単位**で持つ。社長が投げた依頼に
+  // 担当者が代わりに答える場面が実際にあるため、userIdで縛らない。
+  return `${CONFIRM_PREFIX}:${groupId ?? "direct"}`;
+}
+
+export async function savePendingTaskConfirm(
+  groupId: string | undefined,
+  value: PendingTaskConfirm
+): Promise<void> {
+  const key = confirmKey(groupId);
+  if (kvEnabled()) {
+    await kv.set(key, value, { ex: CONFIRM_TTL_SECONDS });
+    return;
+  }
+  confirmMemStore.set(key, {
+    value,
+    expireAt: Date.now() + CONFIRM_TTL_SECONDS * 1000,
+  });
+}
+
+export async function getPendingTaskConfirm(
+  groupId: string | undefined
+): Promise<PendingTaskConfirm | null> {
+  const key = confirmKey(groupId);
+  if (kvEnabled()) {
+    return (await kv.get<PendingTaskConfirm>(key)) ?? null;
+  }
+  const hit = confirmMemStore.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expireAt) {
+    confirmMemStore.delete(key);
+    return null;
+  }
+  return hit.value;
+}
+
+export async function deletePendingTaskConfirm(
+  groupId: string | undefined
+): Promise<void> {
+  const key = confirmKey(groupId);
+  if (kvEnabled()) {
+    await kv.del(key);
+    return;
+  }
+  confirmMemStore.delete(key);
+}

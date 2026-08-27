@@ -16,6 +16,7 @@
 
 export const REQUEST_TYPES = [
   "査定書",
+  "購入申込書",
   "物件資料",
   "重要事項説明書",
   "売買契約書",
@@ -68,6 +69,13 @@ function urgencyFromDays(days: number): Urgency {
 const TYPE_RULES: Record<RequestType, Rule> = {
   // 現行プロンプトで明文化されていたルール
   査定書: { days: 7, time: "17:00", label: "査定書の標準納期（7日）" },
+  // 買付は相手のある話で、出すのが遅れると物件を押さえられない。当日扱いにする。
+  購入申込書: {
+    days: 0,
+    time: DEFAULT_DUE_TIME,
+    label: "購入申込書の標準納期（当日）",
+    sameDayCutoffHour: 18,
+  },
   物件資料: {
     days: 0,
     time: DEFAULT_DUE_TIME,

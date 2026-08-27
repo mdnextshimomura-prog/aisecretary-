@@ -439,6 +439,8 @@ export async function getUpcomingTasks(): Promise<
     urgency: string;
     assignee: string | null;
     assigneeUserId: string | null;
+    /** 「要確認」＝初動確認の回答待ち。リマインドで別枠に出して回答を促す */
+    status: string;
     url: string;
   }>
 > {
@@ -487,7 +489,36 @@ export async function getUpcomingTasks(): Promise<
       urgency: urgencyProp?.select?.name ?? "",
       assignee: assigneeProp?.select?.name ?? null,
       assigneeUserId: assigneeIdProp?.rich_text[0]?.plain_text ?? null,
+      status:
+        (props["ステータス"] as { select: { name: string } | null } | undefined)
+          ?.select?.name ?? "未着手",
       url: (p.url as string) ?? "",
     };
+  });
+}
+
+/**
+ * タスクのNotionページ**本文**に一行追記する。
+ *
+ * プロパティではなく本文に書くのは、**DBのスキーマを変えずに済ませる**ため。
+ * 稼働中の会社DBにプロパティを足すのは、失敗したときの影響が大きい。
+ * 本文なら追記のみで、既存データを一切壊さない。
+ *
+ * 確認のやりとり（提案→承認、指示の追加）を時系列で残す用途に使う。
+ */
+export async function appendTaskNote(
+  pageId: string,
+  lines: string[]
+): Promise<void> {
+  if (lines.length === 0) return;
+  await notion.blocks.children.append({
+    block_id: pageId,
+    children: lines.map((line) => ({
+      object: "block" as const,
+      type: "paragraph" as const,
+      paragraph: {
+        rich_text: [{ type: "text" as const, text: { content: line } }],
+      },
+    })),
   });
 }

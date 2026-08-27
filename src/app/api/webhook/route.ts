@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage } from "@/lib/line";
 import { parseTaskFromMessage, TASK_CONFIDENCE_THRESHOLD, type ParsedTask } from "@/lib/claude";
+import {
+  detectMissing,
+  buildClarifyMessage,
+  isApproval,
+  STATUS_PENDING,
+} from "@/lib/clarify";
 import { resolveDue, DEFAULT_DUE_TIME } from "@/lib/due-rules";
 import { loadClosures, shiftToBusinessDay } from "@/lib/closures";
 import { isNewCustomerCommand, handleNewCustomer } from "@/lib/crm";
@@ -18,6 +24,9 @@ import {
   savePendingClarification,
   getPendingClarification,
   deletePendingClarification,
+  savePendingTaskConfirm,
+  getPendingTaskConfirm,
+  deletePendingTaskConfirm,
 } from "@/lib/email/session";
 import {
   startEmailFlow,
@@ -36,6 +45,8 @@ import {
   completeTask,
   findTaskByRemindNumber,
   countRemainingTasks,
+  setTaskStatus,
+  appendTaskNote,
 } from "@/lib/notion";
 
 // 「これはタスクじゃない／取り消したい」意図の判定（引用リプライ時のみ使用）
@@ -327,6 +338,59 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       continue;
     }
 
+    // ①-2 初動確認への「はい」「OK」。
+    //
+    // ②の番号完了より前に置く。ここを後ろにすると、確認への同意が
+    // 新規タスクとして解析され、同じ依頼が二重に登録される。
+    //
+    // 判定は isApproval（短い肯定語のみ）に限定している。長文や具体的な
+    // 指示はここを素通りさせ、⑦の通常解析に回す。そちらで内容を拾ったほうが
+    // 「手付は300万で」のような**部分的な回答**を正しく扱えるため。
+    {
+      const pending = await getPendingTaskConfirm(source.groupId);
+      if (pending && isApproval(stripMentions(event.message))) {
+        try {
+          // 指示待ちの項目がまだ残っているのに「はい」だけ来た場合は、
+          // 提案分だけ確定させ、残りは引き続き確認待ちのままにする。
+          // ここで一括して未着手に倒すと、名義や金額が空のまま
+          // 「着手可能」の見た目になり、担当者が手戻りする。
+          const resolved = pending.proposals.length > 0;
+          if (resolved) {
+            await appendTaskNote(pending.pageId, [
+              `【承認】${new Date().toISOString().slice(0, 10)} 提案どおりで確定`,
+              ...pending.proposals.map((p) => `・${p}`),
+            ]);
+          }
+
+          if (pending.awaiting.length === 0) {
+            await setTaskStatus(pending.pageId, "未着手");
+            await deletePendingTaskConfirm(source.groupId);
+            await sendLineMessage(
+              replyToken,
+              `✅ 「${pending.title}」を確定しました。\n` +
+                pending.proposals.map((p) => `・${p}`).join("\n") +
+                `\n\n着手できる状態にしました。`
+            );
+          } else {
+            await sendLineMessage(
+              replyToken,
+              `承知しました。提案分は確定しました。\n\n` +
+                `【まだご指示をいただきたい項目】\n` +
+                pending.awaiting.map((a) => `・${a}`).join("\n") +
+                `\n\nこちらが決まり次第、着手します。`
+            );
+          }
+        } catch (err) {
+          console.error("初動確認の確定に失敗:", err);
+          await sendLineMessage(
+            replyToken,
+            "⚠️ 確認内容の反映に失敗しました。Notion側で直接ご確認ください。"
+          );
+        }
+        continue;
+      }
+    }
+
     // ② 番号での完了報告（「3済」「1,2完了」）。リマインドを引用しなくても返せるようにする。
     // 引用リプライより先に判定するのは、番号の指定のほうが対象が明確なため。
     const numbers = parseNumberedCompletion(stripMentions(event.message));
@@ -583,8 +647,54 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         text || `（本文なし・添付${attachments.length}件＋担当者へのメンション）`;
       const pageId = await createNotionTask(parsed, rawForNotion);
 
-      // LINE に「登録しました」と返信
-      const reply = buildTaskRegisteredMessage(parsed);
+      // ── 初動確認 ──
+      // 条件が抜けていて「今すぐ着手できない」依頼は、提案付きで聞き返す。
+      //
+      // ★順番が重要★ createNotionTask の**後**に置いている。
+      // 確認を登録の前に置くと、誰も答えなかった依頼が消える。
+      // 確認はあくまで登録済みタスクへの追記として動かす。
+      // detectMissing 自体が失敗しても fail-open で「不足なし」が返るので、
+      // ここが落ちて登録済みタスクが宙に浮くことはない。
+      const clarify = await detectMissing(
+        text,
+        parsed.requestType,
+        parsed.propertyName ?? null,
+        attachments
+      );
+      const needsClarify =
+        clarify.missing.length > 0 || clarify.propertyUnknown;
+
+      let reply: string;
+      if (needsClarify) {
+        await setTaskStatus(pageId, STATUS_PENDING);
+        const proposals = clarify.missing
+          .filter((f) => f.suggest)
+          .map((f) => `${f.label}：${f.suggest}`);
+        const awaiting = clarify.missing
+          .filter((f) => !f.suggest)
+          .map((f) => f.label);
+        await appendTaskNote(pageId, [
+          `【初動確認】${new Date().toISOString().slice(0, 10)}`,
+          ...Object.values(clarify.found).map((v) => `・確認済み: ${v}`),
+          ...awaiting.map((a) => `・要指示: ${a}`),
+          ...proposals.map((p) => `・提案: ${p}`),
+        ]);
+        await savePendingTaskConfirm(source.groupId, {
+          pageId,
+          title: parsed.title,
+          proposals,
+          awaiting,
+          createdAt: Date.now(),
+        });
+        reply = buildClarifyMessage(
+          parsed.title,
+          clarify,
+          parsed.propertyName ?? null
+        );
+      } else {
+        reply = buildTaskRegisteredMessage(parsed);
+      }
+
       const botMsgId = await sendLineMessage(replyToken, reply);
 
       // 元メッセージとBot返信のIDを保存（後からの引用リプライで
