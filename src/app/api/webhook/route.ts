@@ -531,7 +531,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // イベント単位で予約する。バッチ内の1件が再送を要求すると LINE は
     // バッチ全体を送り直すため、これが無いと処理済みのイベント
     // （確認への回答・メール送信・顧客登録）まで作り直される。
-    const ev = await reserveEvent(event.message.id);
+    const eventMessageId = event.message.id;
+    const ev = await reserveEvent(eventMessageId);
     if (!ev.proceed) {
       if (ev.inProgress) {
         // 他が処理中。200で返すと再送が止まり、処理中の側が落ちていた場合に
@@ -547,7 +548,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // 共有のフラグで判定すると、先のイベントが立てた true を見て
     // 「自分も再送要求済み」と誤認し、未処理のまま完了印を付けてしまう。
     let eventRetry = false;
+    // 永続的な副作用（Notionへの書き込み・メール送信・顧客登録）が
+    // 既に確定したか。**確定後は再送してはいけない。**
+    // 確定後にLINEへの返信だけ失敗した場合に再送すると、
+    // 確認状態が消えた後の回答が新規タスクとして解析されて重複する。
+    let committed = false;
+    const markCommitted = () => {
+      committed = true;
+    };
     const requestRetry = () => {
+      if (committed) {
+        // 副作用は確定済み。やり直すと二重になるので再送しない。
+        console.error("副作用は確定済みのため再送しない:", eventMessageId);
+        return;
+      }
       eventRetry = true;
       needsRetry = true;
     };
@@ -664,6 +678,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           try {
             const r = applyApproval(state);
             await persist(r, []);
+            markCommitted();
             await sendLineMessage(
               replyToken,
               buildAnswerAppliedMessage(pending.title, r.applied, [], null, r.remaining)
@@ -714,6 +729,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               ...(overridden.length > 0 ? [`・変更: ${overridden.join("・")}`] : []),
               ...(ans.amendment ? [`・修正指示: ${ans.amendment}`] : []),
             ]);
+            markCommitted();
             let msg = buildAnswerAppliedMessage(
               pending.title,
               [...r.applied, ...r.derived.map((d) => `${d}（自動）`)],
@@ -760,6 +776,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             continue;
           }
           await completeTask(t.id);
+          markCommitted();
           done.push(`${n}. ${t.title}`);
         }
 
@@ -800,6 +817,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         if (isCancelIntent(stripMentions(event.message))) {
           try {
             await archiveTask(task.id);
+            markCommitted();
             await sendLineMessage(
               replyToken,
               `🗑 タスクを取り消しました\n📋 ${task.title}`
@@ -836,6 +854,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               // 後付けの担当者指定も名簿の正式氏名に寄せる（登録時と同じ扱いにする）
               const c = await canonicalAssignee(m.userId ?? null, name);
               await updateTaskAssignee(task.id, c.name ?? name, c.userId);
+              markCommitted();
               await sendLineMessage(
                 replyToken,
                 `👤 担当者を ${c.name ?? name} さんに設定しました\n📋 ${task.title}`
@@ -880,9 +899,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           } else if (choice === "email") {
             await deletePendingClarification(source.groupId, source.userId);
             await startEmailFlow(pendingClar, source, replyToken);
+            markCommitted();
           } else if (choice === "crm") {
             await deletePendingClarification(source.groupId, source.userId);
             await registerCustomer(pendingClar, replyToken);
+            markCommitted();
           } else {
             // タスク登録も通常経路と同じ冪等化を通す。
             // 選択状態を先に消すと、同時到達の両方が登録に進んで二重になる。
@@ -896,6 +917,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               requestRetry();
               continue;
             }
+            markCommitted();
             await deletePendingClarification(source.groupId, source.userId);
           }
           continue;
@@ -907,6 +929,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 「#新規」コマンド → 紹介客をCRM_顧客へ登録（タスク分類には流さない）
       if (isNewCustomerCommand(text)) {
         await registerCustomer(text, replyToken);
+        markCommitted();
         continue;
       }
 
@@ -914,6 +937,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // （AIが稀にタスクと誤判定するのを防ぐ）
       if (looksLikeEmailCommand(text)) {
         await startEmailFlow(text, source, replyToken);
+        markCommitted();
         continue;
       }
 
@@ -924,6 +948,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         (await hasPendingEmailContext(source))
       ) {
         await startEmailFlow(text, source, replyToken);
+        markCommitted();
         continue;
       }
     }
@@ -954,6 +979,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           intent.confidence >= EMAIL_INTENT_THRESHOLD
         ) {
           await startEmailFlow(text, source, replyToken);
+          markCommitted();
           continue;
         }
       } catch (err) {
@@ -1085,6 +1111,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 返してしまうと手で再投稿され、同じ依頼が二重に登録される。
       // 登録済みを確定させる。以後の再送はここで止まり、二重登録にならない。
       await completeMessage(event.message.id, pageId).catch(() => undefined);
+      markCommitted();
       await setTaskMessageIds(pageId, [event.message.id]).catch((e) =>
         console.error("メッセージIDの紐づけに失敗（登録は完了）:", e)
       );
@@ -1130,7 +1157,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     } catch (err) {
       // 例外で抜けた＝処理し切れていない。完了印を付けてはいけない。
       // 付けると再送時にスキップされ、そのイベントが永久に失われる。
-      console.error("イベント処理中の例外。再送に回す:", event.message.id, err);
+      console.error("イベント処理中の例外:", event.message.id, err);
+      // 副作用が確定していれば再送しない（requestRetry 側で判定）
       requestRetry();
     } finally {
       if (eventRetry) {
@@ -1139,9 +1167,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       } else {
         // 完了印。書けなかった場合は予約が「処理中」のまま残るので、
         // 猶予切れ後に引き継がれて再処理される（黙って再実行はされない）。
-        await completeEvent(event.message.id).catch((e) =>
-          console.error("イベント完了の記録に失敗（猶予切れ後に再処理される）:", e)
-        );
+        // 記録に失敗すると、猶予切れ後に**確定済みの処理が再実行**される。
+        // 握り潰さず数回試して、その窓をできるだけ塞ぐ。
+        let recorded = false;
+        for (let i = 0; i < 3 && !recorded; i++) {
+          try {
+            await completeEvent(event.message.id);
+            recorded = true;
+          } catch (e) {
+            console.error(`イベント完了の記録に失敗（${i + 1}/3）:`, e);
+          }
+        }
+        if (!recorded) {
+          console.error(
+            "イベント完了を記録できなかった。猶予切れ後に再処理される可能性がある:",
+            event.message.id
+          );
+        }
       }
     }
   }
