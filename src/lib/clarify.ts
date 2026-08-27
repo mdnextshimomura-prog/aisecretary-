@@ -55,6 +55,10 @@ const CHECKLIST: Partial<Record<RequestType, RequiredField[]>> = {
   購入申込書: [
     { key: "buyer", label: "買主名義", suggest: null, critical: true },
     { key: "price", label: "購入金額（指値）", suggest: null, critical: true },
+    // 買付は「誰宛てに出すか」で書式が変わる。名義とは別項目。
+    // 検証で「名義を仲介会社宛てに変えて」が宛先変更と解釈され、
+    // 受け皿の項目が無いため宙に浮いた（2026-08-28）。
+    { key: "addressee", label: "申込書の宛先", suggest: "売主様宛て", critical: false },
     { key: "deposit", label: "手付金", suggest: "売買代金の5%", critical: false },
     { key: "loan", label: "融資利用の有無", suggest: "融資利用あり・ローン特約あり", critical: false },
     { key: "settlement", label: "決済（引渡）希望日", suggest: "契約から45日後", critical: false },
@@ -300,8 +304,14 @@ const ANSWER_PROMPT = `あなたは不動産会社の営業事務です。
 - 確認項目と関係のない新しい依頼・別物件の話・雑談は「回答ではない」
 - 迷ったら isAnswer は false にする（誤って回答扱いにすると、新しい依頼が失われる）
 
-確認項目に収まらないが依頼内容の修正にあたる指示（宛先の変更、書式の指定など）は
+確認項目に収まらないが**そのタスクの内容を修正する指示**（宛先の変更、書式の指定など）は
 amendment に日本語の要約で入れてください。
+**amendment を入れる場合は isAnswer を必ず true にしてください。**
+それはそのタスクへの指示であって、新しい依頼ではないためです。
+
+amendment はそのままLINEで社長に返信されます。**40字以内の日本語**で、
+項目のkey（英字）や理由の説明は書かず、何をどう変えるかだけを書いてください。
+指示が曖昧で二通りに読める場合は、末尾に「（要確認）」と付けてください。
 
 必ず次のJSONのみを返してください（説明文やコードフェンスは付けない）：
 {
@@ -361,12 +371,23 @@ export async function interpretAnswer(
     if (!m) return miss;
     const parsed = JSON.parse(m[0]) as Partial<AnswerResult>;
 
+    // amendment はそのタスクへの修正指示。isAnswer が false のままだと
+    // 呼び出し側で新規タスクとして登録され、修正指示が捨てられる。
+    // プロンプトでも指示しているが、取りこぼしたときの保険を置く。
+    const amendment = parsed.amendment ?? null;
+    const hasUpdates = Object.keys(parsed.updates ?? {}).length > 0;
+    const isAnswer = Boolean(parsed.isAnswer) || Boolean(amendment) || hasUpdates;
+
     return {
-      isAnswer: Boolean(parsed.isAnswer),
-      confidence: Number(parsed.confidence ?? 0),
+      isAnswer,
+      // 補正で回答に倒したときは、確信度も足切り以上に引き上げる。
+      // 低いままだと呼び出し側のしきい値で結局落ちる。
+      confidence: isAnswer
+        ? Math.max(Number(parsed.confidence ?? 0), 0.7)
+        : Number(parsed.confidence ?? 0),
       updates: parsed.updates ?? {},
       overrides: parsed.overrides ?? [],
-      amendment: parsed.amendment ?? null,
+      amendment,
     };
   } catch (err) {
     // 失敗時は「回答ではない」に倒す。通常のタスク解析へ流れるので、
