@@ -262,3 +262,145 @@ export function isApproval(text: string): boolean {
     t
   );
 }
+
+/**
+ * 確認への「具体的な回答」を解釈する。
+ *
+ * なぜ必要か:
+ *   実際の返事は「はい」だけではない。履歴でも社長の回答は
+ *   「収益」「月曜日で可」のように**具体的な値**で返ってくる。
+ *   さらに「買主の名義を仲介会社宛てに変えて」のように、
+ *   **一度決まった内容を上書きする**指示も来る。
+ *
+ *   これを拾えないと、回答が新規タスクとして解析され、
+ *   同じ依頼が二重に登録される（回答は元のタスクに届かない）。
+ *
+ * isAnswer=false のときは呼び出し側で通常のタスク解析に流すこと。
+ * 確認待ちの最中に**別の新しい依頼**が飛んでくる場面は普通にあるため、
+ * 「確認待ち中の発言はすべて回答」とみなしてはいけない。
+ */
+export interface AnswerResult {
+  isAnswer: boolean;
+  confidence: number;
+  /** key -> 確定値 */
+  updates: Record<string, string>;
+  /** 既に決まっていた値を上書きした key */
+  overrides: string[];
+  /** 依頼内容そのものの変更（項目に収まらない指示）があれば、その要約 */
+  amendment: string | null;
+}
+
+const ANSWER_PROMPT = `あなたは不動産会社の営業事務です。
+「条件を確認中のタスク」があり、そこへ新しい発言が届きました。
+この発言が**その確認への回答か**、それとも**無関係な別の依頼か**を判定してください。
+
+判定の指針：
+- 確認項目のどれかに値を与えている、または既に決まっていた値を変更する指示なら「回答」
+- 「〜に変えて」「〜ではなく〜で」は、**既存の値を上書きする回答**として扱う
+- 確認項目と関係のない新しい依頼・別物件の話・雑談は「回答ではない」
+- 迷ったら isAnswer は false にする（誤って回答扱いにすると、新しい依頼が失われる）
+
+確認項目に収まらないが依頼内容の修正にあたる指示（宛先の変更、書式の指定など）は
+amendment に日本語の要約で入れてください。
+
+必ず次のJSONのみを返してください（説明文やコードフェンスは付けない）：
+{
+  "isAnswer": true/false,
+  "confidence": 0〜1の数値,
+  "updates": { "項目key": "確定した値" },
+  "overrides": ["上書きした項目key"],
+  "amendment": "項目に収まらない修正指示の要約 または null"
+}`;
+
+export async function interpretAnswer(
+  text: string,
+  fields: RequiredField[],
+  settled: Record<string, string>,
+  taskTitle: string
+): Promise<AnswerResult> {
+  const miss: AnswerResult = {
+    isAnswer: false,
+    confidence: 0,
+    updates: {},
+    overrides: [],
+    amendment: null,
+  };
+  if (!text.trim() || fields.length === 0) return miss;
+
+  const list = fields
+    .map((f) => {
+      const cur = settled[f.key];
+      return `- ${f.key}: ${f.label}${cur ? `（現在の値: ${cur}）` : "（未定）"}`;
+    })
+    .join("\n");
+
+  try {
+    const response = await client.messages.create({
+      model: MODEL,
+      max_tokens: 512,
+      system: ANSWER_PROMPT,
+      messages: [
+        {
+          role: "user",
+          content:
+            `確認中のタスク: ${taskTitle}\n\n` +
+            `確認項目:\n${list}\n\n` +
+            `届いた発言:\n${text}`,
+        },
+      ],
+    });
+
+    const raw = response.content
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { type: "text"; text: string }).text)
+      .join("")
+      .replace(/```json\s*|```/g, "")
+      .trim();
+
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (!m) return miss;
+    const parsed = JSON.parse(m[0]) as Partial<AnswerResult>;
+
+    return {
+      isAnswer: Boolean(parsed.isAnswer),
+      confidence: Number(parsed.confidence ?? 0),
+      updates: parsed.updates ?? {},
+      overrides: parsed.overrides ?? [],
+      amendment: parsed.amendment ?? null,
+    };
+  } catch (err) {
+    // 失敗時は「回答ではない」に倒す。通常のタスク解析へ流れるので、
+    // 最悪でも新規タスクとして残る。黙って消えるより手戻りが小さい。
+    console.error("[clarify] 回答の解釈に失敗（通常解析へ）:", err);
+    return miss;
+  }
+}
+
+/** 回答が反映された結果をLINEに返す文面 */
+export function buildAnswerAppliedMessage(
+  taskTitle: string,
+  applied: string[],
+  overridden: string[],
+  amendment: string | null,
+  remaining: string[]
+): string {
+  let msg = `📝 「${taskTitle}」に反映しました。\n`;
+  if (applied.length > 0) {
+    msg += `\n【確定】\n` + applied.map((a) => `・${a}`).join("\n") + `\n`;
+  }
+  if (overridden.length > 0) {
+    msg += `\n🔄 変更：${overridden.join("・")}\n`;
+  }
+  if (amendment) {
+    msg += `\n📌 ${amendment}\n`;
+  }
+  if (remaining.length > 0) {
+    msg +=
+      `\n【残りのご指示待ち】\n` +
+      remaining.map((r) => `・${r}`).join("\n") +
+      `\n\nこちらが決まり次第、着手します。`;
+  } else {
+    msg += `\n✅ 条件が揃いました。着手できる状態にしました。`;
+  }
+  return msg;
+}

@@ -358,13 +358,25 @@ export async function deletePendingClarification(
 const CONFIRM_TTL_SECONDS = 60 * 60 * 24;
 const CONFIRM_PREFIX = "taskconfirm";
 
+export interface ConfirmField {
+  key: string;
+  label: string;
+  suggest: string | null;
+  critical: boolean;
+}
+
 export interface PendingTaskConfirm {
   pageId: string;
   title: string;
-  /** 提案のまま承認された場合にメモへ書き込む内容 */
-  proposals: string[];
-  /** 提案では埋まらず、指示を待っている項目 */
-  awaiting: string[];
+  requestType: string;
+  /** この依頼種別の確認項目すべて（回答の解釈と、残項目の表示に使う） */
+  fields: ConfirmField[];
+  /** まだ指示をもらえていない項目の key */
+  awaitingKeys: string[];
+  /** 提案を出したが、まだ承認されていない項目の key */
+  proposalKeys: string[];
+  /** 確定した項目。key -> 確定値 */
+  settled: Record<string, string>;
   createdAt: number;
 }
 

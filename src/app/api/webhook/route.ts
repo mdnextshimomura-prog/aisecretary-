@@ -4,6 +4,9 @@ import { parseTaskFromMessage, TASK_CONFIDENCE_THRESHOLD, type ParsedTask } from
 import {
   detectMissing,
   buildClarifyMessage,
+  buildAnswerAppliedMessage,
+  interpretAnswer,
+  checklistFor,
   isApproval,
   STATUS_PENDING,
 } from "@/lib/clarify";
@@ -47,6 +50,7 @@ import {
   countRemainingTasks,
   setTaskStatus,
   appendTaskNote,
+  jstDateStr,
 } from "@/lib/notion";
 
 // 「これはタスクじゃない／取り消したい」意図の判定（引用リプライ時のみ使用）
@@ -338,56 +342,142 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       continue;
     }
 
-    // ①-2 初動確認への「はい」「OK」。
+    // ①-2 初動確認への返事。
     //
-    // ②の番号完了より前に置く。ここを後ろにすると、確認への同意が
+    // ②の番号完了より前に置く。ここを後ろにすると、確認への回答が
     // 新規タスクとして解析され、同じ依頼が二重に登録される。
     //
-    // 判定は isApproval（短い肯定語のみ）に限定している。長文や具体的な
-    // 指示はここを素通りさせ、⑦の通常解析に回す。そちらで内容を拾ったほうが
-    // 「手付は300万で」のような**部分的な回答**を正しく扱えるため。
+    // 返事は2種類ある。実運用では後者のほうが多い。
+    //   (a) 「はい」「OK」    → 提案どおりで確定
+    //   (b) 「買主名義は仲介会社宛てで」「手付は300万」「収益として」
+    //        → 具体的な値の指定。**既に決まっていた値の上書きも含む**
+    //
+    // (b) を拾えないと、回答が元のタスクに届かず新規タスクになる。
+    // 対象タスクは、引用リプライがあればそれを優先する（複数の確認が
+    // 同時に走っているときに取り違えないため）。無ければ直近の1件。
     {
-      const pending = await getPendingTaskConfirm(source.groupId);
-      if (pending && isApproval(stripMentions(event.message))) {
-        try {
-          // 指示待ちの項目がまだ残っているのに「はい」だけ来た場合は、
-          // 提案分だけ確定させ、残りは引き続き確認待ちのままにする。
-          // ここで一括して未着手に倒すと、名義や金額が空のまま
-          // 「着手可能」の見た目になり、担当者が手戻りする。
-          const resolved = pending.proposals.length > 0;
-          if (resolved) {
-            await appendTaskNote(pending.pageId, [
-              `【承認】${new Date().toISOString().slice(0, 10)} 提案どおりで確定`,
-              ...pending.proposals.map((p) => `・${p}`),
-            ]);
-          }
+      let pending = await getPendingTaskConfirm(source.groupId);
 
-          if (pending.awaiting.length === 0) {
-            await setTaskStatus(pending.pageId, "未着手");
-            await deletePendingTaskConfirm(source.groupId);
+      // 引用リプライなら、引用先のタスクが確認待ちかどうかで対象を確定する
+      if (event.message.quotedMessageId && pending) {
+        const quoted = await findTaskByMessageId(event.message.quotedMessageId);
+        if (quoted && quoted.id !== pending.pageId) {
+          // 別のタスクへの引用＝この確認への回答ではない。③以降に任せる
+          pending = null;
+        }
+      }
+
+      if (pending) {
+        const body = stripMentions(event.message);
+        const fields = pending.fields;
+        const labelOf = (k: string) =>
+          fields.find((f) => f.key === k)?.label ?? k;
+
+        // (a) 提案をそのまま承認
+        if (isApproval(body)) {
+          try {
+            const applied = pending.proposalKeys.map((k) => {
+              const f = fields.find((x) => x.key === k);
+              const v = f?.suggest ?? "";
+              pending!.settled[k] = v;
+              return `${labelOf(k)}：${v}`;
+            });
+            pending.proposalKeys = [];
+
+            if (applied.length > 0) {
+              await appendTaskNote(pending.pageId, [
+                `【承認】${jstDateStr(0)} 提案どおりで確定`,
+                ...applied.map((a) => `・${a}`),
+              ]);
+            }
+
+            const remaining = pending.awaitingKeys.map(labelOf);
+            if (remaining.length === 0) {
+              await setTaskStatus(pending.pageId, "未着手");
+              await deletePendingTaskConfirm(source.groupId);
+            } else {
+              await savePendingTaskConfirm(source.groupId, pending);
+            }
             await sendLineMessage(
               replyToken,
-              `✅ 「${pending.title}」を確定しました。\n` +
-                pending.proposals.map((p) => `・${p}`).join("\n") +
-                `\n\n着手できる状態にしました。`
+              buildAnswerAppliedMessage(
+                pending.title,
+                applied,
+                [],
+                null,
+                remaining
+              )
             );
-          } else {
+          } catch (err) {
+            console.error("初動確認の確定に失敗:", err);
             await sendLineMessage(
               replyToken,
-              `承知しました。提案分は確定しました。\n\n` +
-                `【まだご指示をいただきたい項目】\n` +
-                pending.awaiting.map((a) => `・${a}`).join("\n") +
-                `\n\nこちらが決まり次第、着手します。`
+              "⚠️ 確認内容の反映に失敗しました。Notion側で直接ご確認ください。"
             );
           }
-        } catch (err) {
-          console.error("初動確認の確定に失敗:", err);
-          await sendLineMessage(
-            replyToken,
-            "⚠️ 確認内容の反映に失敗しました。Notion側で直接ご確認ください。"
-          );
+          continue;
         }
-        continue;
+
+        // (b) 具体的な回答か、無関係な別依頼かを判定する。
+        //     確信度が低いものは回答扱いにしない。誤判定すると
+        //     **新しい依頼が確認への回答として吸い込まれて消える**。
+        const ans = await interpretAnswer(
+          body,
+          fields,
+          pending.settled,
+          pending.title
+        );
+        if (ans.isAnswer && ans.confidence >= TASK_CONFIDENCE_THRESHOLD) {
+          try {
+            const applied: string[] = [];
+            for (const [k, v] of Object.entries(ans.updates)) {
+              pending.settled[k] = v;
+              pending.awaitingKeys = pending.awaitingKeys.filter((x) => x !== k);
+              pending.proposalKeys = pending.proposalKeys.filter((x) => x !== k);
+              applied.push(`${labelOf(k)}：${v}`);
+            }
+            const overridden = ans.overrides.map(labelOf);
+
+            await appendTaskNote(pending.pageId, [
+              `【回答】${jstDateStr(0)}`,
+              ...applied.map((a) => `・${a}`),
+              ...(overridden.length > 0
+                ? [`・変更: ${overridden.join("・")}`]
+                : []),
+              ...(ans.amendment ? [`・修正指示: ${ans.amendment}`] : []),
+            ]);
+
+            const remaining = pending.awaitingKeys.map(labelOf);
+            if (remaining.length === 0) {
+              // 提案分が未承認でも、指示待ちが無くなれば着手はできる。
+              // 提案は既定値として通用するものだけを載せているため。
+              await setTaskStatus(pending.pageId, "未着手");
+              await deletePendingTaskConfirm(source.groupId);
+            } else {
+              await savePendingTaskConfirm(source.groupId, pending);
+            }
+
+            await sendLineMessage(
+              replyToken,
+              buildAnswerAppliedMessage(
+                pending.title,
+                applied,
+                overridden,
+                ans.amendment,
+                remaining
+              )
+            );
+            continue;
+          } catch (err) {
+            console.error("回答の反映に失敗:", err);
+            await sendLineMessage(
+              replyToken,
+              "⚠️ ご回答の反映に失敗しました。Notion側で直接ご確認ください。"
+            );
+            continue;
+          }
+        }
+        // 回答でなければ何もせず、通常の処理へ落とす（新規依頼として扱う）
       }
     }
 
@@ -667,23 +757,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       let reply: string;
       if (needsClarify) {
         await setTaskStatus(pageId, STATUS_PENDING);
-        const proposals = clarify.missing
+        const proposalKeys = clarify.missing
           .filter((f) => f.suggest)
-          .map((f) => `${f.label}：${f.suggest}`);
-        const awaiting = clarify.missing
+          .map((f) => f.key);
+        const awaitingKeys = clarify.missing
           .filter((f) => !f.suggest)
-          .map((f) => f.label);
+          .map((f) => f.key);
         await appendTaskNote(pageId, [
-          `【初動確認】${new Date().toISOString().slice(0, 10)}`,
+          `【初動確認】${jstDateStr(0)}`,
           ...Object.values(clarify.found).map((v) => `・確認済み: ${v}`),
-          ...awaiting.map((a) => `・要指示: ${a}`),
-          ...proposals.map((p) => `・提案: ${p}`),
+          ...clarify.missing
+            .filter((f) => !f.suggest)
+            .map((f) => `・要指示: ${f.label}`),
+          ...clarify.missing
+            .filter((f) => f.suggest)
+            .map((f) => `・提案: ${f.label}：${f.suggest}`),
         ]);
         await savePendingTaskConfirm(source.groupId, {
           pageId,
           title: parsed.title,
-          proposals,
-          awaiting,
+          requestType: parsed.requestType,
+          fields: checklistFor(parsed.requestType),
+          awaitingKeys,
+          proposalKeys,
+          settled: { ...clarify.found },
           createdAt: Date.now(),
         });
         reply = buildClarifyMessage(
