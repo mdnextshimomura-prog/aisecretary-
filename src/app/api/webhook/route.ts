@@ -41,6 +41,8 @@ import {
   savePendingClarification,
   getPendingClarification,
   deletePendingClarification,
+  isEventHandled,
+  markEventHandled,
   savePendingTaskConfirm,
   getPendingTaskConfirm,
   deletePendingTaskConfirm,
@@ -520,10 +522,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // 処理を完了できなかったイベントがあれば非2xxを返してLINEに再送させる。
   // 200で返すとLINEは再送をやめるため、処理中の側が落ちていた場合に
   // 誰も引き継がず依頼が永久に消える。
-  let needsRetry = false;
+  let needsRetry: boolean = false;
 
   for (const event of body.events) {
     if (event.type !== "message" || !event.message) continue;
+
+    // このイベントを既に処理済みなら何もしない。
+    // バッチ内の1件が再送を要求すると LINE はバッチ全体を送り直すため、
+    // 印が無いと処理済みのイベントまで再実行され、二重の副作用が起きる
+    // （確認への回答が新規タスクになる、メールが再送される等）。
+    if (await isEventHandled(event.message.id)) {
+      console.log("処理済みのイベントをスキップ:", event.message.id);
+      continue;
+    }
+    // 再送が必要になった場合だけ印を付けない（この後の needsRetry で立てる）
+    const retryBefore: boolean = needsRetry;
+    try {
 
     const replyToken = event.replyToken!;
 
@@ -1098,6 +1112,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         replyToken,
         "⚠️ タスクの登録中にエラーが発生しました。もう一度お試しください。"
       );
+    }
+    } finally {
+      // 再送を要求したイベント以外は「処理済み」にする。
+      // continue で抜けた経路も finally を通るので、印を付け忘れない。
+      if (needsRetry === retryBefore) {
+        await markEventHandled(event.message.id).catch(() => undefined);
+      }
     }
   }
 

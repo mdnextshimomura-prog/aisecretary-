@@ -9,6 +9,8 @@ import {
   getPendingTaskConfirm,
   deletePendingTaskConfirm,
   countPendingTaskConfirms,
+  isEventHandled,
+  markEventHandled,
   reserveMessage,
   releaseMessage,
   completeMessage,
@@ -126,6 +128,12 @@ async function main() {
   await completeMessage("m-busy", "page-done");
   const done = await reserveMessage("m-busy");
   ok("完了後は inProgress ではない", !done.inProgress && done.pageId === "page-done");
+
+  // ── イベント単位の処理済み記録（バッチ再送で二重実行しないため）──
+  ok("未処理なら false", (await isEventHandled("ev-1")) === false);
+  await markEventHandled("ev-1");
+  ok("印を付けたら true", (await isEventHandled("ev-1")) === true);
+  ok("別のイベントは影響を受けない", (await isEventHandled("ev-2")) === false);
 
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);

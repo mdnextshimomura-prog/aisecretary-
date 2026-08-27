@@ -728,3 +728,30 @@ export async function removePendingHandoff(
 
   await indexRemove(handoffIndexKey(groupId), pageId);
 }
+
+// ── LINEイベントの処理済み記録 ──
+//
+// バッチ内の1件でも再送が必要になると、LINEはバッチ全体を送り直す。
+// 記録が無いと、既に処理し終えたイベント（確認への回答、メール送信、
+// 顧客登録など）まで作り直され、二重の副作用が起きる。
+// タスク登録の予約とは別に、**全メッセージイベント**に印を付ける。
+const EVENT_TTL_SECONDS = 60 * 60 * 24;
+const eventMem = new Map<string, number>();
+
+export async function isEventHandled(messageId: string): Promise<boolean> {
+  const key = `evt:${messageId}`;
+  if (kvEnabled()) return Boolean(await kv.get(key));
+  const exp = eventMem.get(key);
+  if (!exp) return false;
+  if (Date.now() > exp) {
+    eventMem.delete(key);
+    return false;
+  }
+  return true;
+}
+
+export async function markEventHandled(messageId: string): Promise<void> {
+  const key = `evt:${messageId}`;
+  if (kvEnabled()) await kv.set(key, 1, { ex: EVENT_TTL_SECONDS });
+  else eventMem.set(key, Date.now() + EVENT_TTL_SECONDS * 1000);
+}
