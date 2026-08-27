@@ -29,79 +29,71 @@ const MODEL = "claude-sonnet-4-6";
 /** 確認待ちタスクのNotionステータス名（select は API 側で自動追加される） */
 export const STATUS_PENDING = "要確認";
 
-export interface RequiredField {
-  key: string;
-  /** 質問文に出す項目名 */
-  label: string;
-  /**
-   * 既定の提案。ここが埋まっていると「〜でよろしいですか？」と聞ける。
-   * null なら「どうしますか？」と聞くしかない項目。
-   */
-  suggest: string | null;
-  /**
-   * true = これが無いと物理的に着手できない項目。
-   * false = 慣例やテンプレートで埋められる項目（提案を強めに出す）。
-   */
-  critical: boolean;
-}
+export type { RequiredField } from "./checklist.generated";
+import { CHECKLIST, DERIVE_RULES, type RequiredField } from "./checklist.generated";
 
 /**
- * 依頼種別ごとの「初動に必要な項目」。
- *
- * suggest の値は不動産実務の慣例に基づく暫定値。
- * **実務と合わない値は運用しながらここだけ直せばよい**（他のファイルは触らない）。
+ * 確認項目の定義は docs/依頼チェックリスト.md（正本）にある。
+ * ビルド時に checklist.generated.ts へ焼き込まれる。項目を足したいときは
+ * .md の表に1行足して `npm run build:checklist` を実行する。
  */
-const CHECKLIST: Partial<Record<RequestType, RequiredField[]>> = {
-  購入申込書: [
-    { key: "buyer", label: "買主名義", suggest: null, critical: true },
-    { key: "price", label: "購入金額（指値）", suggest: null, critical: true },
-    // 買付は「誰宛てに出すか」で書式が変わる。名義とは別項目。
-    // 検証で「名義を仲介会社宛てに変えて」が宛先変更と解釈され、
-    // 受け皿の項目が無いため宙に浮いた（2026-08-28）。
-    { key: "addressee", label: "申込書の宛先", suggest: "売主様宛て", critical: false },
-    { key: "deposit", label: "手付金", suggest: "売買代金の5%", critical: false },
-    { key: "loan", label: "融資利用の有無", suggest: "融資利用あり・ローン特約あり", critical: false },
-    { key: "settlement", label: "決済（引渡）希望日", suggest: "契約から45日後", critical: false },
-    { key: "expiry", label: "申込の有効期限", suggest: "発行日から7日間", critical: false },
-  ],
-  査定書: [
-    // ↓ 履歴の「土地としてでしょうか？」がそのままここ
-    { key: "basis", label: "査定の前提", suggest: null, critical: true },
-    { key: "purpose", label: "用途（提出先）", suggest: "売主様への提示用", critical: false },
-    { key: "range", label: "価格の出し方", suggest: "上限・下限の幅で提示", critical: false },
-  ],
-  物件資料: [
-    { key: "kind", label: "必要な資料", suggest: null, critical: true },
-    { key: "recipient", label: "提出先", suggest: null, critical: false },
-    { key: "format", label: "形式", suggest: "PDF", critical: false },
-  ],
-  重要事項説明書: [
-    { key: "parties", label: "売主・買主", suggest: null, critical: true },
-    { key: "contractDate", label: "契約予定日", suggest: null, critical: true },
-    { key: "price", label: "売買代金", suggest: null, critical: true },
-  ],
-  売買契約書: [
-    { key: "parties", label: "売主・買主", suggest: null, critical: true },
-    { key: "contractDate", label: "契約予定日", suggest: null, critical: true },
-    { key: "price", label: "売買代金", suggest: null, critical: true },
-    { key: "settlement", label: "決済日", suggest: "契約から45日後", critical: false },
-  ],
-  書類取得: [
-    { key: "kind", label: "取得する書類", suggest: null, critical: true },
-    { key: "cost", label: "費用の負担", suggest: "会社立替", critical: false },
-  ],
-  業者確認: [
-    { key: "question", label: "確認したい内容", suggest: null, critical: true },
-    { key: "target", label: "確認先", suggest: null, critical: false },
-  ],
-  内見調整: [
-    { key: "datetime", label: "希望日時", suggest: null, critical: true },
-    { key: "attendee", label: "同行者", suggest: null, critical: false },
-  ],
-};
+
+/**
+ * 決まった項目から自動的に決まる項目を埋める。
+ *
+ * 「うちで買う」と答えた直後に「買主様のお名前は？」と聞き返すのを防ぐ。
+ * 答えれば分かることを聞き返すのが、コミュニケーションコストの正体なので、
+ * ここで潰しておく。ルールは docs/依頼チェックリスト.md の「自動補完ルール」。
+ *
+ * @returns 自動で埋まった key の一覧
+ */
+export function applyDerivedValues(settled: Record<string, string>): string[] {
+  const filled: string[] = [];
+  // ルール適用でさらに別のルールが成立することがあるので、変化が止まるまで回す
+  for (let pass = 0; pass < 5; pass++) {
+    let changed = false;
+    for (const r of DERIVE_RULES) {
+      const src = settled[r.when];
+      if (!src || !src.includes(r.contains)) continue;
+      if (settled[r.set]) continue; // 既に値があるものは上書きしない
+      settled[r.set] = r.value;
+      filled.push(r.set);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+  return filled;
+}
+
+const WD = ["日", "月", "火", "水", "木", "金", "土"];
+
+/** "2026-08-28" → "8/28（金）"。LINEに出す日付は読める形にする */
+export function jpDate(iso: string): string {
+  const m = iso.slice(0, 10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return iso;
+  const d = new Date(`${m[0]}T00:00:00Z`);
+  return `${Number(m[2])}/${Number(m[3])}（${WD[d.getUTCDay()]}）`;
+}
+
+/** 提案文の {期日} を実際の日付に置き換える */
+export function fillPlaceholders(
+  fields: RequiredField[],
+  vars: { 期日?: string }
+): RequiredField[] {
+  const resolved: Record<string, string> = {};
+  if (vars.期日) resolved["期日"] = jpDate(vars.期日);
+  return fields.map((f) => {
+    if (!f.suggest) return f;
+    let v = f.suggest;
+    for (const [k, val] of Object.entries(resolved)) {
+      v = v.replaceAll(`{${k}}`, val);
+    }
+    return v === f.suggest ? f : { ...f, suggest: v };
+  });
+}
 
 export function checklistFor(type: RequestType): RequiredField[] {
-  return CHECKLIST[type] ?? [];
+  return CHECKLIST[type] ?? CHECKLIST["その他"] ?? [];
 }
 
 export interface ClarifyResult {
@@ -115,12 +107,18 @@ export interface ClarifyResult {
 
 const EXTRACT_PROMPT = `あなたは不動産会社の営業事務です。
 依頼メッセージから、指定された確認項目それぞれについて
-「すでに書かれているか」「書かれていないか」を判定してください。
+**依頼者が実際に書いた内容だけ**を抜き出してください。
 
 判定の基準：
-- **明示されている**、または**文脈から一意に読み取れる**場合のみ「あり」とする
-- 推測でしか埋まらないものは「なし」とする
-- 添付画像やPDFに書かれている内容も「あり」に含める
+- 依頼文（または添付）に**書かれている値だけ**を found に入れる
+- **【必須】と付いた項目は、はっきり書かれていない限り絶対に found に入れない。**
+  「たぶんこうだろう」で埋めてはいけない。ここを推測で埋めると、
+  担当者が間違った前提のまま作業して事故になる
+- 業界の常識・一般的なケース・確率の高さを根拠に補完しない
+- 値が「不明」「未定」「なし」しか書けない項目は found に入れない
+
+例：「この物件の査定お願い」だけの場合、査定の前提（更地か収益か実需か）は
+**書かれていない**。found に入れず missing に入れること。
 
 必ず次のJSONのみを返してください（説明文やコードフェンスは付けない）：
 {
@@ -142,9 +140,11 @@ export async function detectMissing(
   text: string,
   type: RequestType,
   propertyName: string | null,
-  attachments: unknown[] = []
+  attachments: unknown[] = [],
+  /** 標準納期から決めた期日。提案文の {期日} に入る */
+  dueDate?: string
 ): Promise<ClarifyResult> {
-  const fields = checklistFor(type);
+  const fields = fillPlaceholders(checklistFor(type), { 期日: dueDate });
   const propertyUnknown = !propertyName;
 
   if (fields.length === 0) {
@@ -152,7 +152,7 @@ export async function detectMissing(
   }
 
   const list = fields
-    .map((f) => `- ${f.key}: ${f.label}`)
+    .map((f) => `- ${f.key}: ${f.label}${f.critical ? "  【必須】" : ""}`)
     .join("\n");
 
   try {
@@ -182,18 +182,35 @@ export async function detectMissing(
       .replace(/```json\s*|```/g, "")
       .trim();
 
-    const parsed = JSON.parse(raw) as {
+    // JSON以外の前置き・後書きが混ざることがある。そのまま parse すると
+    // 例外になり、fail-open で「不足なし」＝確認機能が黙って無効になる。
+    // 中括弧の範囲だけを取り出す（interpretAnswer と同じ扱い）。
+    const j = raw.match(/\{[\s\S]*\}/);
+    if (!j) {
+      console.error("[clarify] JSONを取り出せなかった:", raw.slice(0, 200));
+      return { missing: [], found: {}, propertyUnknown };
+    }
+    const parsed = JSON.parse(j[0]) as {
       found?: Record<string, string>;
       missing?: string[];
     };
 
-    const missingKeys = new Set(parsed.missing ?? []);
+    // 不足は **found から機械的に決める**。モデルが返す missing をそのまま使うと、
+    // 同じ依頼文でも実行のたびに結果が変わる（「査定の前提は文脈で分かる」と
+    // 判断して missing から落とす回があった）。
+    // モデルには「読み取れたか」の判定だけをさせ、突き合わせはこちらで行う。
+    const found: Record<string, string> = {};
+    for (const [k, v] of Object.entries(parsed.found ?? {})) {
+      const val = typeof v === "string" ? v.trim() : String(v ?? "").trim();
+      // 「不明」「なし」等を値として返してくることがある。埋まっていない扱いにする
+      if (val && !/^(不明|未定|なし|null|-|—)$/.test(val)) found[k] = val;
+    }
     const missing = fields
-      .filter((f) => missingKeys.has(f.key))
+      .filter((f) => !(f.key in found))
       // critical を先に出す。答えるのが1つだけでも前に進むようにする
       .sort((a, b) => Number(b.critical) - Number(a.critical));
 
-    return { missing, found: parsed.found ?? {}, propertyUnknown };
+    return { missing, found, propertyUnknown };
   } catch (err) {
     console.error("[clarify] 不足項目の判定に失敗（確認をスキップ）:", err);
     return { missing: [], found: {}, propertyUnknown };
@@ -423,5 +440,40 @@ export function buildAnswerAppliedMessage(
   } else {
     msg += `\n✅ 条件が揃いました。着手できる状態にしました。`;
   }
+  return msg;
+}
+
+/**
+ * 条件が揃ったタスクを担当者へ引き渡すメッセージ。
+ *
+ * ここがこの仕組みの出口。社長とのやりとりで要件を詰めたあと、
+ * **担当者にメンションを飛ばして「この条件で着手してください」まで持っていく**。
+ * ここが無いと、条件は揃ったのに誰も気づかないまま止まる。
+ *
+ * @returns text は {assignee} を含む。呼び出し側で substitution に userId を渡す
+ */
+export function buildHandoffMessage(
+  taskTitle: string,
+  propertyName: string | null,
+  settled: Record<string, string>,
+  fields: RequiredField[],
+  assigneeName: string | null,
+  hasMention: boolean
+): string {
+  const labelOf = (k: string) => fields.find((f) => f.key === k)?.label ?? k;
+
+  let msg = hasMention ? "{assignee}\n" : "";
+  msg += `✅ 条件が固まりました。着手をお願いします。\n\n`;
+  msg += `【${taskTitle}】\n`;
+  if (propertyName) msg += `物件：${propertyName}\n`;
+  if (!hasMention && assigneeName) msg += `担当：${assigneeName}\n`;
+
+  // .md の並び順で出す。社長が答えた順に出すと毎回並びが変わって読みにくい
+  const ordered = fields.filter((f) => settled[f.key]);
+  if (ordered.length > 0) {
+    msg += `\n`;
+    for (const f of ordered) msg += `・${f.label}：${settled[f.key]}\n`;
+  }
+  msg += `\n──────────\n終わったら番号で返信してください。`;
   return msg;
 }

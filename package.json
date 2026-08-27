@@ -4,9 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && next build",
+    "build": "node scripts/build-checklist.mjs && prisma generate && next build",
     "start": "next start",
     "lint": "next lint",
+    "build:checklist": "node scripts/build-checklist.mjs",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:studio": "prisma studio"

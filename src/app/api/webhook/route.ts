@@ -1,12 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyLineSignature, sendLineMessage, buildTaskRegisteredMessage } from "@/lib/line";
+import {
+  verifyLineSignature,
+  sendLineMessage,
+  buildTaskRegisteredMessage,
+  pushLineMessage,
+  pushLineMessageWithMentions,
+} from "@/lib/line";
 import { parseTaskFromMessage, TASK_CONFIDENCE_THRESHOLD, type ParsedTask } from "@/lib/claude";
 import {
   detectMissing,
   buildClarifyMessage,
   buildAnswerAppliedMessage,
+  buildHandoffMessage,
   interpretAnswer,
   checklistFor,
+  fillPlaceholders,
+  applyDerivedValues,
   isApproval,
   STATUS_PENDING,
 } from "@/lib/clarify";
@@ -30,6 +39,7 @@ import {
   savePendingTaskConfirm,
   getPendingTaskConfirm,
   deletePendingTaskConfirm,
+  type PendingTaskConfirm,
 } from "@/lib/email/session";
 import {
   startEmailFlow,
@@ -198,6 +208,43 @@ function todayLabel(now: Date): string {
 // Claude に日付を推測させないことで、同じ依頼には必ず同じ期日が出るようにする。
 // タスク登録の入口が複数（通常フロー／曖昧確認からの選択）あるため関数に切り出す。
 // ここを通さずに起票すると期日が空のまま登録されるので、必ず経由すること。
+/**
+ * 条件が揃ったタスクを担当者へ引き渡す。
+ *
+ * 社長との確認が終わった時点で担当者にメンションを飛ばす。
+ * ここを省くと「条件は固まったのに担当者が気づかない」で止まる。
+ * 担当者のuserIdが無い（名簿未登録・名前だけ）場合はメンションできないので
+ * 名前をテキストで出す。送れなくても処理は続ける（引き渡しの失敗で
+ * タスクの状態まで巻き戻すと、二重に混乱するため）。
+ */
+async function handoffToAssignee(
+  groupId: string | undefined,
+  pending: PendingTaskConfirm,
+  propertyName: string | null,
+  assigneeName: string | null,
+  assigneeUserId: string | null
+): Promise<void> {
+  if (!groupId) return;
+  const hasMention = Boolean(assigneeUserId);
+  const text = buildHandoffMessage(
+    pending.title,
+    propertyName,
+    pending.settled,
+    pending.fields,
+    assigneeName,
+    hasMention
+  );
+  try {
+    if (hasMention && assigneeUserId) {
+      await pushLineMessageWithMentions(groupId, text, { assignee: assigneeUserId });
+    } else {
+      await pushLineMessage(groupId, text);
+    }
+  } catch (err) {
+    console.error("担当者への引き渡し通知に失敗:", err);
+  }
+}
+
 async function finalizeDue(parsed: ParsedTask, now: Date): Promise<void> {
   if (parsed.dueDate) {
     parsed.dueTime = parsed.dueTime ?? DEFAULT_DUE_TIME;
@@ -400,14 +447,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             }
             await sendLineMessage(
               replyToken,
-              buildAnswerAppliedMessage(
-                pending.title,
-                applied,
-                [],
-                null,
-                remaining
-              )
+              buildAnswerAppliedMessage(pending.title, applied, [], null, remaining)
             );
+            if (remaining.length === 0) {
+              await handoffToAssignee(
+                source.groupId,
+                pending,
+                pending.propertyName ?? null,
+                pending.assignee ?? null,
+                pending.assigneeUserId ?? null
+              );
+            }
           } catch (err) {
             console.error("初動確認の確定に失敗:", err);
             await sendLineMessage(
@@ -435,6 +485,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               pending.awaitingKeys = pending.awaitingKeys.filter((x) => x !== k);
               pending.proposalKeys = pending.proposalKeys.filter((x) => x !== k);
               applied.push(`${labelOf(k)}：${v}`);
+            }
+            // 「うちで買う」→ 買主名義は自社、のように自動で決まる分を埋める。
+            // これをやらないと、答えたばかりのことをもう一度聞き返してしまう。
+            for (const k of applyDerivedValues(pending.settled)) {
+              pending.awaitingKeys = pending.awaitingKeys.filter((x) => x !== k);
+              pending.proposalKeys = pending.proposalKeys.filter((x) => x !== k);
+              applied.push(`${labelOf(k)}：${pending.settled[k]}（自動）`);
             }
             const overridden = ans.overrides.map(labelOf);
 
@@ -467,6 +524,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
                 remaining
               )
             );
+            if (remaining.length === 0) {
+              await handoffToAssignee(
+                source.groupId,
+                pending,
+                pending.propertyName ?? null,
+                pending.assignee ?? null,
+                pending.assigneeUserId ?? null
+              );
+            }
             continue;
           } catch (err) {
             console.error("回答の反映に失敗:", err);
@@ -749,8 +815,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         text,
         parsed.requestType,
         parsed.propertyName ?? null,
-        attachments
+        attachments,
+        parsed.dueDate ?? undefined
       );
+      // 最初の依頼文に書かれていた条件からも自動補完する
+      const derived = applyDerivedValues(clarify.found);
+      if (derived.length > 0) {
+        clarify.missing = clarify.missing.filter((f) => !derived.includes(f.key));
+      }
       const needsClarify =
         clarify.missing.length > 0 || clarify.propertyUnknown;
 
@@ -777,10 +849,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           pageId,
           title: parsed.title,
           requestType: parsed.requestType,
-          fields: checklistFor(parsed.requestType),
+          // 提案文の{期日}を埋めた状態で保存する。保存前の生のままだと
+          // 承認時に「期限：{期日}」がそのままNotionに入る
+          fields: fillPlaceholders(checklistFor(parsed.requestType), {
+            期日: parsed.dueDate ?? undefined,
+          }),
           awaitingKeys,
           proposalKeys,
           settled: { ...clarify.found },
+          propertyName: parsed.propertyName ?? null,
+          assignee: parsed.assignee ?? null,
+          assigneeUserId: parsed.assigneeUserId ?? null,
           createdAt: Date.now(),
         });
         reply = buildClarifyMessage(

@@ -377,6 +377,10 @@ export interface PendingTaskConfirm {
   proposalKeys: string[];
   /** 確定した項目。key -> 確定値 */
   settled: Record<string, string>;
+  /** 引き渡し通知に出す情報（確認が終わった時点で担当者へメンションする） */
+  propertyName?: string | null;
+  assignee?: string | null;
+  assigneeUserId?: string | null;
   createdAt: number;
 }
 
