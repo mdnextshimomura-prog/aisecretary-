@@ -103,6 +103,23 @@ export interface ClarifyResult {
   found: Record<string, string>;
   /** 物件が特定できていないか（種別によらず初動を止める最大要因） */
   propertyUnknown: boolean;
+  /**
+   * 条件の判定そのものに失敗したか。
+   *
+   * true のときを「不足なし＝着手可能」と同じ扱いにしてはいけない。
+   * 判定できていないだけで、条件が揃っている保証はどこにも無い。
+   * タスクの登録は続行（fail-open）しつつ、状態は要確認に倒す。
+   */
+  failed: boolean;
+}
+
+/** 根拠が原文にあるかを見るための正規化（全半角・空白・記号の揺れを吸収） */
+function normalizeForMatch(s: string): string {
+  return (s ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\s\u3000]/g, "")
+    .replace(/[「」『』（）()、。,.・:：]/g, "");
 }
 
 const EXTRACT_PROMPT = `あなたは不動産会社の営業事務です。
@@ -122,10 +139,13 @@ const EXTRACT_PROMPT = `あなたは不動産会社の営業事務です。
 
 必ず次のJSONのみを返してください（説明文やコードフェンスは付けない）：
 {
-  "found": { "項目key": "読み取れた値", ... },
-  "missing": ["項目key", ...]
+  "found": {
+    "項目key": { "value": "読み取れた値", "evidence": "そう読み取れる根拠になった原文の一部をそのまま抜き出す" }
+  }
 }
-found に入れるのは読み取れたものだけ。読み取れなかった key を missing に入れます。`;
+evidence は**依頼文に実在する文字列をそのまま**入れてください。要約・言い換え・
+自分で書いた文は不可です。添付から読み取った場合は evidence に "添付" と書いてください。
+読み取れなかった項目は found に入れないでください（missing は返さなくて構いません）。`;
 
 /**
  * 依頼メッセージを確認項目リストと突き合わせ、不足を洗い出す。
@@ -148,7 +168,7 @@ export async function detectMissing(
   const propertyUnknown = !propertyName;
 
   if (fields.length === 0) {
-    return { missing: [], found: {}, propertyUnknown };
+    return { missing: [], found: {}, propertyUnknown, failed: false };
   }
 
   const list = fields
@@ -188,32 +208,50 @@ export async function detectMissing(
     const j = raw.match(/\{[\s\S]*\}/);
     if (!j) {
       console.error("[clarify] JSONを取り出せなかった:", raw.slice(0, 200));
-      return { missing: [], found: {}, propertyUnknown };
+      return { missing: [], found: {}, propertyUnknown, failed: true };
     }
     const parsed = JSON.parse(j[0]) as {
-      found?: Record<string, string>;
-      missing?: string[];
+      found?: Record<string, { value?: string; evidence?: string } | string>;
     };
 
     // 不足は **found から機械的に決める**。モデルが返す missing をそのまま使うと、
-    // 同じ依頼文でも実行のたびに結果が変わる（「査定の前提は文脈で分かる」と
-    // 判断して missing から落とす回があった）。
-    // モデルには「読み取れたか」の判定だけをさせ、突き合わせはこちらで行う。
+    // 同じ依頼文でも判定が揺れた（「査定の前提は文脈で分かる」と判断して
+    // missing から落とす回があった）。突き合わせはこちらで行う。
+    const haystack = normalizeForMatch(text);
     const found: Record<string, string> = {};
-    for (const [k, v] of Object.entries(parsed.found ?? {})) {
-      const val = typeof v === "string" ? v.trim() : String(v ?? "").trim();
+
+    for (const [k, raw] of Object.entries(parsed.found ?? {})) {
+      const v = typeof raw === "string" ? { value: raw, evidence: "" } : raw ?? {};
+      const val = String(v.value ?? "").trim();
       // 「不明」「なし」等を値として返してくることがある。埋まっていない扱いにする
-      if (val && !/^(不明|未定|なし|null|-|—)$/.test(val)) found[k] = val;
+      if (!val || /^(不明|未定|なし|null|-|—)$/.test(val)) continue;
+
+      const field = fields.find((f) => f.key === k);
+      // 必須項目は**原文に根拠がある場合だけ**採用する。
+      // 業界の常識から推測して埋められると、担当者が誤った前提で動いて事故になる。
+      // （検証で「この物件の査定お願い」から前提を「実需」と断定する事例を確認）
+      if (field?.critical) {
+        const ev = String(v.evidence ?? "").trim();
+        const fromAttachment = attachments.length > 0 && /添付|画像|pdf|資料/i.test(ev);
+        if (!fromAttachment && !(ev && haystack.includes(normalizeForMatch(ev)))) {
+          console.warn(`[clarify] 必須項目 ${k} を原文の根拠なしと判断して不足に戻した`);
+          continue;
+        }
+      }
+      found[k] = val;
     }
+
     const missing = fields
       .filter((f) => !(f.key in found))
       // critical を先に出す。答えるのが1つだけでも前に進むようにする
       .sort((a, b) => Number(b.critical) - Number(a.critical));
 
-    return { missing, found, propertyUnknown };
+    return { missing, found, propertyUnknown, failed: false };
   } catch (err) {
-    console.error("[clarify] 不足項目の判定に失敗（確認をスキップ）:", err);
-    return { missing: [], found: {}, propertyUnknown };
+    // 登録は止めない（タスクを失わないことが最優先）。ただし「条件が揃った」とは
+    // 扱わない。failed=true を見て呼び出し側が要確認に倒す。
+    console.error("[clarify] 不足項目の判定に失敗:", err);
+    return { missing: [], found: {}, propertyUnknown, failed: true };
   }
 }
 
@@ -302,6 +340,16 @@ export function isApproval(text: string): boolean {
  */
 export interface AnswerResult {
   isAnswer: boolean;
+  /** この発言が確認中のタスクに関するものだという確信度（値の解釈の確度ではない） */
+  /**
+   * これは確認中のタスクとは別の、新しい依頼か。
+   *
+   * isAnswer とは独立に聞く。以前は「updates か amendment があれば回答」と
+   * 補正していたが、モデルが新規依頼から期限などを拾って updates に入れた場合、
+   * **新しい依頼が確認への回答として吸い込まれて消える**。
+   * 新規依頼の取りこぼしは、確認の取りこぼしより遥かに損害が大きい。
+   */
+  isNewRequest: boolean;
   confidence: number;
   /** key -> 確定値 */
   updates: Record<string, string>;
@@ -321,6 +369,14 @@ const ANSWER_PROMPT = `あなたは不動産会社の営業事務です。
 - 確認項目と関係のない新しい依頼・別物件の話・雑談は「回答ではない」
 - 迷ったら isAnswer は false にする（誤って回答扱いにすると、新しい依頼が失われる）
 
+confidence は**「確認中のタスクに関する発言かどうか」の確信度**です。
+指示の中身の解釈に迷う場合でも、そのタスクについての発言だと分かるなら高い値にしてください
+（解釈の迷いは amendment の末尾に「（要確認）」と書いて表現します）。
+
+**isNewRequest** を必ず判定してください。この発言が「確認中のタスクとは別の、
+新しくやってほしいこと」を含むなら true です。別物件の話、別種類の作業依頼、
+「別件だけど」で始まるものは true。true のときは updates を空にしてください。
+
 確認項目に収まらないが**そのタスクの内容を修正する指示**（宛先の変更、書式の指定など）は
 amendment に日本語の要約で入れてください。
 **amendment を入れる場合は isAnswer を必ず true にしてください。**
@@ -333,7 +389,9 @@ amendment はそのままLINEで社長に返信されます。**40字以内の�
 必ず次のJSONのみを返してください（説明文やコードフェンスは付けない）：
 {
   "isAnswer": true/false,
-  "confidence": 0〜1の数値,
+  "isNewRequest": true/false,
+  "confidence": 0〜1の数値,   // 「この発言が確認中のタスクに関するものだ」という確信度。
+                            // 値の解釈が曖昧でも、そのタスクの話だと分かるなら高くする
   "updates": { "項目key": "確定した値" },
   "overrides": ["上書きした項目key"],
   "amendment": "項目に収まらない修正指示の要約 または null"
@@ -347,6 +405,7 @@ export async function interpretAnswer(
 ): Promise<AnswerResult> {
   const miss: AnswerResult = {
     isAnswer: false,
+    isNewRequest: false,
     confidence: 0,
     updates: {},
     overrides: [],
@@ -387,19 +446,27 @@ export async function interpretAnswer(
     const m = raw.match(/\{[\s\S]*\}/);
     if (!m) return miss;
     const parsed = JSON.parse(m[0]) as Partial<AnswerResult>;
+    const isNewRequest = Boolean(parsed.isNewRequest);
 
-    // amendment はそのタスクへの修正指示。isAnswer が false のままだと
-    // 呼び出し側で新規タスクとして登録され、修正指示が捨てられる。
-    // プロンプトでも指示しているが、取りこぼしたときの保険を置く。
+    // 新しい依頼と判定されたものは、何があっても回答として扱わない。
+    // ここで吸い込むと依頼そのものが消える（登録もされない）。
+    if (isNewRequest) {
+      return { ...miss, isNewRequest: true, confidence: Number(parsed.confidence ?? 0) };
+    }
+
     const amendment = parsed.amendment ?? null;
     const hasUpdates = Object.keys(parsed.updates ?? {}).length > 0;
+
+    // 修正指示や項目の更新があるのに isAnswer が false で返ることがある
+    // （「宛先の変更」を回答ではないと判断した実例あり）。新規依頼でないことが
+    // 確認できている場合に限り、回答として拾い直す。
     const isAnswer = Boolean(parsed.isAnswer) || Boolean(amendment) || hasUpdates;
+    const raised = !parsed.isAnswer && isAnswer;
 
     return {
       isAnswer,
-      // 補正で回答に倒したときは、確信度も足切り以上に引き上げる。
-      // 低いままだと呼び出し側のしきい値で結局落ちる。
-      confidence: isAnswer
+      isNewRequest: false,
+      confidence: raised
         ? Math.max(Number(parsed.confidence ?? 0), 0.7)
         : Number(parsed.confidence ?? 0),
       updates: parsed.updates ?? {},
@@ -477,3 +544,111 @@ export function buildHandoffMessage(
   msg += `\n──────────\n終わったら番号で返信してください。`;
   return msg;
 }
+
+/**
+ * 確認待ちタスクに回答を適用する **純粋関数**。
+ *
+ * webhook の中に直接書いていたときは、テストが同じ処理を書き写す形になり
+ * 「テストは通るが本番は別物」という状態だった。ここに出して両方から使う。
+ *
+ * 完了条件の判断もここに集約する。呼び出し側で判定を書くと、
+ * 承認パスと回答パスで条件がずれる（実際に、回答パスだけ提案分を
+ * settled に入れ忘れて引き渡し文が歯抜けになっていた）。
+ */
+export interface PendingState {
+  fields: RequiredField[];
+  awaitingKeys: string[];
+  proposalKeys: string[];
+  settled: Record<string, string>;
+}
+
+export interface ApplyResult {
+  /** 「項目名：値」の形。返信に出す */
+  applied: string[];
+  /** 自動補完で埋まった項目名 */
+  derived: string[];
+  /** まだ指示待ちの項目名 */
+  remaining: string[];
+  /** 条件が揃い、担当者へ引き渡せる状態か */
+  complete: boolean;
+}
+
+function labelIn(fields: RequiredField[], key: string): string {
+  return fields.find((f) => f.key === key)?.label ?? key;
+}
+
+/** 提案をすべて承認したときの適用（「はい」への応答） */
+export function applyApproval(p: PendingState): ApplyResult {
+  const applied: string[] = [];
+  for (const k of p.proposalKeys) {
+    const f = p.fields.find((x) => x.key === k);
+    if (!f?.suggest) continue;
+    p.settled[k] = f.suggest;
+    applied.push(`${f.label}：${f.suggest}`);
+  }
+  p.proposalKeys = [];
+  return finish(p, applied, []);
+}
+
+/** 具体的な回答の適用（項目の指定・上書き） */
+export function applyAnswer(
+  p: PendingState,
+  updates: Record<string, string>
+): ApplyResult {
+  const applied: string[] = [];
+  for (const [k, v] of Object.entries(updates)) {
+    // 定義に無いキーを書き込ませない。モデルが勝手なキーを返しても
+    // settled が汚れないようにする
+    if (!p.fields.some((f) => f.key === k)) continue;
+    p.settled[k] = v;
+    p.awaitingKeys = p.awaitingKeys.filter((x) => x !== k);
+    p.proposalKeys = p.proposalKeys.filter((x) => x !== k);
+    applied.push(`${labelIn(p.fields, k)}：${v}`);
+  }
+  const derived: string[] = [];
+  for (const k of applyDerivedValues(p.settled)) {
+    p.awaitingKeys = p.awaitingKeys.filter((x) => x !== k);
+    p.proposalKeys = p.proposalKeys.filter((x) => x !== k);
+    derived.push(`${labelIn(p.fields, k)}：${p.settled[k]}`);
+  }
+  return finish(p, applied, derived);
+}
+
+/**
+ * 完了判定と、完了時の提案値の確定。
+ *
+ * 指示待ちが無くなった時点で、未承認のまま残っている提案を settled に入れる。
+ * ここをやらないと、引き渡し文に手付金や決済日が出ず、担当者は結局
+ * 社長に聞き直すことになる（この仕組みが無意味になる）。
+ */
+function finish(
+  p: PendingState,
+  applied: string[],
+  derived: string[]
+): ApplyResult {
+  const complete = p.awaitingKeys.length === 0;
+  if (complete && p.proposalKeys.length > 0) {
+    for (const k of p.proposalKeys) {
+      const f = p.fields.find((x) => x.key === k);
+      if (f?.suggest && !p.settled[k]) {
+        p.settled[k] = f.suggest;
+        applied.push(`${f.label}：${f.suggest}`);
+      }
+    }
+    p.proposalKeys = [];
+  }
+  return {
+    applied,
+    derived,
+    remaining: p.awaitingKeys.map((k) => labelIn(p.fields, k)),
+    complete,
+  };
+}
+
+/** 物件が特定できていないときに足す確認項目（種別によらず初動を止めるため） */
+export const PROPERTY_FIELD: RequiredField = {
+  key: "property",
+  label: "対象の物件",
+  suggest: null,
+  critical: true,
+};

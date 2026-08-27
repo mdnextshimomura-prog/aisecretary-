@@ -16,8 +16,13 @@ import {
   checklistFor,
   fillPlaceholders,
   applyDerivedValues,
+  applyApproval,
+  applyAnswer,
   isApproval,
+  PROPERTY_FIELD,
   STATUS_PENDING,
+  type PendingState,
+  type ApplyResult,
 } from "@/lib/clarify";
 import { resolveDue, DEFAULT_DUE_TIME } from "@/lib/due-rules";
 import { loadClosures, shiftToBusinessDay } from "@/lib/closures";
@@ -219,29 +224,33 @@ function todayLabel(now: Date): string {
  */
 async function handoffToAssignee(
   groupId: string | undefined,
-  pending: PendingTaskConfirm,
-  propertyName: string | null,
-  assigneeName: string | null,
-  assigneeUserId: string | null
+  pending: PendingTaskConfirm
 ): Promise<void> {
   if (!groupId) return;
-  const hasMention = Boolean(assigneeUserId);
+  const hasMention = Boolean(pending.assigneeUserId);
   const text = buildHandoffMessage(
     pending.title,
-    propertyName,
+    pending.propertyName ?? null,
     pending.settled,
     pending.fields,
-    assigneeName,
+    pending.assignee ?? null,
     hasMention
   );
-  try {
-    if (hasMention && assigneeUserId) {
-      await pushLineMessageWithMentions(groupId, text, { assignee: assigneeUserId });
-    } else {
-      await pushLineMessage(groupId, text);
-    }
-  } catch (err) {
-    console.error("担当者への引き渡し通知に失敗:", err);
+  const ok = hasMention && pending.assigneeUserId
+    ? await pushLineMessageWithMentions(groupId, text, {
+        assignee: pending.assigneeUserId,
+      })
+    : await pushLineMessage(groupId, text);
+
+  if (!ok) {
+    // 送信に失敗しても状態は戻さない（条件は本当に揃っているため）。
+    // ただし「誰にも伝わっていない」ことが後から分かるようNotionに残す。
+    // これが無いと、条件は固まったのに担当者が知らないまま止まる。
+    console.error("担当者への引き渡し通知に失敗:", pending.pageId);
+    await appendTaskNote(pending.pageId, [
+      `⚠️ ${jstDateStr(0)} 担当者への引き渡し通知をLINEへ送れませんでした。`,
+      `・条件は確定済みです。担当者へ口頭・別経路で共有してください。`,
+    ]).catch(() => undefined);
   }
 }
 
@@ -274,6 +283,102 @@ async function finalizeDue(parsed: ParsedTask, now: Date): Promise<void> {
   }
 }
 
+/**
+ * タスク登録後の初動確認。**登録経路が2つあるので共有する。**
+ *
+ * 通常のWebhook経路と、曖昧確認メニューで「タスク」を選ばれた経路の両方から呼ぶ。
+ * 片方だけに書くと、メニュー経由の依頼は聞き返しが一切かからない。
+ *
+ * @returns LINEへ返す本文
+ */
+async function clarifyAfterCreate(
+  pageId: string,
+  parsed: ParsedTask,
+  text: string,
+  attachments: unknown[],
+  groupId: string | undefined
+): Promise<string> {
+  const clarify = await detectMissing(
+    text,
+    parsed.requestType,
+    parsed.propertyName ?? null,
+    attachments,
+    parsed.dueDate ?? undefined
+  );
+
+  // 判定そのものに失敗したときは「不足なし」と同じ扱いにしない。
+  // 条件が揃っている保証はどこにも無く、着手可能に見せるほうが危険。
+  if (clarify.failed) {
+    await setTaskStatus(pageId, STATUS_PENDING);
+    await appendTaskNote(pageId, [
+      `⚠️ ${jstDateStr(0)} 条件の自動確認に失敗しました。人の目で確認してください。`,
+    ]).catch(() => undefined);
+    return (
+      `📝 「${parsed.title}」を登録しました。\n` +
+      `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`
+    );
+  }
+
+  const derived = applyDerivedValues(clarify.found);
+  let missing = clarify.missing.filter((f) => !derived.includes(f.key));
+
+  // 物件が特定できないときは、確認項目として持たせる。
+  // 質問文に出すだけだと、答えが来ても記録されず、他の項目が埋まった時点で
+  // 物件不明のまま「着手可能」になってしまう。
+  if (clarify.propertyUnknown) missing = [PROPERTY_FIELD, ...missing];
+
+  if (missing.length === 0) {
+    return buildTaskRegisteredMessage(parsed);
+  }
+
+  const fields = [
+    ...fillPlaceholders(checklistFor(parsed.requestType), {
+      期日: parsed.dueDate ?? undefined,
+    }),
+    ...(clarify.propertyUnknown ? [PROPERTY_FIELD] : []),
+  ];
+  await setTaskStatus(pageId, STATUS_PENDING);
+  await appendTaskNote(pageId, [
+    `【初動確認】${jstDateStr(0)}`,
+    ...Object.entries(clarify.found).map(
+      ([k, v]) => `・確認済み: ${fields.find((f) => f.key === k)?.label ?? k}：${v}`
+    ),
+    ...missing.filter((f) => !f.suggest).map((f) => `・要指示: ${f.label}`),
+    ...missing.filter((f) => f.suggest).map((f) => `・提案: ${f.label}：${f.suggest}`),
+  ]);
+  await savePendingTaskConfirm(groupId, {
+    pageId,
+    title: parsed.title,
+    requestType: parsed.requestType,
+    fields,
+    awaitingKeys: missing.filter((f) => !f.suggest).map((f) => f.key),
+    proposalKeys: missing.filter((f) => f.suggest).map((f) => f.key),
+    settled: { ...clarify.found },
+    propertyName: parsed.propertyName ?? null,
+    assignee: parsed.assignee ?? null,
+    assigneeUserId: parsed.assigneeUserId ?? null,
+    createdAt: Date.now(),
+  });
+  return buildClarifyMessage(
+    parsed.title,
+    { ...clarify, missing },
+    parsed.propertyName ?? null
+  );
+}
+
+/** Botが送った確認メッセージのIDを控える（引用リプライで確認を特定するため） */
+async function rememberConfirmMessage(
+  groupId: string | undefined,
+  pageId: string,
+  botMessageId: string | null
+): Promise<void> {
+  if (!botMessageId) return;
+  const p = await getPendingTaskConfirm(groupId, null, pageId);
+  if (!p || p.pageId !== pageId) return;
+  p.botMessageId = botMessageId;
+  await savePendingTaskConfirm(groupId, p);
+}
+
 /** 期日がずれたときに緊急度を付け直す（期日と緊急度が食い違わないように） */
 function urgencyFromDue(dueDate: string, now: Date): ParsedTask["urgency"] {
   const today = now.toISOString().slice(0, 10);
@@ -292,7 +397,8 @@ function urgencyFromDue(dueDate: string, now: Date): ParsedTask["urgency"] {
 // （選択の返答メッセージに紐づけても、引用リプライの照合には使えないため）。
 async function registerTaskFromText(
   text: string,
-  replyToken: string
+  replyToken: string,
+  groupId: string | undefined
 ): Promise<void> {
   const now = jstNow();
   let parsed;
@@ -304,16 +410,34 @@ async function registerTaskFromText(
     return;
   }
   await finalizeDue(parsed, now);
+  let pageId: string;
   try {
-    await createNotionTask(parsed, text);
-    await sendLineMessage(replyToken, buildTaskRegisteredMessage(parsed));
+    pageId = await createNotionTask(parsed, text);
   } catch (err) {
     console.error("タスク登録エラー:", err);
     await sendLineMessage(
       replyToken,
       "⚠️ タスクの登録中にエラーが発生しました。もう一度お試しください。"
     );
+    return;
   }
+
+  // 通常経路と同じ初動確認をかける。ここを飛ばすと、曖昧確認メニュー経由の
+  // 依頼だけ聞き返しが働かず、同じ「これ買いたい」でも挙動が変わってしまう。
+  let reply: string;
+  try {
+    reply = await clarifyAfterCreate(pageId, parsed, text, [], groupId);
+  } catch (err) {
+    console.error("初動確認に失敗（登録は完了）:", err);
+    reply =
+      `📝 「${parsed.title}」を登録しました。\n` +
+      `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
+  }
+  const botMsgId = await sendLineMessage(replyToken, reply);
+  await setTaskMessageIds(pageId, [botMsgId ?? ""].filter(Boolean)).catch(
+    () => undefined
+  );
+  await rememberConfirmMessage(groupId, pageId, botMsgId ?? null);
 }
 
 // 顧客登録の入口。#新規 の書式で無い場合は handleNewCustomer が
@@ -396,67 +520,60 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     //
     // 返事は2種類ある。実運用では後者のほうが多い。
     //   (a) 「はい」「OK」    → 提案どおりで確定
-    //   (b) 「買主名義は仲介会社宛てで」「手付は300万」「収益として」
-    //        → 具体的な値の指定。**既に決まっていた値の上書きも含む**
+    //   (b) 「手付は300万」「うちで買う」→ 具体的な値の指定。既存値の上書きも含む
     //
-    // (b) を拾えないと、回答が元のタスクに届かず新規タスクになる。
-    // 対象タスクは、引用リプライがあればそれを優先する（複数の確認が
-    // 同時に走っているときに取り違えないため）。無ければ直近の1件。
+    // 対象の確認は、引用リプライがあればそれで特定する。無ければ直近の1件。
+    // グループ内に複数の確認が同時に存在しうるため、直近だけを持つ実装にはしない。
     {
-      let pending = await getPendingTaskConfirm(source.groupId);
+      const quotedId = event.message.quotedMessageId ?? null;
+      const quotedTask = quotedId ? await findTaskByMessageId(quotedId) : null;
+      const pending = await getPendingTaskConfirm(
+        source.groupId,
+        quotedId,
+        quotedTask?.id ?? null
+      );
 
-      // 引用リプライなら、引用先のタスクが確認待ちかどうかで対象を確定する
-      if (event.message.quotedMessageId && pending) {
-        const quoted = await findTaskByMessageId(event.message.quotedMessageId);
-        if (quoted && quoted.id !== pending.pageId) {
-          // 別のタスクへの引用＝この確認への回答ではない。③以降に任せる
-          pending = null;
-        }
-      }
+      // 引用先が「確認待ちではない既存タスク」なら、③の取消/完了/担当者に任せる
+      const quotedIsOther = Boolean(quotedTask && pending?.pageId !== quotedTask.id);
 
-      if (pending) {
+      if (pending && !quotedIsOther) {
         const body = stripMentions(event.message);
-        const fields = pending.fields;
-        const labelOf = (k: string) =>
-          fields.find((f) => f.key === k)?.label ?? k;
+        const state: PendingState = {
+          fields: pending.fields,
+          awaitingKeys: pending.awaitingKeys,
+          proposalKeys: pending.proposalKeys,
+          settled: pending.settled,
+        };
+
+        const persist = async (r: ApplyResult, extraNote: string[]) => {
+          pending.awaitingKeys = state.awaitingKeys;
+          pending.proposalKeys = state.proposalKeys;
+          pending.settled = state.settled;
+          await appendTaskNote(pending.pageId, [
+            `【回答】${jstDateStr(0)}`,
+            ...r.applied.map((a) => `・${a}`),
+            ...r.derived.map((d) => `・${d}（自動補完）`),
+            ...extraNote,
+          ]);
+          if (r.complete) {
+            await setTaskStatus(pending.pageId, "未着手");
+            await deletePendingTaskConfirm(source.groupId, pending.pageId);
+          } else {
+            await savePendingTaskConfirm(source.groupId, pending);
+          }
+        };
 
         // (a) 提案をそのまま承認
         if (isApproval(body)) {
           try {
-            const applied = pending.proposalKeys.map((k) => {
-              const f = fields.find((x) => x.key === k);
-              const v = f?.suggest ?? "";
-              pending!.settled[k] = v;
-              return `${labelOf(k)}：${v}`;
-            });
-            pending.proposalKeys = [];
-
-            if (applied.length > 0) {
-              await appendTaskNote(pending.pageId, [
-                `【承認】${jstDateStr(0)} 提案どおりで確定`,
-                ...applied.map((a) => `・${a}`),
-              ]);
-            }
-
-            const remaining = pending.awaitingKeys.map(labelOf);
-            if (remaining.length === 0) {
-              await setTaskStatus(pending.pageId, "未着手");
-              await deletePendingTaskConfirm(source.groupId);
-            } else {
-              await savePendingTaskConfirm(source.groupId, pending);
-            }
+            const r = applyApproval(state);
+            await persist(r, []);
             await sendLineMessage(
               replyToken,
-              buildAnswerAppliedMessage(pending.title, applied, [], null, remaining)
+              buildAnswerAppliedMessage(pending.title, r.applied, [], null, r.remaining)
             );
-            if (remaining.length === 0) {
-              await handoffToAssignee(
-                source.groupId,
-                pending,
-                pending.propertyName ?? null,
-                pending.assignee ?? null,
-                pending.assigneeUserId ?? null
-              );
+            if (r.complete) {
+              await handoffToAssignee(source.groupId, pending);
             }
           } catch (err) {
             console.error("初動確認の確定に失敗:", err);
@@ -469,69 +586,49 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }
 
         // (b) 具体的な回答か、無関係な別依頼かを判定する。
-        //     確信度が低いものは回答扱いにしない。誤判定すると
-        //     **新しい依頼が確認への回答として吸い込まれて消える**。
-        const ans = await interpretAnswer(
-          body,
-          fields,
-          pending.settled,
-          pending.title
-        );
-        if (ans.isAnswer && ans.confidence >= TASK_CONFIDENCE_THRESHOLD) {
-          try {
-            const applied: string[] = [];
-            for (const [k, v] of Object.entries(ans.updates)) {
-              pending.settled[k] = v;
-              pending.awaitingKeys = pending.awaitingKeys.filter((x) => x !== k);
-              pending.proposalKeys = pending.proposalKeys.filter((x) => x !== k);
-              applied.push(`${labelOf(k)}：${v}`);
-            }
-            // 「うちで買う」→ 買主名義は自社、のように自動で決まる分を埋める。
-            // これをやらないと、答えたばかりのことをもう一度聞き返してしまう。
-            for (const k of applyDerivedValues(pending.settled)) {
-              pending.awaitingKeys = pending.awaitingKeys.filter((x) => x !== k);
-              pending.proposalKeys = pending.proposalKeys.filter((x) => x !== k);
-              applied.push(`${labelOf(k)}：${pending.settled[k]}（自動）`);
-            }
-            const overridden = ans.overrides.map(labelOf);
+        //     新規依頼と判定されたものは絶対に吸い込まない。ここで吸い込むと
+        //     **その依頼は登録すらされずに消える**（確認の取りこぼしより損害が大きい）。
+        const ans = await interpretAnswer(body, pending.fields, pending.settled, pending.title);
 
-            await appendTaskNote(pending.pageId, [
-              `【回答】${jstDateStr(0)}`,
-              ...applied.map((a) => `・${a}`),
-              ...(overridden.length > 0
-                ? [`・変更: ${overridden.join("・")}`]
-                : []),
+        // 「新しい依頼を吸い込まない」の安全弁は isNewRequest に置く。
+        // 確信度だけで切ると、「名義を仲介会社宛てに変えて」のような
+        // **解釈が二通りある正当な回答**が落ちて新規タスクになる（実測 0.4〜0.6）。
+        // 一方 isNewRequest は別依頼を 0.97 で見分けられた。
+        //
+        // 修正指示（amendment）は定義上そのタスクへの指示なので、確信度が低くても拾う。
+        // amendment はどの必須項目も埋めないため、これで着手可能になることはない。
+        const relatesToTask =
+          ans.isAnswer &&
+          !ans.isNewRequest &&
+          (ans.confidence >= TASK_CONFIDENCE_THRESHOLD || Boolean(ans.amendment));
+        const uncertain = relatesToTask && ans.confidence < TASK_CONFIDENCE_THRESHOLD;
+
+        if (relatesToTask) {
+          try {
+            const r = applyAnswer(state, ans.updates);
+            const overridden = ans.overrides
+              .map((k) => pending.fields.find((f) => f.key === k)?.label ?? k);
+            await persist(r, [
+              ...(overridden.length > 0 ? [`・変更: ${overridden.join("・")}`] : []),
               ...(ans.amendment ? [`・修正指示: ${ans.amendment}`] : []),
             ]);
-
-            const remaining = pending.awaitingKeys.map(labelOf);
-            if (remaining.length === 0) {
-              // 提案分が未承認でも、指示待ちが無くなれば着手はできる。
-              // 提案は既定値として通用するものだけを載せているため。
-              await setTaskStatus(pending.pageId, "未着手");
-              await deletePendingTaskConfirm(source.groupId);
-            } else {
-              await savePendingTaskConfirm(source.groupId, pending);
-            }
-
-            await sendLineMessage(
-              replyToken,
-              buildAnswerAppliedMessage(
-                pending.title,
-                applied,
-                overridden,
-                ans.amendment,
-                remaining
-              )
+            let msg = buildAnswerAppliedMessage(
+              pending.title,
+              [...r.applied, ...r.derived.map((d) => `${d}（自動）`)],
+              overridden,
+              ans.amendment,
+              r.remaining
             );
-            if (remaining.length === 0) {
-              await handoffToAssignee(
-                source.groupId,
-                pending,
-                pending.propertyName ?? null,
-                pending.assignee ?? null,
-                pending.assigneeUserId ?? null
-              );
+            // 取り違えたときに戻せる道を残す。判断が割れる発言を黙って
+            // 既存タスクに付けると、別依頼だった場合に気づけない。
+            if (uncertain) {
+              msg +=
+                `\n\n※ このタスクへのご指示として扱いました。` +
+                `別のご依頼でしたら、もう一度そのままお送りください。`;
+            }
+            await sendLineMessage(replyToken, msg);
+            if (r.complete) {
+              await handoffToAssignee(source.groupId, pending);
             }
             continue;
           } catch (err) {
@@ -683,7 +780,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           } else if (choice === "crm") {
             await registerCustomer(pendingClar, replyToken);
           } else {
-            await registerTaskFromText(pendingClar, replyToken);
+            await registerTaskFromText(pendingClar, replyToken, source.groupId);
           }
           continue;
         }
@@ -801,84 +898,44 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 「画像だけ届いた」と分かるようにしておく（空欄だと何も追えない）。
       const rawForNotion =
         text || `（本文なし・添付${attachments.length}件＋担当者へのメンション）`;
-      const pageId = await createNotionTask(parsed, rawForNotion);
-
-      // ── 初動確認 ──
-      // 条件が抜けていて「今すぐ着手できない」依頼は、提案付きで聞き返す。
-      //
-      // ★順番が重要★ createNotionTask の**後**に置いている。
-      // 確認を登録の前に置くと、誰も答えなかった依頼が消える。
-      // 確認はあくまで登録済みタスクへの追記として動かす。
-      // detectMissing 自体が失敗しても fail-open で「不足なし」が返るので、
-      // ここが落ちて登録済みタスクが宙に浮くことはない。
-      const clarify = await detectMissing(
-        text,
-        parsed.requestType,
-        parsed.propertyName ?? null,
-        attachments,
-        parsed.dueDate ?? undefined
-      );
-      // 最初の依頼文に書かれていた条件からも自動補完する
-      const derived = applyDerivedValues(clarify.found);
-      if (derived.length > 0) {
-        clarify.missing = clarify.missing.filter((f) => !derived.includes(f.key));
+      // LINEはWebhookが2xxを返さないと再送する。作成前に同じメッセージIDの
+      // タスクが無いか見て、再送で同じ依頼が二重登録されるのを防ぐ。
+      const already = await findTaskByMessageId(event.message.id);
+      if (already) {
+        console.log("再送とみなしてスキップ:", event.message.id);
+        continue;
       }
-      const needsClarify =
-        clarify.missing.length > 0 || clarify.propertyUnknown;
 
+      const pageId = await createNotionTask(parsed, rawForNotion);
+      // 作成直後にメッセージIDを紐づける。後段で失敗して再送が来ても、
+      // 上の重複チェックで拾えるようにするため**確認より先**に行う。
+      await setTaskMessageIds(pageId, [event.message.id]);
+
+      // ここから先で失敗しても、タスク自体は登録済み。
+      // 「登録に失敗しました」と返すと手で再投稿されて重複するので、
+      // 確認の失敗はタスク登録の失敗として扱わない。
       let reply: string;
-      if (needsClarify) {
-        await setTaskStatus(pageId, STATUS_PENDING);
-        const proposalKeys = clarify.missing
-          .filter((f) => f.suggest)
-          .map((f) => f.key);
-        const awaitingKeys = clarify.missing
-          .filter((f) => !f.suggest)
-          .map((f) => f.key);
-        await appendTaskNote(pageId, [
-          `【初動確認】${jstDateStr(0)}`,
-          ...Object.values(clarify.found).map((v) => `・確認済み: ${v}`),
-          ...clarify.missing
-            .filter((f) => !f.suggest)
-            .map((f) => `・要指示: ${f.label}`),
-          ...clarify.missing
-            .filter((f) => f.suggest)
-            .map((f) => `・提案: ${f.label}：${f.suggest}`),
-        ]);
-        await savePendingTaskConfirm(source.groupId, {
+      try {
+        reply = await clarifyAfterCreate(
           pageId,
-          title: parsed.title,
-          requestType: parsed.requestType,
-          // 提案文の{期日}を埋めた状態で保存する。保存前の生のままだと
-          // 承認時に「期限：{期日}」がそのままNotionに入る
-          fields: fillPlaceholders(checklistFor(parsed.requestType), {
-            期日: parsed.dueDate ?? undefined,
-          }),
-          awaitingKeys,
-          proposalKeys,
-          settled: { ...clarify.found },
-          propertyName: parsed.propertyName ?? null,
-          assignee: parsed.assignee ?? null,
-          assigneeUserId: parsed.assigneeUserId ?? null,
-          createdAt: Date.now(),
-        });
-        reply = buildClarifyMessage(
-          parsed.title,
-          clarify,
-          parsed.propertyName ?? null
+          parsed,
+          text,
+          attachments,
+          source.groupId
         );
-      } else {
-        reply = buildTaskRegisteredMessage(parsed);
+      } catch (err) {
+        console.error("初動確認に失敗（登録は完了）:", err);
+        reply =
+          `📝 「${parsed.title}」を登録しました。\n` +
+          `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
       }
 
       const botMsgId = await sendLineMessage(replyToken, reply);
-
-      // 元メッセージとBot返信のIDを保存（後からの引用リプライで
-      // 「どのタスクへの担当者指定か」を特定できるようにする）
       await setTaskMessageIds(
         pageId,
         [event.message.id, botMsgId ?? ""].filter(Boolean)
       );
+      await rememberConfirmMessage(source.groupId, pageId, botMsgId ?? null);
 
       // 使った添付は捨てる。残すと同じ画像が後続の発言にも繰り返し添付され、
       // 無関係な発言がその画像の依頼として登録されてしまう。

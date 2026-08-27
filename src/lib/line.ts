@@ -54,11 +54,13 @@ export async function getGroupMemberName(
 }
 
 // Push通知（replyTokenなし）
+// 送信できたかを返す。呼び出し側が失敗を検知できないと
+// 「送ったつもりで誰にも届いていない」が起きる。
 export async function pushLineMessage(
   to: string,
   text: string
-): Promise<void> {
-  await fetch("https://api.line.me/v2/bot/message/push", {
+): Promise<boolean> {
+  const res = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -69,6 +71,11 @@ export async function pushLineMessage(
       messages: [{ type: "text", text }],
     }),
   });
+  if (!res.ok) {
+    console.error("LINE push失敗:", res.status, await res.text());
+    return false;
+  }
+  return true;
 }
 
 // LINEメンション付きPush送信（textV2形式）。
@@ -80,7 +87,7 @@ export async function pushLineMessageWithMentions(
   to: string,
   text: string,
   mentions: Record<string, string> // key（textの{key}） -> LINE userId
-): Promise<void> {
+): Promise<boolean> {
   const keys = Object.keys(mentions);
   const message: Record<string, unknown> =
     keys.length === 0
@@ -108,7 +115,9 @@ export async function pushLineMessageWithMentions(
   });
   if (!res.ok) {
     console.error("LINE push失敗:", res.status, await res.text());
+    return false;
   }
+  return true;
 }
 
 // textV2では { } が置換記法として解釈されるため、本文に含めない

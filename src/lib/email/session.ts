@@ -353,10 +353,15 @@ export async function deletePendingClarification(
 //
 // メールの下書き確認（30分）と違い、こちらは**社長が数時間後に答える**前提。
 // 短いTTLだと「はい」が届く前に失効し、確認が宙に浮く。24時間持たせる。
-// 失効しても引用リプライ経由（messageId → Notionページ）で辿れるため、
-// これはあくまで「直後に一言で答えられる」ための近道。
+//
+// **グループ内で複数の確認を同時に持てる**必要がある。
+// 以前はグループ単位で1件しか持たず、2件目の依頼が1件目を上書きしていた。
+// 上書きされた側は引用リプライで指しても復元できず、要確認のまま永久に残った。
+// pageId ごとに保持し、引用リプライ（Botの確認メッセージID）でも引けるようにする。
 const CONFIRM_TTL_SECONDS = 60 * 60 * 24;
 const CONFIRM_PREFIX = "taskconfirm";
+/** 同時に保持する確認の上限。古いものから落とす */
+const CONFIRM_MAX = 10;
 
 export interface ConfirmField {
   key: string;
@@ -381,58 +386,105 @@ export interface PendingTaskConfirm {
   propertyName?: string | null;
   assignee?: string | null;
   assigneeUserId?: string | null;
+  /** Botが送った確認メッセージのID。引用リプライでこの確認を特定するのに使う */
+  botMessageId?: string | null;
   createdAt: number;
+}
+
+interface ConfirmBucket {
+  items: PendingTaskConfirm[];
 }
 
 const confirmMemStore = new Map<
   string,
-  { value: PendingTaskConfirm; expireAt: number }
+  { value: ConfirmBucket; expireAt: number }
 >();
 
 function confirmKey(groupId: string | undefined): string {
-  // 依頼者ではなく**グループ単位**で持つ。社長が投げた依頼に
-  // 担当者が代わりに答える場面が実際にあるため、userIdで縛らない。
   return `${CONFIRM_PREFIX}:${groupId ?? "direct"}`;
 }
 
-export async function savePendingTaskConfirm(
-  groupId: string | undefined,
-  value: PendingTaskConfirm
-): Promise<void> {
+async function loadBucket(groupId: string | undefined): Promise<ConfirmBucket> {
   const key = confirmKey(groupId);
   if (kvEnabled()) {
-    await kv.set(key, value, { ex: CONFIRM_TTL_SECONDS });
-    return;
-  }
-  confirmMemStore.set(key, {
-    value,
-    expireAt: Date.now() + CONFIRM_TTL_SECONDS * 1000,
-  });
-}
-
-export async function getPendingTaskConfirm(
-  groupId: string | undefined
-): Promise<PendingTaskConfirm | null> {
-  const key = confirmKey(groupId);
-  if (kvEnabled()) {
-    return (await kv.get<PendingTaskConfirm>(key)) ?? null;
+    return (await kv.get<ConfirmBucket>(key)) ?? { items: [] };
   }
   const hit = confirmMemStore.get(key);
-  if (!hit) return null;
+  if (!hit) return { items: [] };
   if (Date.now() > hit.expireAt) {
     confirmMemStore.delete(key);
-    return null;
+    return { items: [] };
   }
   return hit.value;
 }
 
-export async function deletePendingTaskConfirm(
-  groupId: string | undefined
+async function saveBucket(
+  groupId: string | undefined,
+  bucket: ConfirmBucket
 ): Promise<void> {
   const key = confirmKey(groupId);
+  // 新しい順に上限まで残す
+  bucket.items = bucket.items
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, CONFIRM_MAX);
   if (kvEnabled()) {
-    await kv.del(key);
+    await kv.set(key, bucket, { ex: CONFIRM_TTL_SECONDS });
     return;
   }
-  confirmMemStore.delete(key);
+  confirmMemStore.set(key, {
+    value: bucket,
+    expireAt: Date.now() + CONFIRM_TTL_SECONDS * 1000,
+  });
+}
+
+/** 保存（同じ pageId があれば差し替え） */
+export async function savePendingTaskConfirm(
+  groupId: string | undefined,
+  value: PendingTaskConfirm
+): Promise<void> {
+  const bucket = await loadBucket(groupId);
+  bucket.items = bucket.items.filter((i) => i.pageId !== value.pageId);
+  bucket.items.push(value);
+  await saveBucket(groupId, bucket);
+}
+
+/**
+ * 回答の宛先になる確認を1件返す。
+ *
+ * @param quotedMessageId 引用リプライの引用先。これがあれば最優先で照合する
+ * @param quotedPageId    引用先メッセージから引けたタスクのページID
+ */
+export async function getPendingTaskConfirm(
+  groupId: string | undefined,
+  quotedMessageId?: string | null,
+  quotedPageId?: string | null
+): Promise<PendingTaskConfirm | null> {
+  const bucket = await loadBucket(groupId);
+  if (bucket.items.length === 0) return null;
+
+  if (quotedPageId) {
+    return bucket.items.find((i) => i.pageId === quotedPageId) ?? null;
+  }
+  if (quotedMessageId) {
+    const byMsg = bucket.items.find((i) => i.botMessageId === quotedMessageId);
+    if (byMsg) return byMsg;
+  }
+  // 引用が無ければ直近の確認への回答とみなす
+  return bucket.items.sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+}
+
+/** 確認待ちが何件あるか（回答先が曖昧なときの案内に使う） */
+export async function countPendingTaskConfirms(
+  groupId: string | undefined
+): Promise<number> {
+  return (await loadBucket(groupId)).items.length;
+}
+
+export async function deletePendingTaskConfirm(
+  groupId: string | undefined,
+  pageId: string
+): Promise<void> {
+  const bucket = await loadBucket(groupId);
+  bucket.items = bucket.items.filter((i) => i.pageId !== pageId);
+  await saveBucket(groupId, bucket);
 }
