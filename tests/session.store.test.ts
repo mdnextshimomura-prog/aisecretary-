@@ -9,8 +9,9 @@ import {
   getPendingTaskConfirm,
   deletePendingTaskConfirm,
   countPendingTaskConfirms,
-  isEventHandled,
-  markEventHandled,
+  reserveEvent,
+  completeEvent,
+  releaseEvent,
   reserveMessage,
   releaseMessage,
   completeMessage,
@@ -129,11 +130,24 @@ async function main() {
   const done = await reserveMessage("m-busy");
   ok("完了後は inProgress ではない", !done.inProgress && done.pageId === "page-done");
 
-  // ── イベント単位の処理済み記録（バッチ再送で二重実行しないため）──
-  ok("未処理なら false", (await isEventHandled("ev-1")) === false);
-  await markEventHandled("ev-1");
-  ok("印を付けたら true", (await isEventHandled("ev-1")) === true);
-  ok("別のイベントは影響を受けない", (await isEventHandled("ev-2")) === false);
+  // ── イベント単位の予約（バッチ再送で二重実行しないため）──
+  const e1 = await reserveEvent("ev-1");
+  ok("未処理なら進める", e1.proceed === true);
+  const e1b = await reserveEvent("ev-1");
+  ok("処理中は進めず inProgress", e1b.proceed === false && e1b.inProgress === true);
+  await completeEvent("ev-1");
+  const e1c = await reserveEvent("ev-1");
+  ok("完了後は進めず inProgress でもない", e1c.proceed === false && !e1c.inProgress);
+  ok("別イベントは影響を受けない", (await reserveEvent("ev-2")).proceed === true);
+  // 失敗したら解放され、再送でやり直せる
+  await releaseEvent("ev-2");
+  ok("解放後はやり直せる", (await reserveEvent("ev-2")).proceed === true);
+  // 同時到達で進めるのは1つだけ
+  const evs = await Promise.all(
+    Array.from({ length: 6 }, () => reserveEvent("ev-race"))
+  );
+  ok("同時6件で進めるのは1つ", evs.filter((r) => r.proceed).length === 1,
+    `通過=${evs.filter((r) => r.proceed).length}`);
 
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);

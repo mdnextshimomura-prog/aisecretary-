@@ -596,7 +596,10 @@ export interface ReserveResult {
  * そのため「処理中」には猶予（lease）を持たせ、猶予切れは引き継げるようにする。
  */
 export async function reserveMessage(messageId: string): Promise<ReserveResult> {
-  const key = `msgclaim:${messageId}`;
+  return reserveClaim(`msgclaim:${messageId}`);
+}
+
+async function reserveClaim(key: string): Promise<ReserveResult> {
   const now = Date.now();
 
   if (kvEnabled()) {
@@ -656,6 +659,31 @@ export async function completeMessage(
     pageId,
     at: Date.now(),
   });
+}
+
+// ── LINEイベント単位の予約 ──
+//
+// バッチ内の1件でも再送が必要になると、LINEはバッチ全体を送り直す。
+// タスク登録以外（確認への回答・メール送信・顧客登録・完了報告）にも
+// 予約が要る。無いと、処理済みのイベントまで作り直されて副作用が二重になる。
+//
+// 単なる「処理済みフラグ」ではなく**処理中/完了を区別する予約**にしてある。
+// フラグ方式だと、印を書けなかった場合に黙って再実行され、
+// 逆に処理の途中で落ちた場合は「処理済み」として二度と拾われない。
+const EVENT_PREFIX = "evtclaim";
+export async function reserveEvent(messageId: string): Promise<ReserveResult> {
+  return reserveClaim(`${EVENT_PREFIX}:${messageId}`);
+}
+export async function completeEvent(messageId: string): Promise<void> {
+  await writeClaim(`${EVENT_PREFIX}:${messageId}`, {
+    state: "done",
+    at: Date.now(),
+  });
+}
+export async function releaseEvent(messageId: string): Promise<void> {
+  const key = `${EVENT_PREFIX}:${messageId}`;
+  if (kvEnabled()) await kv.del(key);
+  else claimMem.delete(key);
 }
 
 /** 予約を取り消す（登録に失敗したときに、再送でやり直せるようにする） */
@@ -727,31 +755,4 @@ export async function removePendingHandoff(
   else handoffItemMem.delete(ik);
 
   await indexRemove(handoffIndexKey(groupId), pageId);
-}
-
-// ── LINEイベントの処理済み記録 ──
-//
-// バッチ内の1件でも再送が必要になると、LINEはバッチ全体を送り直す。
-// 記録が無いと、既に処理し終えたイベント（確認への回答、メール送信、
-// 顧客登録など）まで作り直され、二重の副作用が起きる。
-// タスク登録の予約とは別に、**全メッセージイベント**に印を付ける。
-const EVENT_TTL_SECONDS = 60 * 60 * 24;
-const eventMem = new Map<string, number>();
-
-export async function isEventHandled(messageId: string): Promise<boolean> {
-  const key = `evt:${messageId}`;
-  if (kvEnabled()) return Boolean(await kv.get(key));
-  const exp = eventMem.get(key);
-  if (!exp) return false;
-  if (Date.now() > exp) {
-    eventMem.delete(key);
-    return false;
-  }
-  return true;
-}
-
-export async function markEventHandled(messageId: string): Promise<void> {
-  const key = `evt:${messageId}`;
-  if (kvEnabled()) await kv.set(key, 1, { ex: EVENT_TTL_SECONDS });
-  else eventMem.set(key, Date.now() + EVENT_TTL_SECONDS * 1000);
 }

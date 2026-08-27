@@ -41,8 +41,9 @@ import {
   savePendingClarification,
   getPendingClarification,
   deletePendingClarification,
-  isEventHandled,
-  markEventHandled,
+  reserveEvent,
+  completeEvent,
+  releaseEvent,
   savePendingTaskConfirm,
   getPendingTaskConfirm,
   deletePendingTaskConfirm,
@@ -527,16 +528,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   for (const event of body.events) {
     if (event.type !== "message" || !event.message) continue;
 
-    // このイベントを既に処理済みなら何もしない。
-    // バッチ内の1件が再送を要求すると LINE はバッチ全体を送り直すため、
-    // 印が無いと処理済みのイベントまで再実行され、二重の副作用が起きる
-    // （確認への回答が新規タスクになる、メールが再送される等）。
-    if (await isEventHandled(event.message.id)) {
-      console.log("処理済みのイベントをスキップ:", event.message.id);
+    // イベント単位で予約する。バッチ内の1件が再送を要求すると LINE は
+    // バッチ全体を送り直すため、これが無いと処理済みのイベント
+    // （確認への回答・メール送信・顧客登録）まで作り直される。
+    const ev = await reserveEvent(event.message.id);
+    if (!ev.proceed) {
+      if (ev.inProgress) {
+        // 他が処理中。200で返すと再送が止まり、処理中の側が落ちていた場合に
+        // 誰も引き継がずイベントが失われる。
+        needsRetry = true;
+      } else {
+        console.log("処理済みのイベントをスキップ:", event.message.id);
+      }
       continue;
     }
-    // 再送が必要になった場合だけ印を付けない（この後の needsRetry で立てる）
-    const retryBefore: boolean = needsRetry;
+
+    // このイベントが再送を必要としたか。**バッチ全体の needsRetry とは別に持つ。**
+    // 共有のフラグで判定すると、先のイベントが立てた true を見て
+    // 「自分も再送要求済み」と誤認し、未処理のまま完了印を付けてしまう。
+    let eventRetry = false;
+    const requestRetry = () => {
+      eventRetry = true;
+      needsRetry = true;
+    };
     try {
 
     const replyToken = event.replyToken!;
@@ -879,7 +893,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               event.message.id
             );
             if (r === "retry") {
-              needsRetry = true;
+              requestRetry();
               continue;
             }
             await deletePendingClarification(source.groupId, source.userId);
@@ -1008,7 +1022,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           // 他が処理中。**200で握り潰さない。**処理中の側が落ちていると
           // 再送が止まり、猶予切れ後も誰も引き継がず依頼が消える。
           console.log("他インスタンスが処理中。再送を要求:", event.message.id);
-          needsRetry = true;
+          requestRetry();
         } else {
           console.log("登録済みのためスキップ:", event.message.id, claim.pageId ?? "");
         }
@@ -1026,7 +1040,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       } catch (err) {
         console.error("既存確認に失敗。作成せず再送に回す:", err);
         await releaseMessage(event.message.id).catch(() => undefined);
-        needsRetry = true;
+        requestRetry();
         continue;
       }
       if (existing) {
@@ -1059,7 +1073,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           // 出来たかどうか分からない。解放すると二重登録の恐れがあるので
           // 予約は残したまま再送に回す。猶予切れ後に引き継がれて再確認される。
           console.error("作成結果を確認できず。予約を残して再送に回す:", err);
-          needsRetry = true;
+          requestRetry();
           continue;
         }
         // 照会が成功して「無い」と確認できた場合だけ解放する
@@ -1113,11 +1127,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         "⚠️ タスクの登録中にエラーが発生しました。もう一度お試しください。"
       );
     }
+    } catch (err) {
+      // 例外で抜けた＝処理し切れていない。完了印を付けてはいけない。
+      // 付けると再送時にスキップされ、そのイベントが永久に失われる。
+      console.error("イベント処理中の例外。再送に回す:", event.message.id, err);
+      requestRetry();
     } finally {
-      // 再送を要求したイベント以外は「処理済み」にする。
-      // continue で抜けた経路も finally を通るので、印を付け忘れない。
-      if (needsRetry === retryBefore) {
-        await markEventHandled(event.message.id).catch(() => undefined);
+      if (eventRetry) {
+        // 予約を解放し、再送でやり直せるようにする
+        await releaseEvent(event.message.id).catch(() => undefined);
+      } else {
+        // 完了印。書けなかった場合は予約が「処理中」のまま残るので、
+        // 猶予切れ後に引き継がれて再処理される（黙って再実行はされない）。
+        await completeEvent(event.message.id).catch((e) =>
+          console.error("イベント完了の記録に失敗（猶予切れ後に再処理される）:", e)
+        );
       }
     }
   }
