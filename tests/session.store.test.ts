@@ -67,11 +67,15 @@ async function main() {
   await deletePendingTaskConfirm(G, "page-2");
   ok("索引外のタスクも削除できる", (await getPendingTaskConfirm(G, null, "page-2")) === null);
 
-  const before = await countPendingTaskConfirms(G);
-  await deletePendingTaskConfirm(G, "page-59");
-  ok("削除される", (await getPendingTaskConfirm(G, null, "page-59")) === null);
-  ok("件数が減る", (await countPendingTaskConfirms(G)) === before - 1,
-    `${before} -> ${await countPendingTaskConfirms(G)}`);
+  // 件数は索引の上限に影響されるので、別グループで少数のときに確かめる
+  const G2 = "Gsmall";
+  await savePendingTaskConfirm(G2, mk(1));
+  await savePendingTaskConfirm(G2, mk(2));
+  const before = await countPendingTaskConfirms(G2);
+  await deletePendingTaskConfirm(G2, "page-1");
+  ok("削除される", (await getPendingTaskConfirm(G2, null, "page-1")) === null);
+  ok("件数が減る", (await countPendingTaskConfirms(G2)) === before - 1,
+    `${before} -> ${await countPendingTaskConfirms(G2)}`);
 
   // ── メッセージIDの予約（二重登録防止）──
   ok("初回は予約できる", (await reserveMessage("m-1")).proceed === true);

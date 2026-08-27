@@ -421,28 +421,49 @@ async function readItem(
   return hit.value;
 }
 
-async function readIndex(groupId: string | undefined): Promise<string[]> {
-  const key = confirmIndexKey(groupId);
-  if (kvEnabled()) return (await kv.get<string[]>(key)) ?? [];
-  const hit = indexMem.get(key);
-  if (!hit || Date.now() > hit.expireAt) return [];
-  return hit.value;
-}
-
-async function writeIndex(
-  groupId: string | undefined,
-  ids: string[]
+// 索引は**原子的なメンバー操作**で持つ。
+// 配列をGETしてSETし直す作りだと、同時に2件保存されたときに片方の追加が消え、
+// 消えた側は「引用なしの返事」で選ばれなくなる（引き渡しの索引なら再送されない）。
+async function indexAdd(
+  key: string,
+  member: string,
+  score: number,
+  ttl: number
 ): Promise<void> {
-  const key = confirmIndexKey(groupId);
-  const trimmed = ids.slice(0, CONFIRM_INDEX_MAX);
   if (kvEnabled()) {
-    await kv.set(key, trimmed, { ex: CONFIRM_TTL_SECONDS });
+    await kv.zadd(key, { score, member });
+    await kv.expire(key, ttl);
     return;
   }
+  const cur = indexMem.get(key)?.value ?? [];
   indexMem.set(key, {
-    value: trimmed,
-    expireAt: Date.now() + CONFIRM_TTL_SECONDS * 1000,
+    value: [member, ...cur.filter((m) => m !== member)],
+    expireAt: Date.now() + ttl * 1000,
   });
+}
+
+async function indexRemove(key: string, member: string): Promise<void> {
+  if (kvEnabled()) {
+    await kv.zrem(key, member);
+    return;
+  }
+  const hit = indexMem.get(key);
+  if (!hit) return;
+  hit.value = hit.value.filter((m) => m !== member);
+}
+
+/** 新しい順にメンバーを返す */
+async function indexList(key: string, limit: number): Promise<string[]> {
+  if (kvEnabled()) {
+    return (await kv.zrange<string[]>(key, 0, limit - 1, { rev: true })) ?? [];
+  }
+  const hit = indexMem.get(key);
+  if (!hit || Date.now() > hit.expireAt) return [];
+  return hit.value.slice(0, limit);
+}
+
+async function readIndex(groupId: string | undefined): Promise<string[]> {
+  return indexList(confirmIndexKey(groupId), CONFIRM_INDEX_MAX);
 }
 
 /** 保存（同じ pageId は差し替え）。本体は独立キーなので他の確認を壊さない */
@@ -459,11 +480,12 @@ export async function savePendingTaskConfirm(
       expireAt: Date.now() + CONFIRM_TTL_SECONDS * 1000,
     });
   }
-  const idx = await readIndex(groupId);
-  await writeIndex(groupId, [
+  await indexAdd(
+    confirmIndexKey(groupId),
     value.pageId,
-    ...idx.filter((id) => id !== value.pageId),
-  ]);
+    value.createdAt,
+    CONFIRM_TTL_SECONDS
+  );
 }
 
 /**
@@ -513,8 +535,7 @@ export async function deletePendingTaskConfirm(
   const key = confirmItemKey(groupId, pageId);
   if (kvEnabled()) await kv.del(key);
   else itemMem.delete(key);
-  const idx = await readIndex(groupId);
-  await writeIndex(groupId, idx.filter((id) => id !== pageId));
+  await indexRemove(confirmIndexKey(groupId), pageId);
 }
 
 /**
@@ -586,7 +607,16 @@ export async function reserveMessage(messageId: string): Promise<ReserveResult> 
     if (won === "OK") return { proceed: true };
 
     const cur = await readClaim(key);
-    if (!cur) return { proceed: true }; // 直前に失効した
+    // claim が消えている＝直前に他が解放した。ここで proceed を返すと、
+    // 同時に読んだ複数の呼び出しが**全員 proceed** になり二重登録になる。
+    // 必ず NX を取り直し、取れた者だけが進む。
+    if (!cur) {
+      const retry = await kv.set(key, { state: "processing", at: now }, {
+        nx: true,
+        ex: CLAIM_TTL_SECONDS,
+      });
+      return retry === "OK" ? { proceed: true } : { proceed: false, inProgress: true };
+    }
     if (cur.state === "done") return { proceed: false, pageId: cur.pageId };
     // 処理中でも猶予を過ぎていれば、落ちたものとして引き継ぐ。
     // 引き継ぎ自体を read-then-write でやると、複数インスタンスが
@@ -656,7 +686,6 @@ function handoffIndexKey(groupId: string | undefined): string {
 }
 
 const handoffItemMem = new Map<string, PendingTaskConfirm>();
-const handoffIdxMem = new Map<string, string[]>();
 
 export async function addPendingHandoff(
   groupId: string | undefined,
@@ -666,22 +695,18 @@ export async function addPendingHandoff(
   if (kvEnabled()) await kv.set(ik, value, { ex: HANDOFF_TTL_SECONDS });
   else handoffItemMem.set(ik, value);
 
-  const xk = handoffIndexKey(groupId);
-  const cur = kvEnabled()
-    ? (await kv.get<string[]>(xk)) ?? []
-    : handoffIdxMem.get(xk) ?? [];
-  const next = [value.pageId, ...cur.filter((id) => id !== value.pageId)];
-  if (kvEnabled()) await kv.set(xk, next, { ex: HANDOFF_TTL_SECONDS });
-  else handoffIdxMem.set(xk, next);
+  await indexAdd(
+    handoffIndexKey(groupId),
+    value.pageId,
+    value.createdAt,
+    HANDOFF_TTL_SECONDS
+  );
 }
 
 export async function getPendingHandoffs(
   groupId: string | undefined
 ): Promise<PendingTaskConfirm[]> {
-  const xk = handoffIndexKey(groupId);
-  const ids = kvEnabled()
-    ? (await kv.get<string[]>(xk)) ?? []
-    : handoffIdxMem.get(xk) ?? [];
+  const ids = await indexList(handoffIndexKey(groupId), 200);
   const out: PendingTaskConfirm[] = [];
   for (const id of ids) {
     const ik = handoffItemKey(groupId, id);
@@ -701,12 +726,5 @@ export async function removePendingHandoff(
   if (kvEnabled()) await kv.del(ik);
   else handoffItemMem.delete(ik);
 
-  const xk = handoffIndexKey(groupId);
-  const cur = kvEnabled()
-    ? (await kv.get<string[]>(xk)) ?? []
-    : handoffIdxMem.get(xk) ?? [];
-  const next = cur.filter((id) => id !== pageId);
-  if (kvEnabled()) await kv.set(xk, next, { ex: HANDOFF_TTL_SECONDS });
-  else handoffIdxMem.set(xk, next);
+  await indexRemove(handoffIndexKey(groupId), pageId);
 }
-
