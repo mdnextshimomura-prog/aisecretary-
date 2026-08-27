@@ -455,13 +455,18 @@ export async function interpretAnswer(
     }
 
     const amendment = parsed.amendment ?? null;
-    const hasUpdates = Object.keys(parsed.updates ?? {}).length > 0;
 
-    // 修正指示や項目の更新があるのに isAnswer が false で返ることがある
-    // （「宛先の変更」を回答ではないと判断した実例あり）。新規依頼でないことが
-    // 確認できている場合に限り、回答として拾い直す。
-    const isAnswer = Boolean(parsed.isAnswer) || Boolean(amendment) || hasUpdates;
-    const raised = !parsed.isAnswer && isAnswer;
+    // 「回答ではない」と明示されたものは尊重する。
+    //
+    // 以前は updates が入っていれば回答として拾い直していたが、
+    // {isAnswer:false, confidence:0.2, updates:{deadline:"明日"}} のような
+    // **新しい依頼から期限だけ拾った応答**まで回答に化けて、
+    // 元の依頼が登録されずに消えていた。
+    //
+    // 拾い直すのは amendment がある場合だけにする。amendment は定義上
+    // 「このタスクへの修正指示」なので、別依頼と取り違える余地が小さい。
+    const isAnswer = Boolean(parsed.isAnswer) || Boolean(amendment);
+    const raised = !parsed.isAnswer && Boolean(amendment);
 
     return {
       isAnswer,
@@ -469,8 +474,9 @@ export async function interpretAnswer(
       confidence: raised
         ? Math.max(Number(parsed.confidence ?? 0), 0.7)
         : Number(parsed.confidence ?? 0),
-      updates: parsed.updates ?? {},
-      overrides: parsed.overrides ?? [],
+      // 回答でないものの updates は捨てる。呼び出し側へ渡すと事故の元になる
+      updates: isAnswer ? parsed.updates ?? {} : {},
+      overrides: isAnswer ? parsed.overrides ?? [] : [],
       amendment,
     };
   } catch (err) {
@@ -596,10 +602,15 @@ export function applyAnswer(
   updates: Record<string, string>
 ): ApplyResult {
   const applied: string[] = [];
-  for (const [k, v] of Object.entries(updates)) {
+  for (const [k, raw] of Object.entries(updates)) {
     // 定義に無いキーを書き込ませない。モデルが勝手なキーを返しても
     // settled が汚れないようにする
     if (!p.fields.some((f) => f.key === k)) continue;
+    // 空文字や「不明」で必須項目が埋まったことにしない。
+    // 埋まった扱いになると awaitingKeys から外れ、値が無いまま
+    // 「条件が揃った」と判断されて担当者へ流れてしまう。
+    const v = String(raw ?? "").trim();
+    if (!v || /^(不明|未定|なし|null|-|—|\?|？)$/.test(v)) continue;
     p.settled[k] = v;
     p.awaitingKeys = p.awaitingKeys.filter((x) => x !== k);
     p.proposalKeys = p.proposalKeys.filter((x) => x !== k);

@@ -44,6 +44,8 @@ import {
   savePendingTaskConfirm,
   getPendingTaskConfirm,
   deletePendingTaskConfirm,
+  reserveMessage,
+  releaseMessage,
   type PendingTaskConfirm,
 } from "@/lib/email/session";
 import {
@@ -236,11 +238,16 @@ async function handoffToAssignee(
     pending.assignee ?? null,
     hasMention
   );
-  const ok = hasMention && pending.assigneeUserId
-    ? await pushLineMessageWithMentions(groupId, text, {
+  // fetch 自体が投げることもある。boolean だけ見ていると素通りする
+  const ok = await (hasMention && pending.assigneeUserId
+    ? pushLineMessageWithMentions(groupId, text, {
         assignee: pending.assigneeUserId,
       })
-    : await pushLineMessage(groupId, text);
+    : pushLineMessage(groupId, text)
+  ).catch((e) => {
+    console.error("引き渡し通知の送信で例外:", e);
+    return false;
+  });
 
   if (!ok) {
     // 送信に失敗しても状態は戻さない（条件は本当に揃っているため）。
@@ -249,7 +256,8 @@ async function handoffToAssignee(
     console.error("担当者への引き渡し通知に失敗:", pending.pageId);
     await appendTaskNote(pending.pageId, [
       `⚠️ ${jstDateStr(0)} 担当者への引き渡し通知をLINEへ送れませんでした。`,
-      `・条件は確定済みです。担当者へ口頭・別経路で共有してください。`,
+      `・条件は確定済みです。翌朝のリマインドで担当者にメンションされます。`,
+      `・急ぎの場合は口頭・別経路で共有してください。`,
     ]).catch(() => undefined);
   }
 }
@@ -898,22 +906,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 「画像だけ届いた」と分かるようにしておく（空欄だと何も追えない）。
       const rawForNotion =
         text || `（本文なし・添付${attachments.length}件＋担当者へのメンション）`;
-      // LINEはWebhookが2xxを返さないと再送する。作成前に同じメッセージIDの
-      // タスクが無いか見て、再送で同じ依頼が二重登録されるのを防ぐ。
-      const already = await findTaskByMessageId(event.message.id);
-      if (already) {
-        console.log("再送とみなしてスキップ:", event.message.id);
+      // LINEはWebhookが2xxを返さないと再送する。「検索して無ければ作る」だけだと
+      // 同時到達で両方がすり抜けて二重登録になるため、先に原子的に予約する。
+      if (!(await reserveMessage(event.message.id))) {
+        console.log("再送または処理中とみなしてスキップ:", event.message.id);
         continue;
       }
 
-      const pageId = await createNotionTask(parsed, rawForNotion);
-      // 作成直後にメッセージIDを紐づける。後段で失敗して再送が来ても、
-      // 上の重複チェックで拾えるようにするため**確認より先**に行う。
-      await setTaskMessageIds(pageId, [event.message.id]);
+      let pageId: string;
+      try {
+        pageId = await createNotionTask(parsed, rawForNotion);
+      } catch (err) {
+        // 作成そのものに失敗した場合だけ予約を解放する。
+        // 解放しないと、再送しても「処理済み」と見なされて永久に登録されない。
+        await releaseMessage(event.message.id).catch(() => undefined);
+        throw err;
+      }
 
-      // ここから先で失敗しても、タスク自体は登録済み。
-      // 「登録に失敗しました」と返すと手で再投稿されて重複するので、
-      // 確認の失敗はタスク登録の失敗として扱わない。
+      // ★ここから先は何が失敗しても「登録失敗」と返さない。
+      // 返してしまうと手で再投稿され、同じ依頼が二重に登録される。
+      await setTaskMessageIds(pageId, [event.message.id]).catch((e) =>
+        console.error("メッセージIDの紐づけに失敗（登録は完了）:", e)
+      );
+
       let reply: string;
       try {
         reply = await clarifyAfterCreate(
@@ -930,12 +945,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
       }
 
-      const botMsgId = await sendLineMessage(replyToken, reply);
+      const botMsgId = await sendLineMessage(replyToken, reply).catch((e) => {
+        console.error("返信に失敗（登録は完了）:", e);
+        return null;
+      });
       await setTaskMessageIds(
         pageId,
         [event.message.id, botMsgId ?? ""].filter(Boolean)
+      ).catch(() => undefined);
+      await rememberConfirmMessage(source.groupId, pageId, botMsgId ?? null).catch(
+        () => undefined
       );
-      await rememberConfirmMessage(source.groupId, pageId, botMsgId ?? null);
 
       // 使った添付は捨てる。残すと同じ画像が後続の発言にも繰り返し添付され、
       // 無関係な発言がその画像の依頼として登録されてしまう。

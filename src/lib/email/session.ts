@@ -360,8 +360,8 @@ export async function deletePendingClarification(
 // pageId ごとに保持し、引用リプライ（Botの確認メッセージID）でも引けるようにする。
 const CONFIRM_TTL_SECONDS = 60 * 60 * 24;
 const CONFIRM_PREFIX = "taskconfirm";
-/** 同時に保持する確認の上限。古いものから落とす */
-const CONFIRM_MAX = 10;
+/** 索引に載せる件数の上限。本体は独立キーなので、溢れても引用があれば引ける */
+const CONFIRM_INDEX_MAX = 50;
 
 export interface ConfirmField {
   key: string;
@@ -391,67 +391,85 @@ export interface PendingTaskConfirm {
   createdAt: number;
 }
 
-interface ConfirmBucket {
-  items: PendingTaskConfirm[];
+// 確認は**タスク1件ごとに独立したキー**で持つ。
+// 一覧を1つの配列に入れて上限で切り捨てる作りだと、件数が増えたときに
+// まだ回答待ちの確認が黙って消え、そのタスクはLINEから完了できなくなる。
+// 索引（最新順の一覧）は「引用なしの返事をどれに当てるか」だけに使い、
+// 索引から溢れても本体は pageId で直接引ける。
+function confirmItemKey(groupId: string | undefined, pageId: string): string {
+  return `${CONFIRM_PREFIX}:${groupId ?? "direct"}:${pageId}`;
+}
+function confirmIndexKey(groupId: string | undefined): string {
+  return `${CONFIRM_PREFIX}idx:${groupId ?? "direct"}`;
 }
 
-const confirmMemStore = new Map<
-  string,
-  { value: ConfirmBucket; expireAt: number }
->();
+const itemMem = new Map<string, { value: PendingTaskConfirm; expireAt: number }>();
+const indexMem = new Map<string, { value: string[]; expireAt: number }>();
 
-function confirmKey(groupId: string | undefined): string {
-  return `${CONFIRM_PREFIX}:${groupId ?? "direct"}`;
-}
-
-async function loadBucket(groupId: string | undefined): Promise<ConfirmBucket> {
-  const key = confirmKey(groupId);
-  if (kvEnabled()) {
-    return (await kv.get<ConfirmBucket>(key)) ?? { items: [] };
-  }
-  const hit = confirmMemStore.get(key);
-  if (!hit) return { items: [] };
+async function readItem(
+  groupId: string | undefined,
+  pageId: string
+): Promise<PendingTaskConfirm | null> {
+  const key = confirmItemKey(groupId, pageId);
+  if (kvEnabled()) return (await kv.get<PendingTaskConfirm>(key)) ?? null;
+  const hit = itemMem.get(key);
+  if (!hit) return null;
   if (Date.now() > hit.expireAt) {
-    confirmMemStore.delete(key);
-    return { items: [] };
+    itemMem.delete(key);
+    return null;
   }
   return hit.value;
 }
 
-async function saveBucket(
+async function readIndex(groupId: string | undefined): Promise<string[]> {
+  const key = confirmIndexKey(groupId);
+  if (kvEnabled()) return (await kv.get<string[]>(key)) ?? [];
+  const hit = indexMem.get(key);
+  if (!hit || Date.now() > hit.expireAt) return [];
+  return hit.value;
+}
+
+async function writeIndex(
   groupId: string | undefined,
-  bucket: ConfirmBucket
+  ids: string[]
 ): Promise<void> {
-  const key = confirmKey(groupId);
-  // 新しい順に上限まで残す
-  bucket.items = bucket.items
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, CONFIRM_MAX);
+  const key = confirmIndexKey(groupId);
+  const trimmed = ids.slice(0, CONFIRM_INDEX_MAX);
   if (kvEnabled()) {
-    await kv.set(key, bucket, { ex: CONFIRM_TTL_SECONDS });
+    await kv.set(key, trimmed, { ex: CONFIRM_TTL_SECONDS });
     return;
   }
-  confirmMemStore.set(key, {
-    value: bucket,
+  indexMem.set(key, {
+    value: trimmed,
     expireAt: Date.now() + CONFIRM_TTL_SECONDS * 1000,
   });
 }
 
-/** 保存（同じ pageId があれば差し替え） */
+/** 保存（同じ pageId は差し替え）。本体は独立キーなので他の確認を壊さない */
 export async function savePendingTaskConfirm(
   groupId: string | undefined,
   value: PendingTaskConfirm
 ): Promise<void> {
-  const bucket = await loadBucket(groupId);
-  bucket.items = bucket.items.filter((i) => i.pageId !== value.pageId);
-  bucket.items.push(value);
-  await saveBucket(groupId, bucket);
+  const key = confirmItemKey(groupId, value.pageId);
+  if (kvEnabled()) {
+    await kv.set(key, value, { ex: CONFIRM_TTL_SECONDS });
+  } else {
+    itemMem.set(key, {
+      value,
+      expireAt: Date.now() + CONFIRM_TTL_SECONDS * 1000,
+    });
+  }
+  const idx = await readIndex(groupId);
+  await writeIndex(groupId, [
+    value.pageId,
+    ...idx.filter((id) => id !== value.pageId),
+  ]);
 }
 
 /**
  * 回答の宛先になる確認を1件返す。
  *
- * @param quotedMessageId 引用リプライの引用先。これがあれば最優先で照合する
+ * @param quotedMessageId 引用リプライの引用先
  * @param quotedPageId    引用先メッセージから引けたタスクのページID
  */
 export async function getPendingTaskConfirm(
@@ -459,32 +477,74 @@ export async function getPendingTaskConfirm(
   quotedMessageId?: string | null,
   quotedPageId?: string | null
 ): Promise<PendingTaskConfirm | null> {
-  const bucket = await loadBucket(groupId);
-  if (bucket.items.length === 0) return null;
+  // 引用があれば索引を通さず直接引く（索引から溢れていても復元できる）
+  if (quotedPageId) return readItem(groupId, quotedPageId);
 
-  if (quotedPageId) {
-    return bucket.items.find((i) => i.pageId === quotedPageId) ?? null;
+  const idx = await readIndex(groupId);
+  const items: PendingTaskConfirm[] = [];
+  for (const id of idx) {
+    const it = await readItem(groupId, id);
+    if (it) items.push(it);
   }
+  if (items.length === 0) return null;
+
   if (quotedMessageId) {
-    const byMsg = bucket.items.find((i) => i.botMessageId === quotedMessageId);
+    const byMsg = items.find((i) => i.botMessageId === quotedMessageId);
     if (byMsg) return byMsg;
   }
-  // 引用が無ければ直近の確認への回答とみなす
-  return bucket.items.sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+  return items.sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
 }
 
-/** 確認待ちが何件あるか（回答先が曖昧なときの案内に使う） */
 export async function countPendingTaskConfirms(
   groupId: string | undefined
 ): Promise<number> {
-  return (await loadBucket(groupId)).items.length;
+  const idx = await readIndex(groupId);
+  let n = 0;
+  for (const id of idx) if (await readItem(groupId, id)) n++;
+  return n;
 }
 
 export async function deletePendingTaskConfirm(
   groupId: string | undefined,
   pageId: string
 ): Promise<void> {
-  const bucket = await loadBucket(groupId);
-  bucket.items = bucket.items.filter((i) => i.pageId !== pageId);
-  await saveBucket(groupId, bucket);
+  const key = confirmItemKey(groupId, pageId);
+  if (kvEnabled()) await kv.del(key);
+  else itemMem.delete(key);
+  const idx = await readIndex(groupId);
+  await writeIndex(groupId, idx.filter((id) => id !== pageId));
+}
+
+/**
+ * LINEメッセージIDの**原子的な予約**。
+ *
+ * LINEは2xxを返さないとWebhookを再送する。「Notionを検索して無ければ作る」だけだと
+ * 同時到達で両方が検索をすり抜け、同じ依頼が二重に登録される。
+ * KVのNXで先に旗を立て、勝った側だけが登録する。
+ *
+ * KV未設定の環境では同一インスタンス内のメモリで代用する（完全ではないが、
+ * 少なくとも同一プロセス内の再入は防げる）。
+ *
+ * @returns 予約できた（＝自分が処理すべき）なら true
+ */
+const seenMem = new Map<string, number>();
+export async function reserveMessage(messageId: string): Promise<boolean> {
+  const key = `msgseen:${messageId}`;
+  const ttl = 60 * 60 * 24;
+  if (kvEnabled()) {
+    const res = await kv.set(key, 1, { nx: true, ex: ttl });
+    return res === "OK";
+  }
+  const now = Date.now();
+  const hit = seenMem.get(key);
+  if (hit && now < hit) return false;
+  seenMem.set(key, now + ttl * 1000);
+  return true;
+}
+
+/** 予約を取り消す（登録に失敗したときに、再送でやり直せるようにする） */
+export async function releaseMessage(messageId: string): Promise<void> {
+  const key = `msgseen:${messageId}`;
+  if (kvEnabled()) await kv.del(key);
+  else seenMem.delete(key);
 }

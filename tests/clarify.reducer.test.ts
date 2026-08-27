@@ -102,6 +102,22 @@ for (const s of ["手付は300万で", "いや違う", "大丈夫ですか", "OK
   ok("物件が答えられたら完了", r2.complete);
 }
 
+// ── 空値・プレースホルダで必須項目を埋めさせない（レビュー指摘） ──
+{
+  const p = fresh();
+  const r = applyAnswer(p, { price: "" });
+  ok("空文字は採用しない", !("price" in p.settled));
+  ok("空文字で完了にならない", !r.complete);
+  for (const bad of ["不明", "未定", "なし", "？"]) {
+    const q = fresh();
+    applyAnswer(q, { price: bad });
+    ok(`「${bad}」は採用しない`, !("price" in q.settled));
+  }
+  const q2 = fresh();
+  applyAnswer(q2, { buyerType: "自社買取", price: "  1億  " });
+  ok("前後の空白は落として採用", q2.settled.price === "1億", q2.settled.price);
+}
+
 // ── 日付表記 ──
 eq("jpDate", jpDate("2026-08-28"), "8/28（金）");
 
