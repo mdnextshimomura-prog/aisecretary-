@@ -15,6 +15,7 @@ import {
   fillPlaceholders,
   buildHandoffMessage,
   jpDate,
+  toContentBlocks,
   PROPERTY_FIELD,
   type PendingState,
 } from "../src/lib/clarify";
@@ -116,6 +117,24 @@ for (const s of ["手付は300万で", "いや違う", "大丈夫ですか", "OK
   const q2 = fresh();
   applyAnswer(q2, { buyerType: "自社買取", price: "  1億  " });
   ok("前後の空白は落として採用", q2.settled.price === "1億", q2.settled.price);
+}
+
+// ── 添付をAPIのブロック形に変換できているか（レビュー外で見つけた実バグの回帰）──
+// webhook が持ち回る {kind,mediaType,base64} をそのままAPIへ渡すと
+// 400 になり、添付付きの依頼では確認機能が丸ごと無効化されていた。
+{
+  const blocks = toContentBlocks([
+    { kind: "pdf", mediaType: "application/pdf", base64: "AAA" },
+    { kind: "image", mediaType: "image/jpeg", base64: "BBB" },
+  ]) as Array<Record<string, any>>;
+  eq("PDFはdocumentブロックになる", blocks[0].type, "document");
+  eq("PDFのmedia_type", blocks[0].source.media_type, "application/pdf");
+  eq("PDFのdataが入る", blocks[0].source.data, "AAA");
+  eq("画像はimageブロックになる", blocks[1].type, "image");
+  eq("画像のmedia_type", blocks[1].source.media_type, "image/jpeg");
+  eq("画像のdataが入る", blocks[1].source.data, "BBB");
+  ok("APIが要求するsource.base64の形になっている",
+    blocks.every((b) => b.source?.type === "base64" && typeof b.source?.data === "string"));
 }
 
 // ── 日付表記 ──

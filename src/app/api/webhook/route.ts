@@ -6,7 +6,12 @@ import {
   pushLineMessage,
   pushLineMessageWithMentions,
 } from "@/lib/line";
-import { parseTaskFromMessage, TASK_CONFIDENCE_THRESHOLD, type ParsedTask } from "@/lib/claude";
+import {
+  parseTaskFromMessage,
+  TASK_CONFIDENCE_THRESHOLD,
+  type ParsedTask,
+  type TaskAttachment,
+} from "@/lib/claude";
 import {
   detectMissing,
   buildClarifyMessage,
@@ -312,7 +317,7 @@ async function clarifyAfterCreate(
   pageId: string,
   parsed: ParsedTask,
   text: string,
-  attachments: unknown[],
+  attachments: TaskAttachment[],
   groupId: string | undefined
 ): Promise<string> {
   const clarify = await detectMissing(
@@ -379,7 +384,9 @@ async function clarifyAfterCreate(
   return buildClarifyMessage(
     parsed.title,
     { ...clarify, missing },
-    parsed.propertyName ?? null
+    parsed.propertyName ?? null,
+    undefined,
+    fields
   );
 }
 

@@ -22,6 +22,33 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 import type { RequestType } from "./due-rules";
+import type { TaskAttachment } from "./claude";
+
+/**
+ * 添付をClaude APIのコンテンツブロックに変換する。
+ *
+ * webhook が持ち回るのは `TaskAttachment`（{kind, mediaType, base64}）で、
+ * APIが要求する形（{type:"document", source:{...}}）とは違う。
+ * 以前ここで変換せずそのまま渡していたため、**添付付きの依頼では
+ * 必ず400になり、確認機能が丸ごと無効化されていた**（実測で確認）。
+ */
+export function toContentBlocks(attachments: TaskAttachment[]): unknown[] {
+  return attachments.map((a) =>
+    a.kind === "image"
+      ? {
+          type: "image",
+          source: { type: "base64", media_type: a.mediaType, data: a.base64 },
+        }
+      : {
+          type: "document",
+          source: {
+            type: "base64",
+            media_type: "application/pdf",
+            data: a.base64,
+          },
+        }
+  );
+}
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const MODEL = "claude-sonnet-4-6";
@@ -104,6 +131,11 @@ export interface ClarifyResult {
   /** 物件が特定できていないか（種別によらず初動を止める最大要因） */
   propertyUnknown: boolean;
   /**
+   * 添付（画像・PDF）から読み取った項目のkey。
+   * 本文と照合できないぶん、返信で「添付から読み取り」と明示して人が直せるようにする。
+   */
+  fromAttachment: string[];
+  /**
    * 条件の判定そのものに失敗したか。
    *
    * true のときを「不足なし＝着手可能」と同じ扱いにしてはいけない。
@@ -140,11 +172,19 @@ const EXTRACT_PROMPT = `あなたは不動産会社の営業事務です。
 必ず次のJSONのみを返してください（説明文やコードフェンスは付けない）：
 {
   "found": {
-    "項目key": { "value": "読み取れた値", "evidence": "そう読み取れる根拠になった原文の一部をそのまま抜き出す" }
+    "項目key": {
+      "value": "読み取れた値",
+      "source": "message" または "attachment",
+      "evidence": "そう読み取れる根拠になった箇所をそのまま抜き出す"
+    }
   }
 }
-evidence は**依頼文に実在する文字列をそのまま**入れてください。要約・言い換え・
-自分で書いた文は不可です。添付から読み取った場合は evidence に "添付" と書いてください。
+- 依頼文（テキスト）から読み取った場合は source を "message" にし、
+  evidence には**依頼文に実在する文字列をそのまま**入れてください。
+  要約・言い換え・自分で書いた文は不可です。
+- 添付の画像やPDFから読み取った場合は source を "attachment" にし、
+  evidence にはその書類に書かれている文字列を入れてください。
+- どちらでもない（推測）の場合は found に入れないでください。
 読み取れなかった項目は found に入れないでください（missing は返さなくて構いません）。`;
 
 /**
@@ -160,7 +200,7 @@ export async function detectMissing(
   text: string,
   type: RequestType,
   propertyName: string | null,
-  attachments: unknown[] = [],
+  attachments: TaskAttachment[] = [],
   /** 標準納期から決めた期日。提案文の {期日} に入る */
   dueDate?: string
 ): Promise<ClarifyResult> {
@@ -168,7 +208,7 @@ export async function detectMissing(
   const propertyUnknown = !propertyName;
 
   if (fields.length === 0) {
-    return { missing: [], found: {}, propertyUnknown, failed: false };
+    return { missing: [], found: {}, propertyUnknown, failed: false, fromAttachment: [] };
   }
 
   const list = fields
@@ -177,7 +217,7 @@ export async function detectMissing(
 
   try {
     const content: unknown[] = [
-      ...attachments,
+      ...toContentBlocks(attachments),
       {
         type: "text",
         text:
@@ -208,10 +248,13 @@ export async function detectMissing(
     const j = raw.match(/\{[\s\S]*\}/);
     if (!j) {
       console.error("[clarify] JSONを取り出せなかった:", raw.slice(0, 200));
-      return { missing: [], found: {}, propertyUnknown, failed: true };
+      return { missing: [], found: {}, propertyUnknown, failed: true, fromAttachment: [] };
     }
     const parsed = JSON.parse(j[0]) as {
-      found?: Record<string, { value?: string; evidence?: string } | string>;
+      found?: Record<
+        string,
+        { value?: string; evidence?: string; source?: string } | string
+      >;
     };
 
     // 不足は **found から機械的に決める**。モデルが返す missing をそのまま使うと、
@@ -219,6 +262,7 @@ export async function detectMissing(
     // missing から落とす回があった）。突き合わせはこちらで行う。
     const haystack = normalizeForMatch(text);
     const found: Record<string, string> = {};
+    const fromAttachment: string[] = [];
 
     for (const [k, raw] of Object.entries(parsed.found ?? {})) {
       const v = typeof raw === "string" ? { value: raw, evidence: "" } : raw ?? {};
@@ -227,17 +271,25 @@ export async function detectMissing(
       if (!val || /^(不明|未定|なし|null|-|—)$/.test(val)) continue;
 
       const field = fields.find((f) => f.key === k);
-      // 必須項目は**原文に根拠がある場合だけ**採用する。
-      // 業界の常識から推測して埋められると、担当者が誤った前提で動いて事故になる。
-      // （検証で「この物件の査定お願い」から前提を「実需」と断定する事例を確認）
-      if (field?.critical) {
-        const ev = String(v.evidence ?? "").trim();
-        const fromAttachment = attachments.length > 0 && /添付|画像|pdf|資料/i.test(ev);
-        if (!fromAttachment && !(ev && haystack.includes(normalizeForMatch(ev)))) {
-          console.warn(`[clarify] 必須項目 ${k} を原文の根拠なしと判断して不足に戻した`);
+      const ev = String(v.evidence ?? "").trim();
+      const fromDoc =
+        attachments.length > 0 && String(v.source ?? "") === "attachment";
+
+      // 必須項目は**根拠がある場合だけ**採用する。
+      // 業界の常識から推測して埋められると、担当者が誤った前提で動いて事故になる
+      // （「この物件の査定お願い」から前提を「実需」と断定する事例を確認）。
+      //
+      // ただし添付から読んだ値は、本文と照合しても当然一致しない。
+      // 本文だけを見て弾くと、**PDFに金額も名義も書いてあるのに聞き返す**という
+      // 一番やってはいけない挙動になる（実測で確認）。
+      // 添付由来は採用し、その代わり「添付から読み取り」と明示して人が直せるようにする。
+      if (field?.critical && !fromDoc) {
+        if (!(ev && haystack.includes(normalizeForMatch(ev)))) {
+          console.warn(`[clarify] 必須項目 ${k} を根拠なしと判断して不足に戻した`);
           continue;
         }
       }
+      if (fromDoc) fromAttachment.push(k);
       found[k] = val;
     }
 
@@ -246,12 +298,12 @@ export async function detectMissing(
       // critical を先に出す。答えるのが1つだけでも前に進むようにする
       .sort((a, b) => Number(b.critical) - Number(a.critical));
 
-    return { missing, found, propertyUnknown, failed: false };
+    return { missing, found, propertyUnknown, failed: false, fromAttachment };
   } catch (err) {
     // 登録は止めない（タスクを失わないことが最優先）。ただし「条件が揃った」とは
     // 扱わない。failed=true を見て呼び出し側が要確認に倒す。
     console.error("[clarify] 不足項目の判定に失敗:", err);
-    return { missing: [], found: {}, propertyUnknown, failed: true };
+    return { missing: [], found: {}, propertyUnknown, failed: true, fromAttachment: [] };
   }
 }
 
@@ -266,7 +318,9 @@ export function buildClarifyMessage(
   taskTitle: string,
   result: ClarifyResult,
   propertyName: string | null,
-  remindNumber?: number
+  remindNumber?: number,
+  /** 項目名を出すための定義一覧（省略時は値だけ並べる） */
+  allFields?: RequiredField[]
 ): string {
   const ask = result.missing.filter((f) => !f.suggest);
   const propose = result.missing.filter((f) => f.suggest);
@@ -282,8 +336,14 @@ export function buildClarifyMessage(
 
   if (Object.keys(result.found).length > 0) {
     msg += `\n【いただいている条件】\n`;
-    for (const v of Object.values(result.found)) {
-      msg += `・${v}\n`;
+    for (const [k, v] of Object.entries(result.found)) {
+      // 項目名を出す。値だけ並べると「500万円」が何の金額か分からない
+      const label = allFields?.find((f) => f.key === k)?.label;
+      const doc = result.fromAttachment.includes(k) ? "（添付から読み取り）" : "";
+      msg += label ? `・${label}：${v}${doc}\n` : `・${v}${doc}\n`;
+    }
+    if (result.fromAttachment.length > 0) {
+      msg += `※ 添付から読み取った項目は、違っていればお知らせください。\n`;
     }
   }
 
