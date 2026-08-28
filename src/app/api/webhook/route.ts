@@ -12,6 +12,7 @@ import {
   type ParsedTask,
   type TaskAttachment,
 } from "@/lib/claude";
+import { mapContext } from "@/lib/maps";
 import {
   detectMissing,
   buildClarifyMessage,
@@ -1000,8 +1001,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     //    本文が空（メンションだけ）のときは、添付が依頼の中身であることを伝える。
     let parsed;
     try {
+      // 地図リンクだけで物件を送ってくることが多い。住所を足してから解析する。
+      // これが無いと物件を特定できず、毎回「どの物件ですか？」と聞く羽目になる。
+      const geo = await mapContext(text).catch(() => "");
       parsed = await parseTaskFromMessage(
-        text || "（本文なし・担当者へのメンションのみ）",
+        (text || "（本文なし・担当者へのメンションのみ）") + geo,
         todayLabel(now),
         attachments
       );
