@@ -14,6 +14,12 @@ import {
 } from "@/lib/claude";
 import { mapContext } from "@/lib/maps";
 import {
+  classifyApiError,
+  alertMessage,
+  shouldAlert,
+  markApiHealthy,
+} from "@/lib/apihealth";
+import {
   detectMissing,
   buildClarifyMessage,
   buildAnswerAppliedMessage,
@@ -1010,9 +1016,61 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         attachments
       );
     } catch (err) {
+      // 残高切れ・認証エラーは「解析できない発言」ではなく**AI秘書の停止**。
+      // 黙って捨てると、止まっていることに誰も気づかないまま依頼が消える
+      // （2026-08-19〜28に営業日6日分・30件を失った経路がこれ）。
+      const failure = classifyApiError(err);
+      if (failure) {
+        console.error(`[apihealth] ${failure} でAI秘書が停止中:`, err);
+
+        // 依頼らしいものだけは、解析できなくてもNotionに控える。
+        // 雑談まで拾うと復旧後の一覧が埋まるので、メンションか添付がある
+        // ものに限る（履歴上、依頼の大半はこの形）。
+        if (mentionsSomeone || attachments.length > 0) {
+          try {
+            const head = (text || "（本文なし・添付のみ）").slice(0, 40);
+            const pageId = await createNotionTask(
+              {
+                isTask: true,
+                confidence: 1,
+                title: `【未解析】${head}`,
+                category: "その他",
+                urgency: "今日中",
+                requestType: "その他",
+                urgentHint: false,
+                dueDate: jstDateStr(0),
+                dueTime: DEFAULT_DUE_TIME,
+                assignee: null,
+                memo: null,
+              } as ParsedTask,
+              `【AI停止中に受信】${text || "（本文なし）"}`,
+              event.message.id
+            );
+            await setTaskStatus(pageId, STATUS_PENDING);
+            await appendTaskNote(pageId, [
+              `⚠️ ${jstDateStr(0)} APIが使えずAI解析できませんでした（${failure}）。`,
+              `・内容を人の目で確認し、種別・担当・期日を設定してください。`,
+            ]).catch(() => undefined);
+            await completeMessage(event.message.id, pageId).catch(() => undefined);
+          } catch (e2) {
+            console.error("停止中の控え登録にも失敗:", e2);
+          }
+        }
+
+        // 警告は種類ごとに1日1回。復旧まで毎回出すとグループが埋まる
+        if (source.groupId && (await shouldAlert(failure))) {
+          await pushLineMessage(source.groupId, alertMessage(failure)).catch(() =>
+            undefined
+          );
+        }
+        continue;
+      }
       console.error("タスク解析エラー（スキップ）:", err);
       continue;
     }
+
+    // ここまで来た＝APIは正常。次に落ちたときにまた警告を出せるようにする
+    await markApiHealthy().catch(() => undefined);
 
     // タスクでない、または確信度が低い発言は登録しない（雑談・相槌・報告など）
     if (!parsed.isTask || parsed.confidence < TASK_CONFIDENCE_THRESHOLD) {

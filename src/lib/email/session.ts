@@ -756,3 +756,31 @@ export async function removePendingHandoff(
 
   await indexRemove(handoffIndexKey(groupId), pageId);
 }
+
+// ── 同じ警告を連投しないための記録 ──
+//
+// 残高切れは復旧するまで**全メッセージで**発生する。毎回LINEに警告を出すと
+// グループが埋まり、かえって読まれなくなる。1日1回に抑える。
+const ALERT_TTL_SECONDS = 60 * 60 * 24;
+const alertMem = new Map<string, number>();
+
+/** その種類の警告を今出してよいか（出してよければ true を返し、記録する） */
+export async function claimAlertSlot(kind: string): Promise<boolean> {
+  const key = `alert:${kind}`;
+  if (kvEnabled()) {
+    const won = await kv.set(key, 1, { nx: true, ex: ALERT_TTL_SECONDS });
+    return won === "OK";
+  }
+  const now = Date.now();
+  const exp = alertMem.get(key);
+  if (exp && now < exp) return false;
+  alertMem.set(key, now + ALERT_TTL_SECONDS * 1000);
+  return true;
+}
+
+/** 復旧したので、次に落ちたときはまた警告を出せるようにする */
+export async function clearAlertSlot(kind: string): Promise<void> {
+  const key = `alert:${kind}`;
+  if (kvEnabled()) await kv.del(key);
+  else alertMem.delete(key);
+}
