@@ -13,6 +13,7 @@ import {
   type TaskAttachment,
 } from "@/lib/claude";
 import { mapContext } from "@/lib/maps";
+import { shouldClarifyFor } from "@/lib/clarify-target";
 import {
   classifyApiError,
   alertMessage,
@@ -431,7 +432,9 @@ async function registerTaskFromText(
   replyToken: string,
   groupId: string | undefined,
   /** 選択の返答メッセージID。二重登録を防ぐ予約キーに使う */
-  sourceMessageId: string
+  sourceMessageId: string,
+  /** 発言者。初動確認の対象かどうかの判定に使う */
+  senderId: string | undefined
 ): Promise<"ok" | "retry"> {
   // 通常経路と同じ予約を通す。ここを素通しにすると、同時到達で
   // 同じ依頼が2つ登録される（選択状態は片方が消す前に両方読める）。
@@ -494,13 +497,17 @@ async function registerTaskFromText(
   // 通常経路と同じ初動確認をかける。ここを飛ばすと、曖昧確認メニュー経由の
   // 依頼だけ聞き返しが働かず、同じ「これ買いたい」でも挙動が変わってしまう。
   let reply: string;
-  try {
-    reply = await clarifyAfterCreate(pageId, parsed, text, [], groupId);
-  } catch (err) {
-    console.error("初動確認に失敗（登録は完了）:", err);
-    reply =
-      `📝 「${parsed.title}」を登録しました。\n` +
-      `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
+  if (!shouldClarifyFor(senderId)) {
+    reply = buildTaskRegisteredMessage(parsed);
+  } else {
+    try {
+      reply = await clarifyAfterCreate(pageId, parsed, text, [], groupId);
+    } catch (err) {
+      console.error("初動確認に失敗（登録は完了）:", err);
+      reply =
+        `📝 「${parsed.title}」を登録しました。\n` +
+        `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
+    }
   }
   const botMsgId = await sendLineMessage(replyToken, reply);
   await setTaskMessageIds(pageId, [botMsgId ?? ""].filter(Boolean)).catch(
@@ -925,7 +932,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               pendingClar,
               replyToken,
               source.groupId,
-              event.message.id
+              event.message.id,
+              source.userId
             );
             if (r === "retry") {
               requestRetry();
@@ -1185,20 +1193,27 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         console.error("メッセージIDの紐づけに失敗（登録は完了）:", e)
       );
 
+      // 初動確認は**社長からの依頼だけ**にかける。
+      // 全員に聞き返すと、担当者同士の細かいやり取りにも確認が挟まって
+      // グループがうるさくなり、肝心の確認が読み飛ばされる。
       let reply: string;
-      try {
-        reply = await clarifyAfterCreate(
-          pageId,
-          parsed,
-          text,
-          attachments,
-          source.groupId
-        );
-      } catch (err) {
-        console.error("初動確認に失敗（登録は完了）:", err);
-        reply =
-          `📝 「${parsed.title}」を登録しました。\n` +
-          `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
+      if (!shouldClarifyFor(source.userId)) {
+        reply = buildTaskRegisteredMessage(parsed);
+      } else {
+        try {
+          reply = await clarifyAfterCreate(
+            pageId,
+            parsed,
+            text,
+            attachments,
+            source.groupId
+          );
+        } catch (err) {
+          console.error("初動確認に失敗（登録は完了）:", err);
+          reply =
+            `📝 「${parsed.title}」を登録しました。\n` +
+            `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
+        }
       }
 
       const botMsgId = await sendLineMessage(replyToken, reply).catch((e) => {
