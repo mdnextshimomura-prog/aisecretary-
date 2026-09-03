@@ -89,7 +89,7 @@ import {
   jstDateStr,
 } from "@/lib/notion";
 
-// 「これはタスクじゃない／取り消したい」意図の判定（引用リプライ時のみ使用）
+// 「これはタスクじゃない／取り消したい」意図の判定
 const CANCEL_PHRASES = [
   "タスクではない",
   "タスクじゃない",
@@ -102,6 +102,9 @@ const CANCEL_PHRASES = [
   "消して",
   "いらない",
   "不要",
+  "何もしない",
+  "何もしなくて良い",
+  "何もしなくてよい",
 ];
 function isCancelIntent(text: string): boolean {
   const t = text.replace(/\s/g, "");
@@ -326,7 +329,8 @@ async function clarifyAfterCreate(
   parsed: ParsedTask,
   text: string,
   attachments: TaskAttachment[],
-  groupId: string | undefined
+  groupId: string | undefined,
+  createdByUserId: string | undefined
 ): Promise<string> {
   const clarify = await detectMissing(
     text,
@@ -380,6 +384,7 @@ async function clarifyAfterCreate(
     pageId,
     title: parsed.title,
     requestType: parsed.requestType,
+    createdByUserId: createdByUserId ?? null,
     fields,
     awaitingKeys: missing.filter((f) => !f.suggest).map((f) => f.key),
     proposalKeys: missing.filter((f) => f.suggest).map((f) => f.key),
@@ -501,7 +506,14 @@ async function registerTaskFromText(
     reply = buildTaskRegisteredMessage(parsed);
   } else {
     try {
-      reply = await clarifyAfterCreate(pageId, parsed, text, [], groupId);
+      reply = await clarifyAfterCreate(
+        pageId,
+        parsed,
+        text,
+        [],
+        groupId,
+        senderId
+      );
     } catch (err) {
       console.error("初動確認に失敗（登録は完了）:", err);
       reply =
@@ -651,7 +663,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const pending = await getPendingTaskConfirm(
         source.groupId,
         quotedId,
-        quotedTask?.id ?? null
+        quotedTask?.id ?? null,
+        source.userId
       );
 
       // 引用先が「確認待ちではない既存タスク」なら、③の取消/完了/担当者に任せる
@@ -693,6 +706,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             await savePendingTaskConfirm(source.groupId, pending);
           }
         };
+
+        // 元の依頼者が「何もしなくてよい」と返したら、確認待ちを放置しない。
+        // 引用がない場合も createdByUserId で同一人物と確認済みなので、
+        // この時点で安全に取り消せる。
+        if (isCancelIntent(body)) {
+          try {
+            await archiveTask(pending.pageId);
+            await deletePendingTaskConfirm(source.groupId, pending.pageId);
+            markCommitted();
+            await sendLineMessage(
+              replyToken,
+              `🗑 タスクを取り消しました\n📋 ${pending.title}`
+            );
+          } catch (err) {
+            console.error("確認待ちタスクの取り消しエラー:", err);
+            await sendLineMessage(
+              replyToken,
+              "⚠️ タスクの取り消しに失敗しました。Notion側で直接ご確認ください。"
+            );
+          }
+          continue;
+        }
 
         // (a) 提案をそのまま承認
         if (isApproval(body)) {
@@ -1206,7 +1241,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             parsed,
             text,
             attachments,
-            source.groupId
+            source.groupId,
+            source.userId
           );
         } catch (err) {
           console.error("初動確認に失敗（登録は完了）:", err);

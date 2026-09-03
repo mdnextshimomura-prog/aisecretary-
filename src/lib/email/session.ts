@@ -374,6 +374,8 @@ export interface PendingTaskConfirm {
   pageId: string;
   title: string;
   requestType: string;
+  /** 元の依頼者。引用のない返信を他人の依頼に誤反映しないために使う */
+  createdByUserId?: string | null;
   /** この依頼種別の確認項目すべて（回答の解釈と、残項目の表示に使う） */
   fields: ConfirmField[];
   /** まだ指示をもらえていない項目の key */
@@ -497,7 +499,8 @@ export async function savePendingTaskConfirm(
 export async function getPendingTaskConfirm(
   groupId: string | undefined,
   quotedMessageId?: string | null,
-  quotedPageId?: string | null
+  quotedPageId?: string | null,
+  responderUserId?: string | null
 ): Promise<PendingTaskConfirm | null> {
   // 引用があれば索引を通さず直接引く（索引から溢れていても復元できる）
   if (quotedPageId) return readItem(groupId, quotedPageId);
@@ -516,7 +519,17 @@ export async function getPendingTaskConfirm(
     // 別依頼がそのタスクに吸い込まれて登録されなくなる。
     return items.find((i) => i.botMessageId === quotedMessageId) ?? null;
   }
-  return items.sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+
+  // 引用のない短い返信は、元の依頼者自身の確認にだけ結び付ける。
+  // グループ内の「南側戸建」のような別件の返信が、直近の他人の
+  // 確認待ちに吸い込まれる事故を防ぐ。旧形式の保存データは
+  // createdByUserId を持たないため、安全側に倒して引用時だけ反映する。
+  if (!responderUserId) return null;
+  return (
+    items
+      .filter((i) => i.createdByUserId === responderUserId)
+      .sort((a, b) => b.createdAt - a.createdAt)[0] ?? null
+  );
 }
 
 export async function countPendingTaskConfirms(

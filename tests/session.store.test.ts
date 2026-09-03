@@ -31,6 +31,7 @@ const mk = (n: number): PendingTaskConfirm => ({
   pageId: `page-${n}`,
   title: `タスク${n}`,
   requestType: "購入申込書",
+  createdByUserId: "U-president",
   fields: [{ key: "price", label: "購入金額", suggest: null, critical: true }],
   awaitingKeys: ["price"],
   proposalKeys: [],
@@ -52,8 +53,28 @@ async function main() {
   ok("引用先が特定できなければ null", bogus === null, `got=${bogus?.pageId ?? "null"}`);
 
   // ── 引用なしなら直近 ──
-  const latest = await getPendingTaskConfirm(G);
+  const latest = await getPendingTaskConfirm(G, null, null, "U-president");
   ok("引用なしは直近を返す", latest?.pageId === "page-60", `got=${latest?.pageId}`);
+
+  // ── 引用なしの返信は、同じ依頼者の確認にだけ結び付く ──
+  await savePendingTaskConfirm(G, {
+    ...mk(61),
+    createdByUserId: "U-other",
+    createdAt: 9999,
+  });
+  const ownLatest = await getPendingTaskConfirm(G, null, null, "U-president");
+  ok("他人の直近タスクに誤反映しない", ownLatest?.pageId === "page-60", `got=${ownLatest?.pageId}`);
+  const otherLatest = await getPendingTaskConfirm(G, null, null, "U-other");
+  ok("依頼者自身は自分の確認を取得できる", otherLatest?.pageId === "page-61", `got=${otherLatest?.pageId}`);
+  const stranger = await getPendingTaskConfirm(G, null, null, "U-stranger");
+  ok("対象の確認がない人の返信は吸い込まない", stranger === null, `got=${stranger?.pageId ?? "null"}`);
+
+  const legacy = { ...mk(62), createdByUserId: undefined, createdAt: 10000 };
+  await savePendingTaskConfirm(G, legacy);
+  const legacyUnquoted = await getPendingTaskConfirm(G, null, null, "U-president");
+  ok("旧形式データは引用なしで誤反映しない", legacyUnquoted?.pageId === "page-60", `got=${legacyUnquoted?.pageId}`);
+  const legacyQuoted = await getPendingTaskConfirm(G, "msg-62", null, "U-president");
+  ok("旧形式でも引用した場合は取得できる", legacyQuoted?.pageId === "page-62", `got=${legacyQuoted?.pageId}`);
 
   // ── Botの確認メッセージIDで特定できる ──
   const byMsg = await getPendingTaskConfirm(G, "msg-55", null);
