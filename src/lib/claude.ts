@@ -19,6 +19,8 @@ export interface ParsedTask {
   /** 期日をどう決めたかの説明（返信に出す）。webhook 側で埋める */
   dueReason?: string;
   assignee: string | null;
+  /** 自動割当を行った理由。LINE返信とNotionの履歴に残す。 */
+  assignmentReason?: string | null;
   // LINEメンションで担当者を指定された場合の、その人のLINE userId。
   // Claudeの出力には含まれず、Webhook受信時にメンション情報から補完する。
   // リマインド時にこのIDでLINEメンション（@通知）するために保存する。

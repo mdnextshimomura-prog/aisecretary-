@@ -41,6 +41,7 @@ import { resolveDue, DEFAULT_DUE_TIME } from "@/lib/due-rules";
 import { loadClosures, shiftToBusinessDay } from "@/lib/closures";
 import { isNewCustomerCommand, handleNewCustomer } from "@/lib/crm";
 import { canonicalAssignee } from "@/lib/members";
+import { applyAutomaticAssignment } from "@/lib/assignment";
 import { loadRecentAttachments, consumeRecentAttachments } from "@/lib/media";
 import {
   classifyIntent,
@@ -1137,6 +1138,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
     }
 
+    // 担当指定がない依頼だけ会社の分担ルールで補完する。
+    // 明示メンションや本文中の担当者名は applyAutomaticAssignment 側でも上書きしない。
+    const assignment = await applyAutomaticAssignment(parsed);
+    parsed.assignee = assignment.assignee;
+    parsed.assignmentReason = assignment.reason;
+
     // 担当者をメンバー名簿の正式氏名に寄せる。
     // LINEの表示名をそのまま入れると、同じ人が何通りもの表記でNotionに増える。
     // 名簿に無い人は元の表記のまま通す（新任者の担当が空になるのを避ける）。
@@ -1224,6 +1231,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 登録済みを確定させる。以後の再送はここで止まり、二重登録にならない。
       await completeMessage(event.message.id, pageId).catch(() => undefined);
       markCommitted();
+      if (parsed.assignmentReason) {
+        await appendTaskNote(pageId, [
+          `🤖 自動割当：${parsed.assignee ?? "未割当"}`,
+          `・根拠：${parsed.assignmentReason}`,
+        ]).catch((e) =>
+          console.error("自動割当の根拠をNotionへ記録できませんでした:", e)
+        );
+      }
       await setTaskMessageIds(pageId, [event.message.id]).catch((e) =>
         console.error("メッセージIDの紐づけに失敗（登録は完了）:", e)
       );

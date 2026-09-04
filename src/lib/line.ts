@@ -136,6 +136,9 @@ export function buildTaskRegisteredMessage(task: ParsedTask): string {
   const assigneeLine = task.assignee
     ? `👤 担当：${task.assignee}`
     : null;
+  const assignmentReasonLine = task.assignmentReason
+    ? `　└ ${task.assignmentReason}`
+    : null;
 
   const lines = [
     "✅ タスク登録しました",
@@ -146,6 +149,7 @@ export function buildTaskRegisteredMessage(task: ParsedTask): string {
     dueLine,
     reasonLine,
     assigneeLine,
+    assignmentReasonLine,
   ].filter(Boolean);
 
   return lines.join("\n");
