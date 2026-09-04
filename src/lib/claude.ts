@@ -5,7 +5,7 @@ import { cleanPropertyName, normalizeProperty } from "./property";
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 export interface ParsedTask {
-  // メンションなしでも文脈から判定するためのゲートキーパー項目
+  // @AI秘書で受け付けた内容が、実際にタスクとして成立するかの判定項目
   isTask: boolean; // タスクとして登録すべき依頼・指示か（雑談・相槌・報告のみ等はfalse）
   confidence: number; // 0〜1。タスクである確信度
   title: string;
@@ -38,8 +38,8 @@ export const TASK_CONFIDENCE_THRESHOLD = Number(
 );
 
 const SYSTEM_PROMPT = `あなたは不動産業務の秘書アシスタントです。
-LINEグループで飛び交うメッセージを1件ずつ受け取ります。メンションの有無に関わらず、
-その発言が「タスクとして登録すべき依頼・指示・約束ごと」かどうかを自分で判断してください。
+LINEグループでAI秘書宛てにメンションされたメッセージを1件ずつ受け取ります。
+その発言や直前の添付が「タスクとして登録すべき依頼・指示・約束ごと」かどうかを判断してください。
 
 まず判定してください：
 - isTask: その発言が、誰かがやるべき具体的なタスク（依頼・指示・期日のある約束）を含むならtrue。

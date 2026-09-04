@@ -42,6 +42,7 @@ import { loadClosures, shiftToBusinessDay } from "@/lib/closures";
 import { isNewCustomerCommand, handleNewCustomer } from "@/lib/crm";
 import { canonicalAssignee } from "@/lib/members";
 import { applyAutomaticAssignment } from "@/lib/assignment";
+import { isContextlessRequest, taskMentionState } from "@/lib/task-intake";
 import { loadRecentAttachments, consumeRecentAttachments } from "@/lib/media";
 import {
   classifyIntent,
@@ -400,7 +401,9 @@ async function clarifyAfterCreate(
     { ...clarify, missing },
     parsed.propertyName ?? null,
     undefined,
-    fields
+    fields,
+    parsed.assignee ?? null,
+    parsed.assignmentReason ?? null
   );
 }
 
@@ -925,8 +928,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
     }
 
-    // メンションは必須ではない。全発言をClaudeに渡し、タスクかどうかを判定させる。
+    // 新規タスクはAI秘書への明示メンションが入口。
+    // 社員へのメンションは担当指定として使うが、それだけではAIを起動しない。
+    // 既存タスクへの回答・完了・担当変更はこの手前で処理済みなので影響しない。
     const text = stripMentions(event.message);
+    const mentionState = taskMentionState(
+      event.message.mention?.mentionees,
+      BOT_USER_ID
+    );
 
     // ④ 「資料の写真を送る → 担当者をメンションする」がこのグループの依頼の主な形。
     //    （履歴の実測: 社長の発言3,394件中571件が画像で、直後は「@杉山 舜」等のひと言だけ）
@@ -934,11 +943,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     //    重要: 「@杉山 舜」だけの発言は stripMentions 後に **本文が空になる**。
     //    以前はここで空文字を捨てていたため、最頻の依頼パターンが丸ごと素通りしていた。
     //    添付があるなら本文が空でも依頼として扱う。
-    const mentionsSomeone = (event.message.mention?.mentionees ?? []).some(
-      (m) => m.type === "all" || (m.type === "user" && m.userId !== BOT_USER_ID)
-    );
     // 本文もメンションも無ければ何もしない（添付の取得はまだ行わない）
-    if (!text && !mentionsSomeone) continue;
+    if (!text && !mentionState.mentionsBot && !mentionState.mentionsAssignee) continue;
 
     // ⑤ 本文があるときだけ、テキスト前提の分岐にかける
     if (text) {
@@ -1011,13 +1017,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
     }
 
-    // ⑥ ここまでで処理されなかった＝タスク候補。ここで初めて添付を取りに行く。
+    // ⑥ 通常会話への誤反応を防ぐ。新規タスクは @AI秘書 がある発言だけ受け付ける。
+    //    メンションなしの「お願いします」や、社員同士の@メンションには反応しない。
+    if (!mentionState.mentionsBot) continue;
+
+    // ここまでで処理されなかった＝タスク候補。ここで初めて添付を取りに行く。
     //    先に取ると「@下村亮太 この名刺の方にメール送って」のようなメール指示でも
     //    画像をダウンロードしてしまい、無駄に遅くなる。
-    const attachments = mentionsSomeone
-      ? await loadRecentAttachments(source)
-      : [];
-    if (!text && attachments.length === 0) continue;
+    // @AI秘書 の直前に同じ発言者が送った画像/PDFを依頼内容として読む。
+    const attachments = await loadRecentAttachments(source);
+
+    // 「@AI秘書 お願いします」だけで直前資料も無い場合は、曖昧なタスクを
+    // 作らない。対象と作業を1回で答えられる短い質問だけ返す。
+    if (attachments.length === 0 && isContextlessRequest(text)) {
+      await sendLineMessage(
+        replyToken,
+        "確認させてください。\nどの案件について、何をしてほしいでしょうか？"
+      );
+      continue;
+    }
 
     // ⑦ 添付が無い場合だけAIで意図判定する。
     //     ・曖昧（メール/タスク/顧客のどれとも取れる）→ どう対応するか確認する
@@ -1070,7 +1088,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // 依頼らしいものだけは、解析できなくてもNotionに控える。
         // 雑談まで拾うと復旧後の一覧が埋まるので、メンションか添付がある
         // ものに限る（履歴上、依頼の大半はこの形）。
-        if (mentionsSomeone || attachments.length > 0) {
+        if (mentionState.mentionsBot || attachments.length > 0) {
           try {
             const head = (text || "（本文なし・添付のみ）").slice(0, 40);
             const pageId = await createNotionTask(
@@ -1243,28 +1261,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         console.error("メッセージIDの紐づけに失敗（登録は完了）:", e)
       );
 
-      // 初動確認は**社長からの依頼だけ**にかける。
-      // 全員に聞き返すと、担当者同士の細かいやり取りにも確認が挟まって
-      // グループがうるさくなり、肝心の確認が読み飛ばされる。
+      // 新規受付は @AI秘書 を付けた依頼だけなので、発言者を問わず不足確認を行う。
+      // 通常会話には入らないため、以前のように全員の会話へ質問が挟まることはない。
       let reply: string;
-      if (!shouldClarifyFor(source.userId)) {
-        reply = buildTaskRegisteredMessage(parsed);
-      } else {
-        try {
-          reply = await clarifyAfterCreate(
-            pageId,
-            parsed,
-            text,
-            attachments,
-            source.groupId,
-            source.userId
-          );
-        } catch (err) {
-          console.error("初動確認に失敗（登録は完了）:", err);
-          reply =
-            `📝 「${parsed.title}」を登録しました。\n` +
-            `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
-        }
+      try {
+        reply = await clarifyAfterCreate(
+          pageId,
+          parsed,
+          text,
+          attachments,
+          source.groupId,
+          source.userId
+        );
+      } catch (err) {
+        console.error("初動確認に失敗（登録は完了）:", err);
+        reply =
+          `📝 「${parsed.title}」を登録しました。\n` +
+          `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
       }
 
       const botMsgId = await sendLineMessage(replyToken, reply).catch((e) => {

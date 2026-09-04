@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "build:checklist": "node scripts/build-checklist.mjs",
-    "test": "tsx tests/clarify.reducer.test.ts && tsx tests/session.store.test.ts && tsx tests/apihealth.test.ts && tsx tests/clarify-target.test.ts && tsx tests/assignment.test.ts",
+    "test": "tsx tests/clarify.reducer.test.ts && tsx tests/session.store.test.ts && tsx tests/apihealth.test.ts && tsx tests/clarify-target.test.ts && tsx tests/assignment.test.ts && tsx tests/task-intake.test.ts",
     "test:ai": "tsx tests/clarify.ai.test.ts",
     "test:maps": "tsx tests/maps.test.ts",
     "db:generate": "prisma generate",

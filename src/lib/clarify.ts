@@ -320,12 +320,16 @@ export function buildClarifyMessage(
   propertyName: string | null,
   remindNumber?: number,
   /** 項目名を出すための定義一覧（省略時は値だけ並べる） */
-  allFields?: RequiredField[]
+  allFields?: RequiredField[],
+  assignee?: string | null,
+  assignmentReason?: string | null
 ): string {
   const ask = result.missing.filter((f) => !f.suggest);
   const propose = result.missing.filter((f) => f.suggest);
 
   let msg = `📝 「${taskTitle}」を登録しました。\n`;
+  if (assignee) msg += `担当：${assignee}\n`;
+  if (assignmentReason) msg += `└ ${assignmentReason}\n`;
   msg += `着手前に確認させてください。\n`;
 
   if (result.propertyUnknown) {
