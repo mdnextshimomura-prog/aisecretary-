@@ -36,6 +36,16 @@ function selectName(
   );
 }
 
+function statusName(
+  props: Record<string, unknown>,
+  key: string
+): string | null {
+  return (
+    (props[key] as { status?: { name?: string } | null } | undefined)?.status
+      ?.name ?? null
+  );
+}
+
 export function officialAssignee(
   name: string | null
 ): (typeof TARGETS)[number] | null {
@@ -113,11 +123,11 @@ async function salesProgressItems(): Promise<WorkItem[]> {
   return queryAll(
     mainNotion,
     process.env.NOTION_SALES_PROGRESS_DATABASE_ID ?? "",
-    { property: "ステータス", select: { does_not_equal: "完了" } },
+    { property: "ステータス", status: { does_not_equal: "完了" } },
     "売買案件進捗",
     "担当者（固定）",
     (props) => {
-      const status = selectName(props, "ステータス");
+      const status = statusName(props, "ステータス");
       return status === "契約予定" || status === "引渡待" ? 1.5 : 1;
     }
   );
@@ -129,8 +139,8 @@ async function salesListingItems(): Promise<WorkItem[]> {
     process.env.NOTION_SALES_LISTING_DATABASE_ID ?? "",
     {
       and: [
-        { property: "ステータス", select: { does_not_equal: "決済" } },
-        { property: "ステータス", select: { does_not_equal: "completed" } },
+        { property: "ステータス", status: { does_not_equal: "決済" } },
+        { property: "ステータス", status: { does_not_equal: "completed" } },
       ],
     },
     "売却案件",
