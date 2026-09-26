@@ -1,4 +1,5 @@
 import {
+  emailIntakeAllowed,
   isContextlessRequest,
   taskMentionState,
 } from "../src/lib/task-intake";
@@ -41,6 +42,19 @@ ok(
 ok(
   "具体的な作業があれば受付可能",
   !isContextlessRequest("メロディハイム626の査定をお願いします")
+);
+
+ok(
+  "グループでは @AI秘書 のメンションが無いとメールの下書きを作らない",
+  !emailIntakeAllowed({ isGroup: true, mentionsBot: false })
+);
+ok(
+  "グループでも @AI秘書 のメンションがあればメールの下書きを作る",
+  emailIntakeAllowed({ isGroup: true, mentionsBot: true })
+);
+ok(
+  "1対1のトークはメンション不要でメールの下書きを作る",
+  emailIntakeAllowed({ isGroup: false, mentionsBot: false })
 );
 
 console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);

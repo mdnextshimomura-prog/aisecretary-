@@ -42,7 +42,11 @@ import { loadClosures, shiftToBusinessDay } from "@/lib/closures";
 import { isNewCustomerCommand, handleNewCustomer } from "@/lib/crm";
 import { canonicalAssignee } from "@/lib/members";
 import { applyAutomaticAssignment } from "@/lib/assignment";
-import { isContextlessRequest, taskMentionState } from "@/lib/task-intake";
+import {
+  emailIntakeAllowed,
+  isContextlessRequest,
+  taskMentionState,
+} from "@/lib/task-intake";
 import { loadRecentAttachments, consumeRecentAttachments } from "@/lib/media";
 import {
   classifyIntent,
@@ -999,7 +1003,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
       // 「メール送って」等の明確なメール指示は、AI判定より前に確定でメールへ。
       // （AIが稀にタスクと誤判定するのを防ぐ）
-      if (looksLikeEmailCommand(text)) {
+      // グループではメールの下書きも @AI秘書 のメンションがあるときだけ（1対1は従来どおり）
+      const emailAllowed = emailIntakeAllowed({
+        isGroup: !!source.groupId,
+        mentionsBot: mentionState.mentionsBot,
+      });
+      if (emailAllowed && looksLikeEmailCommand(text)) {
         await startEmailFlow(text, source, replyToken);
         markCommitted();
         continue;
@@ -1008,6 +1017,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 直近に画像/PDFが届いている文脈での「この名刺の方にPDFを送って」等も
       // 確定でメールへ（「メール」という単語が無くても曖昧メニューを出さない）。
       if (
+        emailAllowed &&
         looksLikeSendWithMaterial(text) &&
         (await hasPendingEmailContext(source))
       ) {

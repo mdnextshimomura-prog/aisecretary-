@@ -41,3 +41,12 @@ export function isContextlessRequest(text: string): boolean {
     t
   );
 }
+
+/**
+ * メールの下書きを作ってよい発言か。
+ * グループでは @AI秘書 のメンションがある発言だけ（社員どうしの「送っといて」に反応しない）。
+ * 1対1のトークはメンション不要のまま。
+ */
+export function emailIntakeAllowed(opts: { isGroup: boolean; mentionsBot: boolean }): boolean {
+  return !opts.isGroup || opts.mentionsBot;
+}
