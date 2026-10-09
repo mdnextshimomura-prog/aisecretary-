@@ -64,6 +64,10 @@ src/app/api/webhook/route.ts   … 署名検証 → メンション判定 → �
 `NOTION_API_KEY` / `NOTION_DATABASE_ID` /
 （任意）`TASK_CONFIDENCE_THRESHOLD`（自動登録の確信度しきい値。既定0.7。上げると誤登録減・取りこぼし増） /
 （任意）`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REFRESH_TOKEN` / `GOOGLE_CALENDAR_ID`
+（グループからの帯替え・2026-10-09）`LINE_GROUP_ID`（既存。営業部の groupId）/ `PORTAL_BASE_URL`（portal の https の起点。末尾の / は不要）/
+`JOB_API_TOKEN`（portal の `x-job-token`。LINE秘書と同じ鍵）/ `JOB_ALLOWED_USER_IDS`（帯替えを依頼できる LINE userId。カンマ区切り）
+— `LINE_GROUP_ID` が無い・不正なら帯替えは何もしない（どのグループでも返事も控えもしない）。それ以外が1つでも欠ける・形が違うと、営業部の依頼にだけ「止めています」と返す（他の機能は変わらない）。追加・変更は下村さんの承認後、値を画面に出さない方法で入れる。
+LINE の Webhook の再送が無効だと、portal の結果不明・一覧の不一致のときに再送が来ない（結果は Discord・portal で確かめる）。
 
 ## よく使うコマンド
 ```bash
