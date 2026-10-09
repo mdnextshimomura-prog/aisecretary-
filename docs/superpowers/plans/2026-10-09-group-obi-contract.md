@@ -63,7 +63,7 @@
 - `issue` の引数は `{ shelfId, driveFileId, sha256, ttlSec, now, aud?, g? }`。`aud` と `g` は両方そろえて渡すか、両方渡さないか
 
 ## P2 と P3 の間：依頼の読み方の共通テストデータ
-- P2 が aisecretary の `tests/fixtures/` に共通の JSON 表を作る。P3 がそれを line-secretary に写し、既存の `src/jobs/parse.js` が全件同じ結果を出すことをテストで固定する（写しの中身は同一。違いが出たら P3 は parse.js ではなく表を疑い、止めて報告）
+- 論理的な正本は P2 計画のコミット 1fd4def に固定された JSON。P3 が先にそのスナップショットを line-secretary に作り（実装済み）、P2 の実装は同じバイトを再現する（sha256 b30b3f1c…e7d98fa を両方で比べる）。P3 は既存の `src/jobs/parse.js` が全件同じ結果を出すことをテストで固定する（写しの中身は同一。違いが出たら P3 は parse.js ではなく表を疑い、止めて報告）
 
 ## P2 と P3 の間（直接のやり取りはない）
 - P2 は portal に `replyKind: 'line-group'`・`replyGroupId: <営業部の groupId>` を付けて受付ける

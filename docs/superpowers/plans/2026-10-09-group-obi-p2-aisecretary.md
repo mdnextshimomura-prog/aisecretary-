@@ -332,12 +332,15 @@ export function parseJobCommand(text: string | null | undefined): JobCommand | n
 
 - [ ] **Step 6の2: 共通の表のバイトを P3 のスナップショットと比べる**
 
-  論理的な正本は P2 計画のコミット 1fd4def に固定された JSON。P3 が先にそのスナップショットを line-secretary に作り、P2 の実装は同じバイトを再現する（sha256 b30b3f1c…e7d98fa を両方で比べる）。P3 の実装が済んでいれば、line-secretary 側と並べて比べる：
+  論理的な正本は P2 計画のコミット 1fd4def に固定された JSON。P3 が先にそのスナップショットを line-secretary に作り、P2 の実装は同じバイトを再現する（sha256 b30b3f1c…e7d98fa を両方で比べる）。比べる相手は **P3 の worktree のファイル**。P3 が本体のツリーにマージされた後に限り、本体のツリーのパスで比べる：
 ```bash
 shasum -a 256 tests/fixtures/job-command-cases.json
-shasum -a 256 /Users/shimo/AI開発/apps/line-secretary/test/fixtures/job-command-cases.json
+# 比べる相手（P3 の worktree。これを使う）
+shasum -a 256 /Users/shimo/AI開発/apps/line-secretary/.worktrees/group-obi-deliver/test/fixtures/job-command-cases.json
+# P3 が本体にマージされた後だけ、次のパスに替えてよい（それまでは使わない）
+# shasum -a 256 /Users/shimo/AI開発/apps/line-secretary/test/fixtures/job-command-cases.json
 ```
-  Expected: どちらも `b30b3f1c…e7d98fa`（先頭8桁・末尾7桁が一致。全桁は P3 計画 Task 5 の記載）。違う場合は parse.ts も表も直さず、止めて報告する。P3 がまだ無い（line-secretary 側のファイルが無い）なら、自分側だけ `b30b3f1c…e7d98fa` と一致することを確かめ、比較は「未実施」と最終報告に書く。
+  Expected: どちらも `b30b3f1c4a1951a63ed05d5dacdc837efec75466ddbaedee399db8004e7d98fa`（全桁一致）。違う場合は parse.ts も表も直さず、止めて報告する。P3 の worktree のファイルが読めないときは、自分側だけ上の値と一致することを確かめ、比較は「未実施」と最終報告に書く。
 
 - [ ] **Step 7: コミット**
 
@@ -2232,7 +2235,7 @@ export async function runObiIntake(input: ObiIntakeInput, deps: ObiIntakeDeps): 
 済みの境目（裁定 2026-10-09）：
 - portal が受付番号を返し、`inputsMatch`（件数と sha256 の集合）が真のときだけ `onCommitted()` を呼ぶ
 - 一覧が合わないときは `onCommitted()` を呼ばず、`obi-unconfirmed-notified:<id>` を NX で置けたときだけ「受付を確かめられませんでした」を返し、`{ outcome: "unconfirmed", retry: true }`（Webhook は予約を外し、`completeEvent` を呼ばずに 503）。受付の返事も、ほかの返事も出さない
-- portal 自身が `INTAKE_MISMATCH`（409）で断ったときも、返事は同じ「受付を確かめられませんでした」（こちらは portal がはっきり断ったので、イベントは済みにする）
+- portal 自身が `INTAKE_MISMATCH`（409）で断ったときも、返事は同じ「受付を確かめられませんでした」で、**一覧が合わないときと同じ `obi-unconfirmed-notified:<id>` の NX を通す**（`rejectionMessage()`→`refuse()` で直接送らない）。こちらは portal がはっきり断ったので `{ outcome: "refused", retry: false }`・イベントは済み・`onCommitted()` は呼ばない。NX が既にあれば送らない。NX が例外（KV の障害）なら送らない（二重を避ける。返事が出ないだけで、済みの扱いは変えない）
 - 依頼の時刻（`requestTimestamp`）が無い・不正なら、選ぶ前に「依頼の時刻が分かりません」で断る（portal を呼ばない。今の時刻で代わりにしない）
 
 途中で止まる場面（Codex の残りの指摘 b）：テストでは依存の関数が例外を投げる＝落ちた、とし、同じ控えのままもう一度呼ぶ＝LINE の再送、で確かめる。
@@ -2543,9 +2546,34 @@ async function main() {
   {
     const w = world();
     await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = [json(409, { code: "INTAKE_MISMATCH", message: "x" }), json(409, { code: "INTAKE_MISMATCH", message: "x" })];
+    const r = await run(w);
+    ok("portal の INTAKE_MISMATCH は「確かめられませんでした」（はっきりした断り＝済みにする・受付の返事は出さない）", r.outcome === "refused" && !r.retry && w.committed === 0 && w.replies[0] === OBI_MESSAGES.unconfirmed, w.replies[0]);
+    w.clock.t = T + 70_000;
+    const r2 = await run(w, { startedAt: w.clock.t });
+    ok("同じ lineMessageId の INTAKE_MISMATCH を2回処理しても通知は1通（NX）", r2.outcome === "refused" && !r2.retry && w.committed === 0 && w.replies.length === 1 && w.pushes.length === 0, w.replies.join("|"));
+  }
+  {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    await w.store.setNx(`obi-unconfirmed-notified:${REQ_ID}`, 86400); // 既に送り済み
     w.portal = [json(409, { code: "INTAKE_MISMATCH", message: "x" })];
     const r = await run(w);
-    ok("portal の INTAKE_MISMATCH は「確かめられませんでした」（済みにしない受付の返事は出さない）", r.outcome === "refused" && w.committed === 0 && w.replies[0] === OBI_MESSAGES.unconfirmed, w.replies[0]);
+    ok("INTAKE_MISMATCH：NX が既にあれば送らない（済みにする・onCommitted は呼ばない）", r.outcome === "refused" && !r.retry && w.committed === 0 && w.replies.length === 0 && w.pushes.length === 0, JSON.stringify(r));
+  }
+  {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = [json(409, { code: "INTAKE_MISMATCH", message: "x" })];
+    const d = deps(w);
+    d.store = {
+      ...w.store,
+      setNx: async () => {
+        throw new Error("KV down");
+      },
+    };
+    const r = await runObiIntake(input(), d);
+    ok("INTAKE_MISMATCH：NX が例外なら送らない（二重を避ける）が、済みの扱い（refused・retry:false）は変えない", r.outcome === "refused" && !r.retry && w.committed === 0 && w.replies.length === 0 && w.pushes.length === 0, JSON.stringify(r));
   }
   {
     const w = world();
@@ -2772,6 +2800,8 @@ main();
  * 「済み」の境目：portal から受付番号と PDF の一覧が返り、**その一覧が送った PDF と一致した**時点
  * （件数と sha256 の集合。onCommitted）。その後の返事の失敗では受付を取り消さない。
  * 一覧が合わないときは済みにせず「受付を確かめられませんでした」と1回だけ返し、再送を待つ（retry）。
+ * portal が `INTAKE_MISMATCH`（409）で断ったときも同じ返事を同じ NX（`obi-unconfirmed-notified:<id>`）で1回だけ
+ * 返す（こちらははっきり断られたので済みにする＝retry:false・onCommitted は呼ばない）。NX が既にある・NX が例外のときは送らない。
  * portal の結果が分からないときは「結果不明」として LINE の再送を待つ（retry）。
  * portal は1つの依頼につき、1回の Webhook の中で最大2回（最初の1回＋締め切りの中での呼び直し1回）。
  *
@@ -2867,8 +2897,34 @@ function rejectionMessage(o: Extract<IntakeOutcome, { kind: "rejected" }>): stri
   if (o.code === "OBI_BUSY") return OBI_MESSAGES.busy(o.busyJobNo);
   if (o.code === "INTAKE_STOPPED") return OBI_MESSAGES.stopped;
   if (o.code === "INPUT_TOO_LARGE") return OBI_MESSAGES.tooLarge;
-  if (o.code === "INTAKE_MISMATCH") return OBI_MESSAGES.unconfirmed;
   return OBI_MESSAGES.rejected(sanitizeForReply(o.code));
+}
+
+/**
+ * 「受付を確かめられませんでした」を依頼1つにつき1回だけ送る（一覧が合わないとき・portal の
+ * INTAKE_MISMATCH の両方がここを通る）。NX が既にあれば送らない。NX が例外（KV の障害）でも
+ * 送らない（二重を避ける。返事が出ないだけ。例外は呼び出し側へ投げない）。
+ */
+async function notifyUnconfirmedOnce(
+  input: ObiIntakeInput,
+  deps: ObiIntakeDeps,
+  say: (text: string) => Promise<unknown>
+): Promise<void> {
+  let first: boolean;
+  try {
+    first = await deps.store.setNx(
+      `obi-unconfirmed-notified:${input.requestMessageId}`,
+      OBI_NOTIFY_TTL_SECONDS
+    );
+  } catch (err) {
+    console.error(
+      "帯替え：確かめられない返事の印を置けない（返事は出さない）:",
+      input.requestMessageId,
+      (err as Error)?.message ?? err
+    );
+    return;
+  }
+  if (first) await say(OBI_MESSAGES.unconfirmed);
 }
 
 export async function runObiIntake(
@@ -2965,14 +3021,7 @@ export async function runObiIntake(
     // 「確かめられませんでした」を1回だけ返し、再送を待つ
     if (!inputsMatch(files, outcome.inputs)) {
       console.error("帯替え：portal の一覧が送った PDF と合わない:", outcome.no);
-      if (
-        await deps.store.setNx(
-          `obi-unconfirmed-notified:${input.requestMessageId}`,
-          OBI_NOTIFY_TTL_SECONDS
-        )
-      ) {
-        await say(OBI_MESSAGES.unconfirmed);
-      }
+      await notifyUnconfirmedOnce(input, deps, say);
       return { outcome: "unconfirmed", retry: true };
     }
     deps.onCommitted();
@@ -3002,7 +3051,15 @@ export async function runObiIntake(
     }
     return { outcome: "accepted", retry: false };
   }
-  if (outcome.kind === "rejected") return refuse(rejectionMessage(outcome));
+  if (outcome.kind === "rejected") {
+    // portal の INTAKE_MISMATCH は「はっきりした断り」：済みにする（retry:false）・onCommitted は呼ばない。
+    // 返事は一覧が合わないときと同じ NX を通す（直接 refuse() で送ると、LINE の再送などで二重になる）
+    if (outcome.code === "INTAKE_MISMATCH") {
+      await notifyUnconfirmedOnce(input, deps, say);
+      return { outcome: "refused", retry: false };
+    }
+    return refuse(rejectionMessage(outcome));
+  }
   if (outcome.kind === "unreachable" && !sawUnknown) return refuse(OBI_MESSAGES.unreachable);
 
   // ④ 結果不明：受付できなかったとは言わない。返事は1回だけにして、LINE の再送を待つ
@@ -3960,7 +4017,7 @@ EOF
 | LINE からの取り出しの大きさ | 本文を少しずつ読み、読んだ合計が 25,000,000 バイトを超えた時点でやめる。Content-Length は近道にだけ使う（裁定 2026-10-09） |
 | 一覧の照合 | 件数と sha256 の集合（同じ sha256 の大きさも）。順番では比べない（約束） |
 | 受付番号は返ったが一覧が合わない | 済みにしない（`onCommitted` を呼ばない・`completeEvent` を呼ばず予約を外して 503）。「受付を確かめられませんでした」を NX で1回だけ。受付の返事は出さない（裁定 2026-10-09）。再送でも合わなければ同じ（返事は出ない）。LINE の再送の回数が尽きたら止まる |
-| portal の `INTAKE_MISMATCH`（409） | 返事は「受付を確かめられませんでした」。portal がはっきり断ったのでイベントは済みにする |
+| portal の `INTAKE_MISMATCH`（409） | 返事は「受付を確かめられませんでした」で、一覧が合わないときと同じ `obi-unconfirmed-notified:<id>` の NX を通す（直接送らない）。portal がはっきり断ったのでイベントは済み（retry:false）・`onCommitted` は呼ばない。NX が既にある・NX が例外のときは送らない（二重を避ける） |
 | portal を一度も呼べなかった（取り出しで時間を使い切った） | portal に受付は無いので「時間がかかりました」で断る（結果不明にしない） |
 | 受付の確定の後に NX が KV の障害で置けない | 返事も push も出さずにログだけ。再送もさせない（二重を避ける。受付は portal・Discord で見える）（裁定 2026-10-09） |
 | Webhook の振り分け | 帯替えの分を `dispatchObiEvents` に切り出し、今までのループの前で呼ぶ。今までのループの中身は変えない。1回分に混ざったときは帯替えの依頼が先、他は元の順番のまま |
