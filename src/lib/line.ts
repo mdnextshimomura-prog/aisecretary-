@@ -174,3 +174,76 @@ export async function pushLineChunks(
     await pushLineMessageWithMentions(to, c.text, c.mentions);
   }
 }
+
+
+// ── 返事の結果を3つに分けて返す（設計 2026-10-09 の 14） ──
+//
+// sendLineMessage は「送れた／送れなかった」しか返さず、通信の失敗では例外を投げる。
+// 帯替えの受付の返事は、LINE が 400 番台で断った（期限切れ・使用済みの replyToken）ときだけ
+// push で送り直し、通信の失敗など結果が分からないときは送り直さない（二重の返事を避ける）。
+// 既存の呼び出し元は sendLineMessage のまま（動きを変えない）。
+export type ReplyOutcome =
+  | { kind: "sent"; messageId: string | null }
+  | { kind: "rejected"; status: number }
+  | { kind: "unknown" };
+
+const REPLY_TIMEOUT_MS = 8_000;
+
+export async function replyLineMessageDetailed(
+  replyToken: string,
+  text: string,
+  timeoutMs: number = REPLY_TIMEOUT_MS
+): Promise<ReplyOutcome> {
+  let res: Response;
+  try {
+    res = await fetch("https://api.line.me/v2/bot/message/reply", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+      },
+      body: JSON.stringify({ replyToken, messages: [{ type: "text", text }] }),
+      signal: AbortSignal.timeout(timeoutMs),
+      cache: "no-store",
+    });
+  } catch (err) {
+    // 届いたかどうか分からない（時間切れ・通信の切断）
+    console.error("LINE reply の結果が分からない:", (err as { name?: string })?.name ?? err);
+    return { kind: "unknown" };
+  }
+  if (res.status >= 400 && res.status < 500) {
+    console.error("LINE reply を断られた:", res.status);
+    return { kind: "rejected", status: res.status };
+  }
+  if (!res.ok) {
+    console.error("LINE reply の結果が分からない（5xx）:", res.status);
+    return { kind: "unknown" };
+  }
+  try {
+    const data = (await res.json()) as { sentMessages?: Array<{ id: string }> };
+    return { kind: "sent", messageId: data.sentMessages?.[0]?.id ?? null };
+  } catch {
+    return { kind: "sent", messageId: null };
+  }
+}
+
+export type ReplyDelivery = "replied" | "pushed" | "push-failed" | "unknown";
+
+/**
+ * reply → （はっきり断られたときだけ）push の順で1回だけ送る。
+ * io の関数が投げた例外は外へそのまま出す（呼び出し側が「途中で止まった」を扱えるように）。
+ */
+export async function deliverReply(
+  text: string,
+  io: {
+    reply: (text: string) => Promise<ReplyOutcome>;
+    push: (text: string) => Promise<boolean>;
+  }
+): Promise<ReplyDelivery> {
+  const r = await io.reply(text);
+  if (r.kind === "sent") return "replied";
+  if (r.kind === "unknown") return "unknown"; // 送り直さない（二重の返事を避ける）
+  const pushed = await io.push(text);
+  if (!pushed) console.error("reply を断られ、push でも送れなかった");
+  return pushed ? "pushed" : "push-failed";
+}
