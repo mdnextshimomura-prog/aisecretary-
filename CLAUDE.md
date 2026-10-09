@@ -67,6 +67,7 @@ src/app/api/webhook/route.ts   … 署名検証 → メンション判定 → �
 （グループからの帯替え・2026-10-09）`LINE_GROUP_ID`（既存。営業部の groupId）/ `PORTAL_BASE_URL`（portal の https の起点。末尾の / は不要）/
 `JOB_API_TOKEN`（portal の `x-job-token`。LINE秘書と同じ鍵）/ `JOB_ALLOWED_USER_IDS`（帯替えを依頼できる LINE userId。カンマ区切り）
 — `LINE_GROUP_ID` が無い・不正なら帯替えは何もしない（どのグループでも返事も控えもしない）。それ以外が1つでも欠ける・形が違うと、営業部の依頼にだけ「止めています」と返す（他の機能は変わらない）。追加・変更は下村さんの承認後、値を画面に出さない方法で入れる。
+Webhook の `maxDuration` は 300（既存機能の既定を縮めないため）。帯替えの受付は内部で開始+58秒に収める。プランが許さずデプロイが失敗したら、下村さんと相談して 60 に戻す。
 LINE の Webhook の再送が無効だと、portal の結果不明・一覧の不一致のときに再送が来ない（結果は Discord・portal で確かめる）。
 
 ## よく使うコマンド

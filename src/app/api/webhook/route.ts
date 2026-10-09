@@ -99,9 +99,10 @@ import {
 import { dispatchObiEvents, type ObiEventDeps } from "@/lib/obi/webhook-event";
 import { getObiStore } from "@/lib/obi/memo";
 
-// 帯替えの受付（LINE からの PDF の取り出し＋portal への送信）を1回の処理で終えるため60秒まで延ばす。
-// 受付の締め切り（開始から55秒）はこれより短くしてある（src/lib/obi/intake.ts）。
-export const maxDuration = 60;
+// 帯替えの受付（LINE からの PDF の取り出し＋portal への送信）は1回の処理で終える。
+// intake は内部で開始+58秒に収める（src/lib/obi/intake.ts）。300 は既存機能の既定を縮めないため。
+// プランが許さなければデプロイが失敗するので、そのときは下村さんと相談して 60 に戻す。
+export const maxDuration = 300;
 
 // 「これはタスクじゃない／取り消したい」意図の判定
 const CANCEL_PHRASES = [

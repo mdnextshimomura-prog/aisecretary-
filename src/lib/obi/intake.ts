@@ -5,7 +5,7 @@
  *   控えから PDF を選ぶ → LINE から全部取り出す → 同じ中身を1つに →
  *   portal の /api/jobs/intake に1回で送る → 返った一覧を照合 → グループに返事
  *
- * 時間：Webhook の関数は maxDuration = 60。その中に収まるように段階ごとに上限を置く
+ * 時間：受付は内部で開始+58秒に収める（Webhook の maxDuration は既存機能の既定を縮めないため 300）。段階ごとに上限を置く
  *   LINE の取得は1件15秒・全体30秒まで、かつ開始+35秒まで（portal のために10秒は残す）。
  *   portal の段階は開始+45秒までに終える（1回 min(20秒, 開始+45秒−今)、残り5秒未満なら呼ばない）。
  *   その後の返事の段階は、KV の印（NX）3秒・reply 5秒・push 5秒が上限（45+3+5+5＝58秒）。
@@ -28,6 +28,13 @@
  * 返事を出さずにログだけ残す（二重を避ける。受付は portal・Discord で見える）。
  * **NX を置いた直後に落ちると、その返事は出ない**（二重に出すよりよい。受付は portal の一覧と
  * Discord で見える）。これは設計で受け入れた動き。
+ *
+ * portal に一度でも送ろうとした依頼の再送：最初の portal の呼び出しの前に
+ * `obi-portal-attempted:<id>`（期限24時間）を置く。再送の入口でこの印があれば、portal の前の断り
+ * （PDF が無い・多すぎる・大きすぎる・取り出せない・PDF でない・時間切れ）は返事を出さず、理由を
+ * ログに残して再送を待つ（retry）。次の再送か portal の同じ lineMessageId の扱いで決着させる
+ * （1回目が portal に届いていたのに「PDF がありません」などと言わないため）。印が置けない・読めない
+ * ときは「試行していない」として扱う。portal の後の動きは変えない。
  */
 import { deliverReply, type ReplyOutcome } from "../line";
 import type { ObiConfig } from "./config";
@@ -43,10 +50,10 @@ import { propertyFor, requestTextFor, sanitizeForReply } from "./sanitize";
 
 /**
  * 設計 10 の締め切り（開始+55秒）。実際の時間の割り振りは下の段階ごとの上限で行う
- * （portal の段階は開始+45秒まで、その後の返事の段階は最長13秒。合計で maxDuration 60 に収まる）。
+ * （portal の段階は開始+45秒まで、その後の返事の段階は最長13秒。合計で開始+58秒に収まる）。
  */
 export const OBI_DEADLINE_MS = 55_000;
-/** portal の段階を終える時刻（開始からの ms）。この後の返事の段階が maxDuration 60 に収まるように */
+/** portal の段階を終える時刻（開始からの ms）。この後の返事の段階まで開始+58秒に収まるように */
 const PORTAL_PHASE_END_MS = 45_000;
 const LINE_FETCH_TOTAL_MS = 30_000;
 const PORTAL_RESERVE_MS = 10_000; // 取り出しの段階で portal のために残す時間
@@ -127,13 +134,18 @@ export interface ObiIntakeResult {
  * 後で通るかもしれない。そのときは返事が出ないだけで、二重にはならない）。
  */
 async function setNxBounded(deps: ObiIntakeDeps, key: string): Promise<boolean> {
+  return kvBounded(deps, deps.store.setNx(key, OBI_NOTIFY_TTL_SECONDS));
+}
+
+/** KV の操作を時間の上限つきで待つ（上限を過ぎたら例外） */
+async function kvBounded<T>(deps: ObiIntakeDeps, op: Promise<T>): Promise<T> {
   const ms = deps.kvTimeoutMs ?? KV_TIMEOUT_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      deps.store.setNx(key, OBI_NOTIFY_TTL_SECONDS),
+      op,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`KV の印が${ms}ms で返らない`)), ms);
+        timer = setTimeout(() => reject(new Error(`KV が${ms}ms で返らない`)), ms);
       }),
     ]);
   } finally {
@@ -200,6 +212,23 @@ export async function runObiIntake(
     return refuse(OBI_MESSAGES.noTimestamp);
   }
 
+  // portal に一度でも送ろうとした依頼の再送か（読めなければ「していない」として今までどおり）
+  const attemptedKey = `obi-portal-attempted:${input.requestMessageId}`;
+  let attempted = false;
+  try {
+    attempted = await kvBounded(deps, deps.store.has(attemptedKey));
+  } catch (err) {
+    console.error("帯替え：試行済みの印を読めない（試行していないとして続ける）:", input.requestMessageId, (err as Error)?.message ?? err);
+  }
+  // portal の前の断り。試行済みの再送なら返事を出さず、理由だけ残して再送を待つ
+  const refuseBeforePortal = async (reason: string, text: string): Promise<ObiIntakeResult> => {
+    if (attempted) {
+      console.error("帯替え：試行済みの再送で portal の前に止まった（返事は出さず再送を待つ）:", input.requestMessageId, reason);
+      return { outcome: "pending", retry: true };
+    }
+    return refuse(text);
+  };
+
   // ① 控えから選ぶ（依頼の時刻から30分以内・依頼より前）
   const records = await deps.store.listPdfs(
     input.groupId,
@@ -210,9 +239,9 @@ export async function runObiIntake(
     messageId: input.requestMessageId,
     timestamp: requestTimestamp,
   });
-  if (sel.kind === "none") return refuse(OBI_MESSAGES.noPdf);
-  if (sel.kind === "too-many") return refuse(OBI_MESSAGES.tooMany(sel.count));
-  if (sel.kind === "too-large") return refuse(OBI_MESSAGES.tooLarge);
+  if (sel.kind === "none") return refuseBeforePortal("NO_PDF", OBI_MESSAGES.noPdf);
+  if (sel.kind === "too-many") return refuseBeforePortal("TOO_MANY", OBI_MESSAGES.tooMany(sel.count));
+  if (sel.kind === "too-large") return refuseBeforePortal("TOO_LARGE", OBI_MESSAGES.tooLarge);
 
   // ② LINE から全部取り出す。1件でもだめならやめる
   const fetched = await fetchObiPdfs(sel.pdfs, {
@@ -221,12 +250,12 @@ export async function runObiIntake(
     now: deps.now,
     deadline: Math.min(deps.now() + LINE_FETCH_TOTAL_MS, portalPhaseEnd - PORTAL_RESERVE_MS),
   });
-  if (fetched.kind === "too-large") return refuse(OBI_MESSAGES.tooLarge);
+  if (fetched.kind === "too-large") return refuseBeforePortal("TOO_LARGE_FETCHED", OBI_MESSAGES.tooLarge);
   if (fetched.kind === "failed") {
     const name = sanitizeForReply(fetched.fileName);
-    return refuse(
-      fetched.reason === "not-pdf" ? OBI_MESSAGES.notPdf(name) : OBI_MESSAGES.fetchFailed(name)
-    );
+    return fetched.reason === "not-pdf"
+      ? refuseBeforePortal("NOT_PDF", OBI_MESSAGES.notPdf(name))
+      : refuseBeforePortal(`FETCH_FAILED:${fetched.reason}`, OBI_MESSAGES.fetchFailed(name));
   }
   // 同じ中身は1つに（先に出たものを残す）。この一覧を正本として送る・照合する・返事に書く
   const files = dedupeBySha256(fetched.files);
@@ -246,8 +275,18 @@ export async function runObiIntake(
   let outcome: IntakeOutcome | null = null;
   let sawUnknown = false;
   for (let i = 0; i < MAX_PORTAL_ATTEMPTS; i++) {
-    const remaining = portalPhaseEnd - deps.now();
+    let remaining = portalPhaseEnd - deps.now();
     if (remaining < PORTAL_MIN_MS) break;
+    if (i === 0) {
+      // 最初の呼び出しの前に「試行済み」の印を置く（24時間）。置けなくても送る（試行していない扱い）
+      try {
+        await kvBounded(deps, deps.store.setNx(attemptedKey, OBI_NOTIFY_TTL_SECONDS));
+      } catch (err) {
+        console.error("帯替え：試行済みの印を置けない（送るのは続ける）:", input.requestMessageId, (err as Error)?.message ?? err);
+      }
+      remaining = portalPhaseEnd - deps.now();
+      if (remaining < PORTAL_MIN_MS) break;
+    }
     outcome = await postIntake(request, {
       fetchImpl: deps.fetchImpl,
       baseUrl: input.config.portalBaseUrl,
@@ -263,7 +302,7 @@ export async function runObiIntake(
     break;
   }
   // 一度も送っていない＝portal に受付は無い
-  if (outcome === null) return refuse(OBI_MESSAGES.timeUp);
+  if (outcome === null) return refuseBeforePortal("TIME_UP", OBI_MESSAGES.timeUp);
   // 2回目を呼ぶ時間が無かったときは outcome が1回目の unknown のまま残る＝下の結果不明へ
 
   if (outcome.kind === "accepted") {

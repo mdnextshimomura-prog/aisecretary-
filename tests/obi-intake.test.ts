@@ -636,6 +636,90 @@ async function main() {
     ok("確かめ中の返事の印（NX）が返ってこない：上限で打ち切り、例外にして再送を待つ（返事は出さない）", threw && w.replies.length === 0 && w.committed === 0);
   }
 
+  // ── portal に一度でも送った依頼の再送：portal の前の断りは黙る（返事を出さず再送を待つ） ──
+  const ATTEMPTED = `obi-portal-attempted:${REQ_ID}`;
+  {
+    // (a) 結果不明の後の再送で、控えが空（期限切れ）でも「PDF がありません」と言わない
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = ["timeout"];
+    const r1 = await run(w);
+    const d = deps(w);
+    d.store = { ...w.store, listPdfs: async () => [] };
+    const r2 = await runObiIntake(input(), d);
+    ok("試行済みの再送で控えが空：返事を出さず再送を待つ", r1.outcome === "pending" && r2.retry && w.replies.join("|") === OBI_MESSAGES.pending && w.pushes.length === 0, `${JSON.stringify(r2)} ${w.replies.join("|")}`);
+  }
+  {
+    // (b) 結果不明の後の再送で、LINE から取り出せなくても断りの返事を出さない
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = ["timeout"];
+    await run(w);
+    w.line["600000000000000002"] = 404;
+    const portalBefore = w.portalForms.length;
+    const r2 = await run(w);
+    ok("試行済みの再送で取り出せない：返事を出さず再送を待つ・portal も呼ばない", r2.retry && w.replies.join("|") === OBI_MESSAGES.pending && w.portalForms.length === portalBefore, `${JSON.stringify(r2)} ${w.replies.join("|")}`);
+  }
+  {
+    // (b2) 試行済みの再送で件数が多すぎても黙る
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = ["timeout"];
+    await run(w);
+    const items = Array.from({ length: 21 }, (_, i) => ({ id: `60000000000000${1000 + i}`, name: `x${i}.pdf`, ago: 50_000 - i }));
+    await seed(w, items);
+    const r2 = await run(w);
+    ok("試行済みの再送で件数超え：返事を出さず再送を待つ", r2.retry && w.replies.join("|") === OBI_MESSAGES.pending, w.replies.join("|"));
+  }
+  {
+    // (c) 初めての依頼（印なし）で控えが空：今までどおり「PDF がありません」
+    const w = world();
+    const r = await run(w);
+    ok("初めての依頼で控えが空：今までどおり断りの返事（済みにする）", r.outcome === "refused" && !r.retry && w.replies.join("|") === OBI_MESSAGES.noPdf, w.replies.join("|"));
+  }
+  {
+    // (c2) 印の読み取りが例外：試行済みではないとして今までどおり返す
+    const w = world();
+    const d = deps(w);
+    d.store = { ...w.store, has: async () => { throw new Error("KV down"); } };
+    const r = await runObiIntake(input(), d);
+    ok("印が読めない：試行済みではないとして今までどおり断る", r.outcome === "refused" && !r.retry && w.replies.join("|") === OBI_MESSAGES.noPdf, w.replies.join("|"));
+  }
+  {
+    // (d) 最初の portal の呼び出しより前に印を置く（24時間）
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    const log: string[] = [];
+    let setAtPortal: boolean | null = null;
+    w.portal = [
+      async (form: FormData) => {
+        log.push("portal");
+        setAtPortal = await w.store.has(ATTEMPTED);
+        return accept(61)(form);
+      },
+    ];
+    const d = deps(w);
+    d.store = {
+      ...w.store,
+      setNx: async (key: string, ttl: number) => {
+        log.push(`setNx:${key}:${ttl}`);
+        return w.store.setNx(key, ttl);
+      },
+    };
+    const r = await runObiIntake(input(), d);
+    ok("portal の前に試行済みの印を置く（24時間）", r.outcome === "accepted" && setAtPortal === true && log[0] === `setNx:${ATTEMPTED}:86400` && log.indexOf("portal") > 0, log.join(" "));
+  }
+  {
+    // (d2) 印が置けなくても portal には送る
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = [accept(62)];
+    const d = deps(w);
+    d.store = { ...w.store, setNx: async (key: string, ttl: number) => { if (key === ATTEMPTED) throw new Error("KV down"); return w.store.setNx(key, ttl); } };
+    const r = await runObiIntake(input(), d);
+    ok("試行済みの印が置けなくても portal に送る", r.outcome === "accepted" && w.portalForms.length === 1 && w.replies.length === 1, JSON.stringify(r));
+  }
+
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);
 }

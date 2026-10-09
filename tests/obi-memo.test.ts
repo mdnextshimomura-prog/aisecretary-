@@ -54,6 +54,9 @@ async function main() {
     await s.setNx("k", 60);
     now += 61_000;
     ok("NX：期限が切れたらまた置ける", await s.setNx("k", 60));
+    ok("印の有無：期限内は true", await s.has("k"));
+    now += 61_000;
+    ok("印の有無：期限が切れたら false・無いものも false", !(await s.has("k")) && !(await s.has("none")));
   }
 
   // ── KV の控え（偽物の KV で、呼ぶ順番と引数を確かめる） ──
@@ -71,6 +74,7 @@ async function main() {
       hmget: async (k, ...f) => { calls.push(["hmget", k, ...f]); return hmgetResult; },
       expire: async (k, sec) => { calls.push(["expire", k, sec]); return 1; },
       set: async (k, v, o) => { calls.push(["set", k, v, o]); return setResult; },
+      exists: async (k) => { calls.push(["exists", k]); return 0; },
     };
     const s = createKvObiStore(fake);
     const z = `obi-pdf:z:${G}`;
@@ -110,6 +114,8 @@ async function main() {
     ok("NX：nx と期限24時間で置く", JSON.stringify(calls[0]) === JSON.stringify(["set", "obi-accepted-notified:1", 1, { nx: true, ex: 86400 }]));
     setResult = null;
     ok("NX：置けなければ false", !(await s.setNx("obi-accepted-notified:1", 86400)));
+    calls.length = 0;
+    ok("印の有無：exists が0なら false", !(await s.has("obi-portal-attempted:1")) && JSON.stringify(calls[0]) === JSON.stringify(["exists", "obi-portal-attempted:1"]));
   }
 
   // ── 依頼に使う PDF の選び方 ──

@@ -37,6 +37,8 @@ export interface ObiStore {
   listPdfs(groupId: string, minTs: number, maxTs: number): Promise<ObiPdfRecord[]>;
   /** 無ければ置く（NX）。置けたら true */
   setNx(key: string, ttlSeconds: number): Promise<boolean>;
+  /** 印があるか（期限内のものだけ） */
+  has(key: string): Promise<boolean>;
 }
 
 /** createKvObiStore が使う KV の操作（テストで偽物に差し替えられるよう、使う分だけ） */
@@ -49,6 +51,7 @@ export interface ObiKvClient {
   hmget(key: string, ...fields: string[]): Promise<Record<string, unknown> | null>;
   expire(key: string, seconds: number): Promise<unknown>;
   set(key: string, value: number, opts: { nx: true; ex: number }): Promise<unknown>;
+  exists(key: string): Promise<number>;
 }
 
 const zKey = (groupId: string) => `obi-pdf:z:${groupId}`;
@@ -116,6 +119,9 @@ export function createKvObiStore(client: ObiKvClient): ObiStore {
     async setNx(key, ttlSeconds) {
       return (await client.set(key, 1, { nx: true, ex: ttlSeconds })) === "OK";
     },
+    async has(key) {
+      return (await client.exists(key)) > 0;
+    },
   };
 }
 
@@ -164,6 +170,10 @@ export function createMemoryObiStore(now: () => number = Date.now): MemoryObiSto
       flags.set(key, t + ttlSeconds * 1000);
       return true;
     },
+    async has(key) {
+      const exp = flags.get(key);
+      return exp !== undefined && exp > now();
+    },
     sizes(groupId) {
       return { z: sets.get(groupId)?.size ?? 0, h: hashes.get(groupId)?.size ?? 0 };
     },
@@ -179,6 +189,7 @@ const realKv: ObiKvClient = {
   hmget: (key, ...fields) => kv.hmget<Record<string, unknown>>(key, ...fields),
   expire: (key, seconds) => kv.expire(key, seconds),
   set: (key, value, opts) => kv.set(key, value, opts),
+  exists: (key) => kv.exists(key),
 };
 
 let memoryFallback: MemoryObiStore | null = null;
