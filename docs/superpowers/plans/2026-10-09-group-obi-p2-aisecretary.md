@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-09-group-obi-intake-design.md`（正）／受け渡しの約束：`docs/superpowers/plans/2026-10-09-group-obi-contract.md`
 
-**P3 への受け渡し（共通テストデータ）：** 依頼文の読み取りの共通の表は、この計画の Task 2 で **`/Users/shimo/AI開発/apps/aisecretary/tests/fixtures/job-command-cases.json`**（リポジトリの中では `tests/fixtures/job-command-cases.json`）に作る。正本はこの1か所。P3 はこれを `apps/line-secretary/test/fixtures/job-command-cases.json` に**中身を変えずに**写し、`src/jobs/parse.js` が全件同じ結果を出すことをテストで固定する（違いが出たら P3 は parse.js ではなく表を疑い、止めて報告。約束のとおり）。この計画は line-secretary を触らない。
+**P3 への受け渡し（共通テストデータ）：** 依頼文の読み取りの共通の表は、この計画の Task 2 で **リポジトリの中の `tests/fixtures/job-command-cases.json`**（実装用 worktree `/Users/shimo/AI開発/apps/aisecretary/.worktrees/group-obi/tests/fixtures/job-command-cases.json`。本体のツリーには作らない）に作る。論理的な正本は P2 計画のコミット 1fd4def に固定された JSON。P3 が先にそのスナップショットを line-secretary に作り、P2 の実装は同じバイトを再現する（sha256 b30b3f1c…e7d98fa を両方で比べる）。P3 はそのスナップショットを `apps/line-secretary/test/fixtures/job-command-cases.json` に**中身を変えずに**置き、`src/jobs/parse.js` が全件同じ結果を出すことをテストで固定する（違いが出たら P3 は parse.js ではなく表を疑い、止めて報告。約束のとおり）。この計画は line-secretary を触らない。
 
 **本番に出す順番：** P1 → P4 → P3 → P2（この計画は最後）。P2 のデプロイは、ほかの3つの本番確認が済んでから。環境変数は一番最後（下村さんの承認後）。詳しくは末尾の「本番に出す手順（ロールアウト）」。
 
@@ -34,7 +34,7 @@
 - 返事は reply → LINE が 400 番台で断ったときだけ push。結果不明なら送り直さない
 - 受付の返事・確かめ中の返事・確かめられない返事は依頼1つにつき1回：`obi-accepted-notified:<lineMessageId>`・`obi-pending-notified:<lineMessageId>`・`obi-unconfirmed-notified:<lineMessageId>` を NX（期限24時間）で置けたときだけ送る。**NX の直後に落ちるとその1通は出ない（受け入れる。二重にはしない）**。受付の確定の後に NX が例外（KV の障害）なら、返事は出さず再送もさせない
 - 返事に入れるファイル名・物件名は、改行・制御文字を取り、40文字まで
-- portal への本文は約束どおり：`workflow=obi`・`lineMessageId`・`property`（1〜100文字）・`requestText`（〜1000文字）・`requestedBy`（〜60文字）・`replyKind=line-group`・`replyGroupId`・`files`（出た順）。鍵はヘッダ `x-job-token`。**`assigneeName` は送らない**（約束：intake は受け付けない。依頼文の「担当:」は読んでも捨てる）
+- portal への本文は約束どおり：`workflow=obi`・`lineMessageId`・`property`（トリム後 1〜100 UTF-16 コードユニット＝`String.length`）・`requestText`（トリム後 〜1000 UTF-16 コードユニット。空でもよい）・`requestedBy`（〜60文字）・`replyKind=line-group`・`replyGroupId`・`files`（出た順）。鍵はヘッダ `x-job-token`。**`assigneeName` は送らない**（約束：intake は受け付けない。依頼文の「担当:」は読んでも捨てる）
 - 環境変数の追加（`PORTAL_BASE_URL`・`JOB_API_TOKEN`・`JOB_ALLOWED_USER_IDS`）は**下村さんの承認後**、値を画面に出さない方法で Vercel に入れる。この計画では値を書かない・設定しない
 - `git push`・デプロイはしない（する前に下村さんに確認）
 - テストの実行で `| tail` などのパイプを付けない（終了コードが隠れる）。付けるなら `set -o pipefail;` を先に置く
@@ -330,6 +330,15 @@ export function parseJobCommand(text: string | null | undefined): JobCommand | n
 ```
   Run: `npm test` → Expected: 最後が `🎉 全て通過`
 
+- [ ] **Step 6の2: 共通の表のバイトを P3 のスナップショットと比べる**
+
+  論理的な正本は P2 計画のコミット 1fd4def に固定された JSON。P3 が先にそのスナップショットを line-secretary に作り、P2 の実装は同じバイトを再現する（sha256 b30b3f1c…e7d98fa を両方で比べる）。P3 の実装が済んでいれば、line-secretary 側と並べて比べる：
+```bash
+shasum -a 256 tests/fixtures/job-command-cases.json
+shasum -a 256 /Users/shimo/AI開発/apps/line-secretary/test/fixtures/job-command-cases.json
+```
+  Expected: どちらも `b30b3f1c…e7d98fa`（先頭8桁・末尾7桁が一致。全桁は P3 計画 Task 5 の記載）。違う場合は parse.ts も表も直さず、止めて報告する。P3 がまだ無い（line-secretary 側のファイルが無い）なら、自分側だけ `b30b3f1c…e7d98fa` と一致することを確かめ、比較は「未実施」と最終報告に書く。
+
 - [ ] **Step 7: コミット**
 
 ```bash
@@ -362,7 +371,9 @@ EOF
 // sanitize.ts
 export function sanitizeForReply(s: string, max?: number /* 既定 40 */): string;
 export function sanitizeUploadName(name: string): string; // 100文字まで・末尾 .pdf
-export function propertyFor(parsedProperty: string, firstFileName: string): string; // 1〜100文字
+export function cutUtf16(s: string, max: number): string; // String.length（UTF-16）で max 以内。サロゲートペアを割らない
+export function propertyFor(parsedProperty: string, firstFileName: string): string; // 1〜100 UTF-16 コードユニット（P1 と同じ数え方）
+export function requestTextFor(s: string): string; // トリム後 1000 UTF-16 コードユニットまで
 // config.ts
 export interface ObiConfig { groupId: string; allowedUserIds: string[]; portalBaseUrl: string; jobApiToken: string }
 export type ObiEnv = Record<string, string | undefined>;
@@ -398,7 +409,7 @@ import {
   shouldRecordObiPdf,
   type ObiEnv,
 } from "../src/lib/obi/config";
-import { sanitizeForReply, sanitizeUploadName, propertyFor } from "../src/lib/obi/sanitize";
+import { sanitizeForReply, sanitizeUploadName, propertyFor, requestTextFor, cutUtf16 } from "../src/lib/obi/sanitize";
 
 let fail = 0;
 const ok = (name: string, cond: boolean, d = "") => {
@@ -499,6 +510,33 @@ const req = (over: Partial<Parameters<typeof classifyObiEntry>[0]> = {}) => ({
   ok("どちらも空なら「帯替え」", propertyFor("", ".pdf") === "帯替え");
 }
 
+// ── P1 と同じ数え方（String.length＝UTF-16 コードユニット）の境目。絵文字は2ユニット ──
+{
+  const E = "😀"; // length 2
+  const noLone = (s: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s);
+  ok("前提：絵文字は2ユニット", E.length === 2 && Array.from(E).length === 1);
+  // property：P1 は trim 後の length が 1〜100
+  const p100 = "a".repeat(98) + E; // ちょうど100ユニット
+  ok("物件名 100ユニットはそのまま", propertyFor(p100, "x.pdf") === p100 && propertyFor(p100, "x.pdf").length === 100);
+  const p101 = "a".repeat(99) + E; // 101ユニット：絵文字を割らない
+  const r101 = propertyFor(p101, "x.pdf");
+  ok("物件名 101ユニットは100以内に切り、絵文字を割らない", r101.length <= 100 && noLone(r101) && r101 === "a".repeat(99) + "…", `${r101.length}`);
+  const pMany = E.repeat(51); // 102ユニット
+  const rMany = propertyFor(pMany, "x.pdf");
+  ok("絵文字だけの102ユニットも100以内・割らない", rMany.length <= 100 && noLone(rMany), `${rMany.length}`);
+  ok("物件名の前後の空白は数えない（トリム後で数える）", propertyFor("  " + p100 + "  ", "x.pdf") === p100);
+  // requestText：P1 は trim 後の length が 1000 以下（空はよい）
+  const t1000 = "a".repeat(998) + E;
+  ok("依頼文 1000ユニットはそのまま", requestTextFor(t1000) === t1000 && requestTextFor(t1000).length === 1000);
+  const t1001 = "a".repeat(999) + E;
+  const rt = requestTextFor(t1001);
+  ok("依頼文 1001ユニットは1000以内に切り、絵文字を割らない", rt.length <= 1000 && noLone(rt) && rt === "a".repeat(999), `${rt.length}`);
+  const tMany = E.repeat(501); // 1002ユニット
+  ok("絵文字だけの1002ユニットは500個（1000ユニット）", requestTextFor(tMany) === E.repeat(500));
+  ok("依頼文は空でもよい", requestTextFor("   ") === "" && requestTextFor(undefined as unknown as string) === "");
+  ok("cutUtf16 は割れる位置で1つ手前に切る", cutUtf16("ab" + E, 3) === "ab" && cutUtf16("ab" + E, 4) === "ab" + E);
+}
+
 console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
 process.exit(fail ? 1 : 0);
 ```
@@ -553,15 +591,51 @@ export function sanitizeUploadName(name: string): string {
 }
 
 /**
- * portal に送る物件名（必須・1〜100文字）。
+ * String.length（UTF-16 コードユニット）で max 以内に切る。サロゲートペアの途中で切れそうなら1つ手前で切る。
+ * portal（P1）は property・requestText を String.length で数えて検査するので、こちらも同じ数え方にそろえる。
+ * 末尾に残った対にならない上位サロゲートも落とす。
+ */
+export function cutUtf16(s: string, max: number): string {
+  let end = Math.min(s.length, Math.max(0, max));
+  if (end > 0) {
+    const c = s.charCodeAt(end - 1);
+    if (c >= 0xd800 && c <= 0xdbff) end -= 1; // 上位サロゲートで終わる＝対を割る（または対の相手が無い）
+  }
+  return s.slice(0, end);
+}
+
+/** 改行・制御文字・幅のない文字を除いた1項目（長さは切らない） */
+function flatten(s: string): string {
+  return String(s ?? "")
+    .replace(INVISIBLE_RE, "")
+    .replace(/\r\n|\r|\n/g, " ")
+    .replace(CONTROL_RE, "")
+    .replace(/ {2,}/g, " ")
+    .trim();
+}
+
+/** portal の property 用：トリム後 max ユニット以内（超えたら max-1 ユニットで切って … を付ける） */
+function fitForPortal(s: string, max: number): string {
+  const flat = flatten(s);
+  if (flat.length <= max) return cutUtf16(flat, max).trim();
+  return cutUtf16(flat, max - 1).trimEnd() + "…";
+}
+
+/**
+ * portal に送る物件名（必須・トリム後 1〜100 UTF-16 コードユニット。P1 の検査と同じ）。
  * 依頼文に物件名が無い（「帯替えお願いします」だけ）ときは、最初の PDF の名前（.pdf を除く）を使う。
  * それも空なら「帯替え」。
  */
 export function propertyFor(parsedProperty: string, firstFileName: string): string {
-  const p = sanitizeForReply(parsedProperty, 100);
+  const p = fitForPortal(parsedProperty, 100);
   if (p) return p;
-  const base = sanitizeForReply(String(firstFileName ?? "").replace(/\.pdf$/i, ""), 100);
+  const base = fitForPortal(String(firstFileName ?? "").replace(/\.pdf$/i, ""), 100);
   return base || "帯替え";
+}
+
+/** portal に送る依頼文（トリム後 〜1000 UTF-16 コードユニット。空でもよい。P1 の検査と同じ数え方） */
+export function requestTextFor(s: string): string {
+  return cutUtf16(String(s ?? "").trim(), 1000).trim();
 }
 ```
 
@@ -2353,6 +2427,16 @@ async function main() {
     ok("物件名が空なら最初の PDF の名前", w.portalForms[0].get("property") === "図面A" && w.replies[0].includes("物件：図面A／PDF：図面A.pdf）"), w.replies[0]);
   }
 
+  // ── portal に送る依頼文は UTF-16 の1000ユニットまで（絵文字を割らない） ──
+  {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = [accept(15)];
+    await run(w, { requestText: "a".repeat(999) + "😀" });
+    const rt = String(w.portalForms[0].get("requestText"));
+    ok("依頼文は1000ユニット以内に切って送る（絵文字は割らない）", rt === "a".repeat(999), String(rt.length));
+  }
+
   // ── 返事に入れる名前は整える（改行を除き40文字まで） ──
   {
     const w = world();
@@ -2708,7 +2792,7 @@ import {
 } from "./memo";
 import { dedupeBySha256, fetchObiPdfs } from "./fetch-pdfs";
 import { inputsMatch, postIntake, type IntakeOutcome, type IntakeRequest } from "./portal";
-import { propertyFor, sanitizeForReply } from "./sanitize";
+import { propertyFor, requestTextFor, sanitizeForReply } from "./sanitize";
 
 export const OBI_DEADLINE_MS = 55_000;
 const LINE_FETCH_TOTAL_MS = 30_000;
@@ -2716,7 +2800,6 @@ const PORTAL_RESERVE_MS = 10_000; // 取り出しの段階で portal のため�
 const PORTAL_CALL_MS = 20_000;
 const PORTAL_MIN_MS = 5_000; // これより短い残り時間では portal を呼ばない（呼び直さない）
 const MAX_PORTAL_ATTEMPTS = 2; // 最初の1回＋呼び直し1回
-const REQUEST_TEXT_MAX = 1000;
 const REQUESTED_BY = "LINEグループ（営業部）";
 
 export const OBI_MESSAGES = {
@@ -2847,7 +2930,7 @@ export async function runObiIntake(
   const request: IntakeRequest = {
     lineMessageId: input.requestMessageId,
     property,
-    requestText: Array.from(input.requestText).slice(0, REQUEST_TEXT_MAX).join(""),
+    requestText: requestTextFor(input.requestText), // UTF-16 の1000ユニットまで（P1 と同じ数え方）
     requestedBy: REQUESTED_BY,
     replyGroupId: input.config.groupId,
     files: files.map((f) => ({ fileName: f.fileName, bytes: f.bytes })),
@@ -3830,7 +3913,6 @@ EOF
 
 - [ ] **Step 4: 最終報告に下の「本番に出す手順（ロールアウト）」をそのまま載せる（Claude は実行しない）**
 
-  あわせて Obsidian の進行ログ（`~/AI開発/tools/notebooklm-obsidian/vault/20_research/2026-08-08_AI秘書_集約と完了機能_進行ログ.md`）に、この変更と判断（下の「判断した所」）を追記する。
 
 ---
 
@@ -3845,10 +3927,16 @@ EOF
    - Vercel の `aisecretary` で関数の Max Duration に **60 秒**を指定できること（Task 1 Step 1 の結果。できなければデプロイしない）
    - LINE Developers のチャネル「MD NEXT秘書」の **Webhook の再送**が有効か（Task 1 Step 2 の結果。無効でも出せるが、結果不明・一覧の不一致のときは再送が来ず、Discord・portal で確かめることになる）
    - Vercel の `aisecretary` に `LINE_GROUP_ID` が営業部の groupId で入っていること（値は画面に出さずに確かめる。入っていなければ帯替えは何もしない）
-5. **P2 のコードのデプロイ**：P1・P4・P3 の本番確認が済んでから、下村さんの承認を得て `feat/group-obi` を本番の流れ（`integration/email-and-media` 側）へ取り込み、Vercel にデプロイする。この時点では `PORTAL_BASE_URL`・`JOB_API_TOKEN`・`JOB_ALLOWED_USER_IDS` が無いので、帯替えは営業部の依頼にだけ「止めています」と返し、PDF も控えない。今までの機能（タスク・メール・画像・ファイル）が今どおり動くことを確かめる
-6. **環境変数（一番最後・下村さんの承認後）**：`PORTAL_BASE_URL`・`JOB_API_TOKEN`・`JOB_ALLOWED_USER_IDS`（下村さんの userId だけ）を、値を画面に出さない方法で Vercel の `aisecretary`（Production）に入れ、再デプロイする
-7. **実地の確認**：本番の営業部のグループで、テスト用の図面（実在のお客様の資料は使わない）を1件貼り、下村さんが「@MD NEXT秘書 帯替え テスト」と送る → 「#J○ 受付しました」→ 完成リンクがグループに出る → 別の社員がリンクを開ける、まで確かめる
-8. **戻し方**：おかしければ `JOB_ALLOWED_USER_IDS` を外して再デプロイする（営業部の依頼には「止めています」だけが返り、portal は呼ばれない）。コードを戻すのは下村さんの承認後
+5. **P4 の段階 (c) の完了（P2 のデプロイ・有効化の前提。必須）**：`2026-10-09-group-obi-p4-viewer.md` の「段階 c：P3 の deploy の後、P2 を有効にする前」を、P3 の本番反映の後に終えていること（P3 の計画 Task 6 の「グループあてリンクの確認は P4 の段階 c」と同じ）。具体的には、管理者側で `aud: "line-group"`（`g` = 営業部）の**試験リンク**を1本だけ発行し、(i) 名簿に載っていない営業部グループの在籍者が開ける (ii) 在籍していない人は開けない (iii) 4,000,000 バイトを超える図面でも開ける、を確かめ、(iv) 試験リンクを管理者側の失効（revoke）で止めたこと。1つでも満たさなければ P2 のデプロイにも環境変数にも進まない
+6. **共通の表の同一性**：aisecretary の `tests/fixtures/job-command-cases.json` と line-secretary の `test/fixtures/job-command-cases.json` の `shasum -a 256` が、どちらも `b30b3f1c…e7d98fa`（論理的な正本は P2 計画のコミット 1fd4def に固定された JSON）であること。違うなら有効化しない
+7. **P2 のコードのデプロイ**：P1・P4（段階 c まで）・P3 の本番確認が済んでから、下村さんの承認を得て `feat/group-obi` を本番の流れ（`integration/email-and-media` 側）へ取り込み、Vercel にデプロイする。この時点では `PORTAL_BASE_URL`・`JOB_API_TOKEN`・`JOB_ALLOWED_USER_IDS` が無いので、帯替えは営業部の依頼にだけ「止めています」と返し、PDF も控えない。今までの機能（タスク・メール・画像・ファイル）が今どおり動くことを確かめる
+8. **環境変数（一番最後・下村さんの承認後）**：`PORTAL_BASE_URL`・`JOB_API_TOKEN`・`JOB_ALLOWED_USER_IDS`（下村さんの userId だけ）を、値を画面に出さない方法で Vercel の `aisecretary`（Production）に入れ、再デプロイする
+9. **実地の確認**：本番の営業部のグループで、テスト用の図面（実在のお客様の資料は使わない）を1件貼り、下村さんが「@MD NEXT秘書 帯替え テスト」と送る → 「#J○ 受付しました」→ 完成リンクがグループに出る → 別の社員がリンクを開ける、まで確かめる
+10. **戻し方**：おかしければ `JOB_ALLOWED_USER_IDS` を外して再デプロイする（営業部の依頼には「止めています」だけが返り、portal は呼ばれない）。コードを戻すのは下村さんの承認後
+
+---
+
+**後作業（P2 の完了条件ではない）：** Obsidian の進行ログへの追記は別作業（コントローラーが行う）・P2 の完了条件ではない。
 
 ---
 
@@ -3857,6 +3945,7 @@ EOF
 | 所 | 判断 |
 |---|---|
 | 設計 8 の「メンションがあり」 | @MD NEXT秘書 へのメンション（`mentionsBot`）。社員へのメンションだけでは帯替えにしない |
+| 長さの数え方 | P1 は `String.length`（UTF-16 コードユニット）で property ≤100・requestText ≤1000（トリム後。property は空不可・requestText は空可）を検査するので、P2 も同じ数え方で切る。絵文字（2ユニット）の対を割らない。依頼文の読み取り `parse.ts` の `slice(0, 100)` は共通の表（line-secretary の `parse.js` と同じ結果）を守るため変えず、`propertyFor` が最後に整える |
 | 物件名の無い依頼 | portal の `property` は必須なので、最初の PDF の名前（.pdf を除く）。それも空なら「帯替え」 |
 | `requestedBy` | 「LINEグループ（営業部）」（人の名前は書かない。許可リストの人だけが依頼できる） |
 | `LINE_GROUP_ID` が無い・不正 | 帯替えは何もしない（どのグループでも返事・控えなし）。営業部がどこか分からないため（裁定 2026-10-09） |

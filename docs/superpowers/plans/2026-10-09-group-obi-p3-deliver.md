@@ -1360,10 +1360,10 @@ COMMIT
 - 変えない：`src/jobs/parse.js`、`test/jobs-parse.test.js`
 
 **Interfaces:**
-- Consumes: 既存の `src/jobs/parse.js` の `parseJobCommand`。表の正本は、この計画の Step 3 に埋め込んだ JSON（P2 の最終版〔コミット `1fd4def`、`2026-10-09-group-obi-p2-aisecretary.md` の Task 2 Step 1〕から取り出した全文・35件）。動く文書（P2 の計画）には依存しない
+- Consumes: 既存の `src/jobs/parse.js` の `parseJobCommand`。表について、論理的な正本は P2 計画のコミット 1fd4def に固定された JSON。P3 が先にそのスナップショットを line-secretary に作り、P2 の実装は同じバイトを再現する（sha256 b30b3f1c…e7d98fa を両方で比べる）。この計画の Step 3 に埋め込んだ JSON が、そのスナップショット（P2 の最終版〔コミット `1fd4def`、`2026-10-09-group-obi-p2-aisecretary.md` の Task 2 Step 1〕から取り出した全文・35件）。動く文書（P2 の計画）には依存しない
 - Produces: line-secretary の `test/fixtures/job-command-cases.json`（P2 が aisecretary に作る同名のファイルと同じ中身）と、全件の照合テスト
 
-**注意（正本と同一性）：** 実装の順番は P1 → P3 → P4 → P2 なので、P3 の時点では aisecretary 側のファイルは無い。P3 は **Step 3 の JSON をそのまま**（1文字も変えず、末尾の改行1つを含めて）ファイルにする。後で P2 の実装者が作る `tests/fixtures/job-command-cases.json` は、これと**バイト単位で同一**でなければならない。同一性は両方の sha256 の比較で確かめる（Task 6 の「引き継ぎ」と P2 の最終確認）。違いが出たら `parse.js` も表も直さず、止めて報告する。
+**注意（正本と同一性）：** 論理的な正本は P2 計画のコミット 1fd4def に固定された JSON。P3 が先にそのスナップショットを line-secretary に作り、P2 の実装は同じバイトを再現する（sha256 b30b3f1c…e7d98fa を両方で比べる）。実装の順番は P1 → P3 → P4 → P2 なので、P3 の時点では aisecretary 側のファイルは無い。P3 は **Step 3 の JSON をそのまま**（1文字も変えず、末尾の改行1つを含めて）ファイルにする。後で P2 の実装者が作る `tests/fixtures/job-command-cases.json` は、これと**バイト単位で同一**でなければならない。同一性は両方の sha256 の比較で確かめる（Task 6 の「引き継ぎ」と P2 の最終確認）。違いが出たら `parse.js` も表も直さず、止めて報告する。
 
 - [ ] **Step 1: 失敗するテストを書く**（`test/jobs-parse-shared.test.js`）
 
