@@ -5,6 +5,8 @@ import {
   buildTaskRegisteredMessage,
   pushLineMessage,
   pushLineMessageWithMentions,
+  replyLineMessageDetailed,
+  pushLineMessageDetailed,
 } from "@/lib/line";
 import {
   parseTaskFromMessage,
@@ -94,6 +96,12 @@ import {
   appendTaskNote,
   jstDateStr,
 } from "@/lib/notion";
+import { dispatchObiEvents, type ObiEventDeps } from "@/lib/obi/webhook-event";
+import { getObiStore } from "@/lib/obi/memo";
+
+// 帯替えの受付（LINE からの PDF の取り出し＋portal への送信）を1回の処理で終えるため60秒まで延ばす。
+// 受付の締め切り（開始から55秒）はこれより短くしてある（src/lib/obi/intake.ts）。
+export const maxDuration = 60;
 
 // 「これはタスクじゃない／取り消したい」意図の判定
 const CANCEL_PHRASES = [
@@ -198,6 +206,7 @@ interface LineMessage {
   type: string;
   text: string;
   fileName?: string; // ファイルメッセージのファイル名（type === "file"）
+  fileSize?: number; // ファイルメッセージの大きさ（バイト。type === "file"）
   quotedMessageId?: string; // 引用リプライのとき、引用元メッセージのID
   mention?: {
     mentionees: LineMentionee[];
@@ -206,6 +215,7 @@ interface LineMessage {
 
 interface LineWebhookEvent {
   type: string;
+  timestamp?: number; // イベントの時刻（ms）。帯替えの PDF の選び方に使う（無ければ帯替えは扱わない）
   replyToken?: string;
   source: { userId: string; type: string; groupId?: string };
   message?: LineMessage;
@@ -551,7 +561,26 @@ async function registerCustomer(text: string, replyToken: string): Promise<void>
   }
 }
 
+// 帯替えの振り分け（src/lib/obi/webhook-event.ts）に渡す本物の部品
+function obiEventDeps(startedAt: number): ObiEventDeps {
+  return {
+    env: process.env,
+    botUserId: BOT_USER_ID,
+    startedAt,
+    store: getObiStore(),
+    events: { reserve: reserveEvent, complete: completeEvent, release: releaseEvent },
+    fetchImpl: fetch,
+    lineToken: process.env.LINE_CHANNEL_ACCESS_TOKEN ?? "",
+    now: Date.now,
+    // 時間の上限は振り分け側が渡す（5秒。replyLineMessageDetailed の既定 8 秒は使わない）
+    reply: (replyToken, text, timeoutMs) => replyLineMessageDetailed(replyToken, text, timeoutMs),
+    push: (to, text, timeoutMs) => pushLineMessageDetailed(to, text, timeoutMs),
+  };
+}
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // 帯替えの受付の締め切りは、この時刻から数える
+  const startedAt = Date.now();
   const rawBody = await req.text();
   const signature = req.headers.get("x-line-signature") ?? "";
 
@@ -561,12 +590,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const body: LineWebhookBody = JSON.parse(rawBody);
 
+  // ⓪ 帯替え（設計 2026-10-09）。営業部の PDF を控え、帯替えの依頼はここで最後まで扱う。
+  //    依頼は今までの流れ（メールの下書き・初動確認・タスク等）には渡さない（設計 8）。
+  //    それ以外のイベントは元の順番のまま obi.rest に入り、下の今までのループで扱う。
+  const obi = await dispatchObiEvents(body.events, obiEventDeps(startedAt));
+
   // 処理を完了できなかったイベントがあれば非2xxを返してLINEに再送させる。
   // 200で返すとLINEは再送をやめるため、処理中の側が落ちていた場合に
   // 誰も引き継がず依頼が永久に消える。
-  let needsRetry: boolean = false;
+  // 帯替えの結果不明・一覧の不一致・控えの失敗も、ここから 503 になる。
+  let needsRetry: boolean = obi.needsRetry;
 
-  for (const event of body.events) {
+  for (const event of obi.rest) {
     if (event.type !== "message" || !event.message) continue;
 
     // イベント単位で予約する。バッチ内の1件が再送を要求すると LINE は
