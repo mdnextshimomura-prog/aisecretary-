@@ -22,9 +22,11 @@
 - 宛先は2つ：グループ（`replyKind==='line-group'` のとき）と秘書室（いつも）（設計書 17）
 - 宛先ごとに `未着手 → 送信中 → 送信済み／はっきり失敗／結果不明` を台帳に残す。送る前に「送信中」を保存し、途中で止まって再開したときに「送信中」のままなら「結果不明」にして送り直さない（17）
 - 宛先の状態の記録は、portal の完成品の保管期間（7日）を過ぎたら、既存の台帳の整理と一緒に消す（17）
-- 宛先の状態は「受付番号＋完成品の sha256＋宛先」で残し、納品の予約（claim）をやり直しても引き継ぐ。同じ完成品について、送信済み・結果不明の宛先には二度と送らない。完成品が作り直されて sha256 が変わったときだけ、新しく送る（17）
-- 送る順番：グループ → 秘書室。グループへは `replyGroupId` が `宛先.json` の「営業部」の ID と完全一致したときだけ送る（一致しなければ送らず「はっきり失敗」）（17）
-- portal への納品結果は今どおり秘書室の送信で決める（秘書室が送信済み＝delivered）。秘書室の控えの文には、グループへの状態を書く：「グループにも送りました」／「グループに送れませんでした」／「グループへの送信結果が分かりません（確かめてください）」（17）
+- 宛先の状態は「受付番号＋完成品の sha256＋宛先」で残し、納品の予約（claim）をやり直しても引き継ぐ。**同じ完成品（同じ sha256）について、送信済み（sent）・結果不明（unknown）の宛先には、グループにも秘書室にも二度と送らない。** 人が portal で「もう一度納品」しても同じで、秘書室へ再送しない（既に分かっている結果を portal に報告し直すだけ。unknown は unknown のまま）。完成品が作り直されて sha256 が変わったときだけ、新しく送る（17）。「はっきり失敗（failed）」の宛先だけは、予約をやり直したときにもう一度試す
+- 送る順番：グループ → 秘書室。グループへは `replyKind === 'line-group'` で、`replyGroupId` が `宛先.json` の「営業部」の ID と完全一致したときだけ送る（line-group なのに一致しなければ送らず「はっきり失敗」）（17）
+- `replyKind` が `secretary` でも `line-group` でもない値（不明な値）のときは、グループの状態を一切作らず、グループには送らない。秘書室の控えの文に「返事先が不明のためグループには送っていません」と書く
+- 実装の順番は P1 → P3 → P4 → P2（契約書どおり）。P4 の作業ブランチはこの計画のブランチ `feature/group-obi-deliver` から作るので、Task 1 の互換ベクトル `test/fixtures/dtoken-vector-group.json` は P4 から使える。**P4 がこのブランチから分かれた後は、このブランチを rebase・書き換えしない**。本番に出す順番は P1 → P4 → P3 → P2（Task 6）
+- portal への納品結果は今どおり秘書室の送信で決める（秘書室が送信済み＝delivered）。秘書室の控えの文には、グループへの状態を書く：「グループにも送りました」／「グループに送れませんでした」／「グループへの送信結果が分かりません（確かめてください）」（17）。返事先が不明な値のときは「返事先が不明のためグループには送っていません」
 - グループの文（流れ 4）：「#J12 帯替えが完成しました（物件名）＋リンク＋要確認のページ数」
 - 配布トークンの印（18・約束）：グループあてのときだけ payload に `aud: "line-group"` と `g: "<groupId>"`（`^C[0-9a-f]{32}$`）。秘書室あてには付けない。`issue` の引数は `{ shelfId, driveFileId, sha256, ttlSec, now, aud?, g? }`。`aud` と `g` は両方そろえて渡すか、両方渡さないか
 - claim 応答（約束）：`replyKind`（`'secretary' | 'line-group'`）・`replyGroupId`（`line-group` のときだけ groupId）。項目の無い今までの Job・portal は `secretary` 扱い
@@ -32,9 +34,10 @@
 - 「送れたか分からない」送信は送り直さない（`isDefinitelyNotSent`＝応答のある 4xx だけが「はっきり失敗」）
 - ログには依頼番号・code・段階名だけを出す（物件名・リンク・本文・groupId は出さない）（`src/jobs/deliver.js:7` の約束）
 - 環境変数の追加なし（営業部の ID は既存の `config.DOC_REPLY.toId` と `tools/line-send/宛先.json` を使う）。`.env`・`宛先.json`・トークンの値は開かない・表示しない
-- `parse.js` と共通の依頼テスト用データ（JSON）には触らない（P2 の持ち物。後で line-secretary 側にも置くのは別作業）
+- `src/jobs/parse.js` は変えない。共通の依頼テスト用データ（`job-command-cases.json`）は P2 の持ち物だが、P3 は P2 より先に実装するので、**P2 の計画に書いてある JSON をそのまま取り出して** line-secretary の `test/fixtures/` に置き、`parse.js` が全件同じ結果を出すことをテストで固定する（Task 5）。違いが出たら `parse.js` も表も直さず、止めて報告する
+- テストのコマンドに `| tail` などのパイプを付けない（終了コードが消える）。付けるなら先頭に `set -o pipefail;`
 - コミット：`type(scope): 日本語`（このリポジトリの書き方。例 `feat(jobs): …`）で、最後の行に `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
-- 本番への取り込み（`feature/v1` への `git merge --ff-only`）と `git push` は下村さんの承認後（Task 5）
+- 本番への取り込み（`feature/v1` への `git merge --ff-only`）は、P4 が本番に出て確かめられた後、下村さんの承認後（Task 6）。`git push` は別に確認を取る
 
 ---
 
@@ -48,7 +51,9 @@
 | `src/jobs/ledger.js` | 納品台帳 `state/job-deliveries.json` | `dests`（宛先ごとの状態）と `destKey`・`getDest`・`setDest`、7日の prune（Task 2） |
 | `test/jobs-ledger.test.js` | 同上のテスト | `dests` のテスト（Task 2） |
 | `src/jobs/deliver.js` | 納品の巡回 | claim の返事先の記録、グループへの送信、秘書室の宛先状態、控えの文（Task 3・4） |
-| `test/jobs-deliver.test.js` | 同上のテスト | 偽物に lineapp・`DOC_REPLY`・claim の返事先を足し、グループの各場面・途中で止まる場面のテスト（Task 3・4） |
+| `test/jobs-deliver.test.js` | 同上のテスト | 偽物に lineapp・`DOC_REPLY`・claim の返事先を足し、グループの各場面・途中で止まる場面のテスト、再納品でも送り直さないテスト（Task 3・4。既存3件を更新） |
+| `test/fixtures/job-command-cases.json` | 依頼文の読み取りの共通表（P2 の計画の JSON から生成。aisecretary と同じ中身） | 新規（Task 5） |
+| `test/jobs-parse-shared.test.js` | `parse.js` が共通表の全件で同じ結果を出すテスト | 新規（Task 5） |
 
 `src/poll.js` は変えない（`deliver.run` は `opts.lineapp` が無ければ `require("../lineapp.js")` を使い、`config` は今も `d.jobsConfig`＝`src/config.js` 全体を渡しているので `DOC_REPLY` が届く。`src/poll.js:409-413`）。
 
@@ -443,7 +448,7 @@ EOF
 
 **Interfaces:**
 - Consumes: Task 1 の `dtoken.issue({ …, aud: "line-group", g })`。Task 2 の `ledger.getDest(state, no, sha256, "group")`・`ledger.setDest(state, no, sha256, "group", value, nowMs)`。`src/lineapp.js:47` の `pushText({ alias, text, expectId })`（送る相手が `expectId` と違えば `status: 400`・`code: "destination-mismatch"` で投げる。HTTP の失敗は `err.status`）。`config.DOC_REPLY.toAlias`（`"営業部"`）・`config.DOC_REPLY.toId`（`src/config.js:86-87`）。P1 の claim 応答の `replyKind`・`replyGroupId`
-- Produces: `deliver.run(opts)` が `opts.lineapp`（既定 `require("../lineapp.js")`）を受け取る。台帳の active の行に `replyKind`（文字列。項目なしは `"secretary"`）・`replyGroupId`（文字列か null）。`deliveryText(entry, link, ttlSec, groupState?)`（`groupState` が `"sent" | "failed" | "unknown"` のとき最後の行に状態を足す）。`groupText(entry, link, ttlSec)`。ログに新しく `group-sent`・`group-failed`・`group-unknown`・`group-mismatch`・`group-issue-failed`・`group-sending-interrupted`
+- Produces: `deliver.run(opts)` が `opts.lineapp`（既定 `require("../lineapp.js")`）を受け取る。台帳の active の行に `replyKind`（文字列。項目なしは `"secretary"`）・`replyGroupId`（文字列か null）。`deliveryText(entry, link, ttlSec, groupState?)`（`groupState` が `"sent" | "failed" | "unknown" | "noreply"` のとき最後の行に状態を足す。`noreply`＝返事先が不明な値）。`groupText(entry, link, ttlSec)`。ログに新しく `group-sent`・`group-failed`・`group-unknown`・`group-mismatch`・`reply-unknown`・`group-issue-failed`・`group-sending-interrupted`
 
 - [ ] **Step 1: テストの偽物を広げる**（既存のテストの結果は変えない）
 
@@ -566,6 +571,7 @@ const GROUP = { replyKind: "line-group", replyGroupId: GID };
 const LINE_SENT = "グループにも送りました";
 const LINE_FAILED = "グループに送れませんでした";
 const LINE_UNKNOWN = "グループへの送信結果が分かりません（確かめてください）";
+const LINE_NOREPLY = "返事先が不明のためグループには送っていません";
 const lastLine = (text) => text.split("\n").at(-1);
 const destOf = (s, no, dest) => ledger.getDest(s.ledger(), no, s.portal.jobs.get(no).artifactSha256, dest);
 
@@ -628,12 +634,11 @@ test("deliver(group): グループと秘書室の結果の組み合わせ（port
   }
 });
 
-test("deliver(group): replyGroupId が営業部の ID と違う・形が違う・無い・replyKind が不明なら、グループには送らず「はっきり失敗」", async () => {
+test("deliver(group): line-group なのに replyGroupId が営業部の ID と違う・形が違う・無いなら、グループには送らず「はっきり失敗」", async () => {
   const cases = [
     { replyKind: "line-group", replyGroupId: "C" + "f".repeat(32) },
     { replyKind: "line-group", replyGroupId: "C" + "0123456789ABCDEF".repeat(2) },
     { replyKind: "line-group", replyGroupId: null },
-    { replyKind: "something", replyGroupId: GID },
   ];
   for (const [i, extra] of cases.entries()) {
     const label = JSON.stringify(extra);
@@ -645,6 +650,27 @@ test("deliver(group): replyGroupId が営業部の ID と違う・形が違う�
     assert.equal(destOf(s, 12, "group"), "failed", label);
     assert.equal(lastLine(s.sent[0]), LINE_FAILED, label);
     assert.equal(s.portal.calls.reportResult[0].outcome, "delivered", label);
+  }
+});
+
+test("deliver(group): replyKind が不明な値なら、グループの状態を一切作らず送らず、秘書室の控えに「返事先が不明」と書く", async () => {
+  const cases = [
+    { replyKind: "something", replyGroupId: GID },
+    { replyKind: "something", replyGroupId: null },
+    { replyKind: 5, replyGroupId: GID },
+  ];
+  for (const [i, extra] of cases.entries()) {
+    const label = JSON.stringify(extra);
+    const s = setup(`group-reply-unknown-${i}`);
+    s.portal.add(12, extra);
+    await s.run();
+    assert.equal(s.pushStat.calls, 0, label);
+    assert.equal(s.issued.length, 1, `グループのリンクは作らない ${label}`);
+    assert.equal(destOf(s, 12, "group"), null, label);
+    assert.deepEqual(Object.keys(s.ledger().dests).filter((k) => k.endsWith(":group")), [], `グループの状態を作らない ${label}`);
+    assert.equal(lastLine(s.sent[0]), LINE_NOREPLY, label);
+    assert.equal(s.portal.calls.reportResult[0].outcome, "delivered", label);
+    assert.ok(s.logLines.includes("warn job-deliver #J12 reply-unknown"), label);
   }
 });
 
@@ -799,6 +825,8 @@ const GROUP_STATUS_LINES = {
   sent: "グループにも送りました",
   failed: "グループに送れませんでした",
   unknown: "グループへの送信結果が分かりません（確かめてください）",
+  // replyKind が不明な値のとき（グループの状態は作らない）
+  noreply: "返事先が不明のためグループには送っていません",
 };
 ```
 
@@ -826,7 +854,7 @@ function groupText(entry, link, ttlSec) {
 }
 
 // claim の応答の返事先を台帳の行の形にする。項目が無い（今までの portal・Job）は秘書室だけ。
-// 中身の検査（line-group＋営業部の groupId）はグループへ送る直前に行い、合わなければ「はっきり失敗」にする
+// 中身の検査（line-group＋営業部の groupId）はグループへ送る直前に行い、line-group なのに合わなければ「はっきり失敗」にする。line-group でも secretary でもない値は replyUnknown で別に扱う
 function replyFields(b) {
   let replyKind = "secretary";
   if (b.replyKind != null) replyKind = typeof b.replyKind === "string" ? b.replyKind.slice(0, 40) : "invalid";
@@ -834,9 +862,15 @@ function replyFields(b) {
   return { replyKind, replyGroupId };
 }
 
-// グループにも送る件か。replyKind の無い今までの台帳の行・secretary は秘書室だけ
+// グループにも送る件か。line-group のときだけ。replyKind の無い今までの台帳の行・secretary・不明な値は送らない
 function wantsGroup(entry) {
-  return entry.replyKind != null && entry.replyKind !== "secretary";
+  return entry.replyKind === "line-group";
+}
+
+// replyKind が secretary でも line-group でもない不明な値か（無い今までの台帳の行は secretary 扱いなので false）。
+// このときはグループの状態を作らず、秘書室の控えにだけ書く
+function replyUnknown(entry) {
+  return entry.replyKind != null && entry.replyKind !== "secretary" && entry.replyKind !== "line-group";
 }
 ```
 
@@ -938,7 +972,12 @@ function wantsGroup(entry) {
           // グループ → 秘書室の順に送る（設計書 17）。グループの結果は秘書室の控えの文に書き、
           // portal への結果は今どおり秘書室の送信で決める
           if (await sendGroup(entry, dv) === "halt") return "halt";
-          const groupState = wantsGroup(entry) ? ledger.getDest(state, no, entry.sha256, "group") : null;
+          let groupState = null;
+          if (wantsGroup(entry)) groupState = ledger.getDest(state, no, entry.sha256, "group");
+          else if (replyUnknown(entry)) {
+            safeLog("warn", `job-deliver #J${no} reply-unknown`);
+            groupState = "noreply";
+          }
           const text = deliveryText(entry, `https://liff.line.me/${dv.liffId}?t=${issued.d}`, dv.ttlSec, groupState);
           // 送る前に台帳を sending にする。書けなければ送らない（落ちたら次回は unknown として扱う）
           entry.stage = "sending";
@@ -1006,22 +1045,85 @@ EOF
 
 ---
 
-### Task 4: 秘書室の宛先状態を残し、送信済みの完成品には送り直さない
+### Task 4: 秘書室の宛先状態を残し、同じ完成品には（人の再納品でも）送り直さない
 
 **Files:**
 - Modify: `src/jobs/deliver.js` の `case "synced"`（Task 3 で置き換えたもの）と `case "sending"`（`src/jobs/deliver.js:350-355` 付近）
-- Test: `test/jobs-deliver.test.js`（末尾に追記）
+- Test: `test/jobs-deliver.test.js`（末尾に追記。既存の3件を更新：`:217-238`・`:669-685`・`:847-871`）
 
 **Interfaces:**
 - Consumes: Task 2 の `ledger.getDest` / `ledger.setDest(state, no, sha256, "secretary", value, nowMs)`。Task 3 の `sendGroup`・`deliveryText(entry, link, ttlSec, groupState)`
-- Produces: 台帳の `dests` に秘書室の状態（送る前 `sending`、送れた `sent`、4xx `failed`、それ以外の失敗と「sending のまま再開」 `unknown`）。秘書室が `sent` の完成品を予約し直したら、送らずに `sent` の段へ進めて delivered を報告する。ログに `secretary-already-sent`
+- Produces: 台帳の `dests` に秘書室の状態（送る前 `sending`、送れた `sent`、4xx `failed`、それ以外の失敗と「sending のまま再開」 `unknown`）。**同じ sha256 の完成品を予約し直したとき、秘書室が `sent` なら送らずに delivered を報告し、`unknown`（または `sending`）なら送らずに unknown を報告し直す**（人が portal で「もう一度納品」しても同じ）。`failed` だけは送り直す。sha256 が変わったときは新しく送る。ログに `secretary-already-sent`・`secretary-already-unknown`
 
-秘書室の「結果不明」の扱い（この計画での判断）：秘書室への送信が結果不明になった件は portal が「納品要確認」にし、人が portal で「もう一度納品」したときだけ「完成」に戻る（`test/jobs-deliver.test.js:217-238` の既存の流れ）。この人の判断による再納品では秘書室に送り直す（今までどおり）。グループの送信済み・結果不明は、この再納品でも送り直さない（Task 3）。秘書室が送信済みなら、予約をやり直しても二度と送らない。
+設計書 17 の「同じ完成品について、送信済み・結果不明の宛先には二度と送らない」を、グループにも秘書室にも例外なく当てはめる（controller の判断）。秘書室への送信が結果不明になった件は portal が「納品要確認」にする。人が「もう一度納品」して「完成」に戻っても、完成品が同じ（sha256 が同じ）なら秘書室へは送り直さず、既に分かっている結果（unknown）を portal に報告し直す（unknown のまま）。本当に送り直したいときは完成品を作り直す（sha256 が変わる）。このため既存の3件のテスト（人の再納品で送り直す前提だったもの）をこの Task で更新する。
 
-- [ ] **Step 1: 失敗するテストを書く**（`test/jobs-deliver.test.js` の末尾に追記）
+- [ ] **Step 1: 既存の3件のテストを更新し、失敗するテストを書く**
+
+(a) `test/jobs-deliver.test.js:217-238` の「送信 500 は unknown を報告して送り直さない → …」のテストを丸ごと次に置き換える：
 
 ```js
-test("deliver(group): 秘書室へ送った直後・台帳に書く前に落ちた → 次の回は unknown を報告し、どちらにも送り直さない（人の再納品では秘書室だけ送る）", async () => {
+test("deliver: 送信 500 は unknown を報告して送り直さない → 人が完成に戻しても同じ完成品には送らず、新しい claimId で unknown を報告し直す", async () => {
+  const s = setup("unknown-redo");
+  s.portal.add(12);
+  s.sendFail.push(500);
+  await s.run();
+  assert.equal(s.sent.length, 0);
+  assert.equal(s.portal.calls.reportResult[0].outcome, "unknown");
+  assert.equal(s.portal.jobs.get(12).status, "納品要確認");
+  const firstClaim = s.portal.calls.reportResult[0].claimId;
+  await s.run();
+  assert.equal(s.portal.calls.claim.length, 1, "納品要確認は完成一覧に出ないので予約しない");
+  assert.equal(s.sent.length, 0, "送り直さない");
+  // 人が portal で「もう一度納品」→ 完成に戻る。完成品（sha256）が同じで秘書室は結果不明のままなので、送り直さない
+  s.portal.jobs.get(12).status = "完成";
+  s.clock.t += MIN;
+  await s.run();
+  assert.equal(s.sent.length, 0, "結果不明の宛先には二度と送らない");
+  const last = s.portal.calls.reportResult.at(-1);
+  assert.equal(last.outcome, "unknown", "unknown のまま報告し直す");
+  assert.notEqual(last.claimId, firstClaim);
+  assert.equal(s.portal.jobs.get(12).status, "納品要確認");
+  assert.equal(s.ledger().history.length, 2);
+  assert.ok(s.logLines.includes("warn job-deliver #J12 secretary-already-unknown"));
+});
+```
+
+(b) `test/jobs-deliver.test.js:669-685` の「unknown の後（人が「もう一度納品」）は待たずに予約し直せる…」のテストを丸ごと次に置き換える：
+
+```js
+test("deliver: unknown の後（人が「もう一度納品」）は待たずに予約し直せる（not_sent の数も数え直す。送り直さず unknown を報告し直す）", async () => {
+  const s = setup("unknown-no-cooldown");
+  s.portal.add(12);
+  s.sendFail.push(404);
+  await s.run();
+  s.clock.t += 61 * MIN;
+  s.sendFail.push(500);
+  await s.run();
+  assert.equal(s.portal.jobs.get(12).status, "納品要確認");
+  assert.deepEqual(s.ledger().retries, {});
+  s.portal.jobs.get(12).status = "完成";
+  s.clock.t += MIN;
+  await s.run();
+  assert.equal(s.portal.calls.claim.length, 3, "待たずに予約し直せる");
+  assert.equal(s.sent.length, 0, "結果不明の宛先には二度と送らない");
+  assert.equal(s.portal.calls.reportResult.at(-1).outcome, "unknown");
+  assert.equal(s.portal.jobs.get(12).status, "納品要確認");
+});
+```
+
+(c) `test/jobs-deliver.test.js:847-871` の H2 のテストの中の、`s.clock.t += MIN;` の次にある `s.sendFail.push(500);`（2回目の送信失敗の準備）の1行を消す。再納品は送信せずに unknown を報告し直すので、準備が要らない。残りは変えない（`claim.length === 2`・`notified` の印が消える・`納品要確認` に戻る・もう一度お知らせが出る、は新しい動きでも成り立つ）：
+
+```js
+  // 人が portal で「もう一度納品」→ 完成に戻る → 予約した保存で「知らせた」の印を消す
+  s.portal.jobs.get(12).status = "完成";
+  s.clock.t += MIN;
+  await s.run();
+```
+
+(d) 末尾に新しいテストを追記：
+
+```js
+test("deliver(group): 秘書室へ送った直後・台帳に書く前に落ちた → 次の回は unknown を報告し、どちらにも送り直さない。人の再納品でも送らない", async () => {
   const s = setup("secretary-crash-after-send");
   s.portal.add(12, GROUP);
   const sha256 = s.portal.jobs.get(12).artifactSha256;
@@ -1041,14 +1143,49 @@ test("deliver(group): 秘書室へ送った直後・台帳に書く前に落ち�
   assert.equal(destOf(s, 12, "secretary"), "unknown");
   assert.equal(s.pushStat.calls, 1);
   assert.equal(s.sent.length, 1);
-  // 人が portal で「もう一度納品」→ 完成に戻る。秘書室には送り直すが、グループには送らない
+  // 人が portal で「もう一度納品」→ 完成に戻る。同じ完成品なので、秘書室にもグループにも送らず unknown を報告し直す
   s.portal.jobs.get(12).status = "完成";
   s.clock.t += MIN;
   await s.run();
   assert.equal(s.pushStat.calls, 1);
-  assert.equal(s.sent.length, 2);
-  assert.equal(lastLine(s.sent[1]), LINE_SENT);
-  assert.equal(destOf(s, 12, "secretary"), "sent");
+  assert.equal(s.sent.length, 1);
+  assert.equal(s.portal.calls.reportResult.at(-1).outcome, "unknown");
+  assert.equal(destOf(s, 12, "secretary"), "unknown");
+  assert.equal(destOf(s, 12, "group"), "sent");
+  assert.equal(s.portal.jobs.get(12).status, "納品要確認");
+});
+
+test("deliver(group): 秘書室が結果不明の完成品は、グループが送信済みでも、再納品で両方とも送らない", async () => {
+  const s = setup("secretary-unknown-no-resend");
+  s.portal.add(12, GROUP);
+  s.sendFail.push(500);
+  await s.run();
+  assert.equal(s.pushStat.calls, 1);
+  assert.equal(destOf(s, 12, "secretary"), "unknown");
+  s.portal.jobs.get(12).status = "完成";
+  s.clock.t += MIN;
+  await s.run();
+  assert.equal(s.pushStat.calls, 1);
+  assert.equal(s.sent.length, 0);
+  assert.equal(s.portal.calls.reportResult.at(-1).outcome, "unknown");
+  assert.equal(s.portal.jobs.get(12).status, "納品要確認");
+});
+
+test("deliver(group): 秘書室が結果不明でも、完成品が作り直されて sha256 が変わったら、グループにも秘書室にも新しく送る", async () => {
+  const s = setup("secretary-unknown-new-sha");
+  const j = s.portal.add(12, GROUP);
+  s.sendFail.push(500);
+  await s.run();
+  assert.equal(s.sent.length, 0);
+  j.pdf = Buffer.from("%PDF-remade");
+  j.artifactSha256 = sha(j.pdf);
+  j.status = "完成";
+  s.clock.t += MIN;
+  await s.run();
+  assert.equal(s.pushStat.calls, 2);
+  assert.equal(s.sent.length, 1);
+  assert.equal(lastLine(s.sent[0]), LINE_SENT);
+  assert.equal(s.portal.calls.reportResult.at(-1).outcome, "delivered");
   assert.equal(s.portal.jobs.get(12).status, "納品済み");
 });
 
@@ -1061,6 +1198,19 @@ test("deliver: 秘書室への送信の結果ごとに宛先の状態が残る�
     assert.equal(destOf(s, 12, "secretary"), c.state, c.state);
     assert.equal(destOf(s, 12, "group"), null, "秘書室だけの件はグループの状態を作らない");
   }
+});
+
+test("deliver: 秘書室がはっきり失敗（4xx）した完成品は、予約し直したときにもう一度送る", async () => {
+  const s = setup("secretary-failed-retry");
+  s.portal.add(12);
+  s.sendFail.push(404);
+  await s.run();
+  assert.equal(destOf(s, 12, "secretary"), "failed");
+  s.clock.t += 61 * MIN;
+  await s.run();
+  assert.equal(s.sent.length, 1);
+  assert.equal(destOf(s, 12, "secretary"), "sent");
+  assert.equal(s.portal.jobs.get(12).status, "納品済み");
 });
 
 test("deliver: 落ちて再起動 — sending からは送らず、秘書室の宛先を unknown にする", async () => {
@@ -1095,20 +1245,29 @@ test("deliver: 秘書室へ送信済みの完成品を予約し直したら、�
 
 - [ ] **Step 2: 失敗を確かめる**
 
-Run: `node --test --test-name-pattern="秘書室" test/jobs-deliver.test.js`
-Expected: FAIL。秘書室の宛先の状態が `null`、「送信済みの完成品を予約し直したら」で `s.sent.length` が 2。
+Run: `node --test test/jobs-deliver.test.js`
+Expected: FAIL。(a)(b)(d) の「再納品でも送らない」系は `s.sent.length` が 1 になる、秘書室の宛先の状態が `null`、「送信済みの完成品を予約し直したら」で `s.sent.length` が 2、など。
 
 - [ ] **Step 3: 実装する**
 
 Task 3 で置き換えた `case "synced": {` の直後（`// 期限が近ければ…` の前）に足す：
 
 ```js
-          // 秘書室へはもう送れている（同じ完成品を予約し直した）なら送り直さず、delivered で返す（設計書 17）
-          if (ledger.getDest(state, no, entry.sha256, "secretary") === "sent") {
+          // 秘書室の宛先がもう決まっている完成品（同じ sha256）には、グループにも秘書室にも送り直さない（設計書 17）。
+          // 既に分かっている結果を portal に報告し直すだけ。人が portal で「もう一度納品」して完成に戻しても同じ
+          // （unknown は unknown のまま）。送り直したいときは完成品を作り直す（sha256 が変わる）
+          const secretaryState = ledger.getDest(state, no, entry.sha256, "secretary");
+          if (secretaryState === "sent") {
             safeLog("info", `job-deliver #J${no} secretary-already-sent`);
             entry.stage = "sent";
             entry.updatedAt = new Date(now()).toISOString();
             if (!persist()) return "halt";
+            break;
+          }
+          if (secretaryState === "unknown" || secretaryState === "sending") {
+            safeLog("warn", `job-deliver #J${no} secretary-already-unknown`);
+            if (secretaryState === "sending") ledger.setDest(state, no, entry.sha256, "secretary", "unknown", now());
+            if (!toReporting(entry, "unknown", "send")) return "halt";
             break;
           }
 ```
@@ -1158,35 +1317,126 @@ Task 3 で置き換えた `case "synced": {` の直後（`// 期限が近けれ�
 - [ ] **Step 4: 通ることを確かめる**
 
 Run: `node --test test/jobs-deliver.test.js test/jobs-ledger.test.js`
-Expected: `fail 0`（既存の「sending を書けなかったら送らず…」「done への移動を書けなかったら…」も通る）
+Expected: `fail 0`（既存の「sending を書けなかったら送らず…」「done への移動を書けなかったら…」も通る）。ほかの既存のテストが「同じ sha256 の完成品を再納品して送り直す」前提で落ちたら、テストを弱めずに止めて報告する（この Task で更新したのは上の(a)(b)(c)の3件だけのはず）
 
 - [ ] **Step 5: コミット**
 
 ```bash
 git add src/jobs/deliver.js test/jobs-deliver.test.js
-git commit -m "$(cat <<'EOF'
-feat(jobs): 秘書室への送信も宛先ごとに残し、送信済みの完成品は予約し直しても送り直さない
+git commit -m "$(cat <<'COMMIT'
+feat(jobs): 秘書室への送信も宛先ごとに残し、同じ完成品には再納品でも送り直さない
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-EOF
+COMMIT
 )"
 ```
 
 ---
 
-### Task 5: 全体のテストと、本番への取り込みの手順
+### Task 5: 共通の依頼テスト表を写して、`parse.js` が全件同じ結果を出すことを固定する
+
+**Files:**
+- Create: `test/fixtures/job-command-cases.json`（P2 の計画から取り出す）
+- Create: `test/jobs-parse-shared.test.js`
+- 変えない：`src/jobs/parse.js`、`test/jobs-parse.test.js`
+
+**Interfaces:**
+- Consumes: P2 の計画（`/Users/shimo/AI開発/apps/aisecretary/.worktrees/group-obi/docs/superpowers/plans/2026-10-09-group-obi-p2-aisecretary.md`）の Task 1 Step 1 にある `tests/fixtures/job-command-cases.json` の JSON 全文（`{ "about": …, "cases": [{ "input", "expected" }] }`、2026-10-09 時点で35件）。既存の `src/jobs/parse.js` の `parseJobCommand`
+- Produces: line-secretary の `test/fixtures/job-command-cases.json`（P2 が aisecretary に作る同名のファイルと同じ中身）と、全件の照合テスト
+
+**注意（実装の順番）：** 実装の順番は P1 → P3 → P4 → P2 なので、P3 を実装する時点では aisecretary の `tests/fixtures/job-command-cases.json` はまだ存在しない（P2 が作る）。そのため、**P3 の実装者は P2 の計画の JSON コードブロック（全文が書いてある）から表を生成する**。aisecretary のファイルを探したり、手で写したりしない。後で P2 を実装するとき、P2 の実装者は自分のファイルとこのファイルの中身が同じか（`diff`）を確かめる。
+
+- [ ] **Step 1: 失敗するテストを書く**（`test/jobs-parse-shared.test.js`）
+
+```js
+// test/jobs-parse-shared.test.js
+// 依頼文の読み取り（src/jobs/parse.js）が、aisecretary（src/lib/obi/parse.ts）と共通の表で全件同じ結果になることを固定する。
+// 表：test/fixtures/job-command-cases.json（aisecretary の tests/fixtures/ と同じ中身。片方だけ直さない）。
+// 食い違ったら parse.js も表も直さず、止めて報告する
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const { parseJobCommand } = require("../src/jobs/parse.js");
+
+const table = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "job-command-cases.json"), "utf8"));
+
+test("共通の依頼テスト表が読める（30件以上・形が正しい）", () => {
+  assert.ok(Array.isArray(table.cases));
+  assert.ok(table.cases.length >= 30, `件数=${table.cases.length}`);
+  for (const c of table.cases) {
+    assert.equal(typeof c.input, "string");
+    assert.ok(Object.prototype.hasOwnProperty.call(c, "expected"));
+  }
+});
+
+for (const c of table.cases) {
+  test(`共通表: parseJobCommand(${JSON.stringify(c.input)})`, () => {
+    assert.deepStrictEqual(parseJobCommand(c.input), c.expected);
+  });
+}
+```
+
+- [ ] **Step 2: 失敗を確かめる**
+
+Run: `node --test test/jobs-parse-shared.test.js`
+Expected: FAIL（表のファイルがまだ無いので `ENOENT: no such file or directory … test/fixtures/job-command-cases.json`）
+
+- [ ] **Step 3: 表を P2 の計画から生成する**
+
+```bash
+node -e '
+const fs = require("fs");
+const plan = "/Users/shimo/AI開発/apps/aisecretary/.worktrees/group-obi/docs/superpowers/plans/2026-10-09-group-obi-p2-aisecretary.md";
+const t = fs.readFileSync(plan, "utf8");
+const i = t.indexOf("`tests/fixtures/job-command-cases.json`:");
+if (i < 0) throw new Error("P2 の計画に表の見出しが見つかりません");
+const m = /```json\n([\s\S]*?)\n```/.exec(t.slice(i));
+if (!m) throw new Error("P2 の計画に JSON の塊が見つかりません");
+const data = JSON.parse(m[1]);
+if (!Array.isArray(data.cases) || data.cases.length < 30) throw new Error("表の形が違います");
+fs.mkdirSync("test/fixtures", { recursive: true });
+fs.writeFileSync("test/fixtures/job-command-cases.json", m[1] + "\n");
+console.log("cases=" + data.cases.length);
+'
+```
+
+Expected: `cases=35`（P2 の計画の表の件数。P2 の計画がその後直されていて件数が違っても、30件以上なら進めてよい）
+
+- [ ] **Step 4: 通ることを確かめる**
+
+Run: `node --test test/jobs-parse-shared.test.js test/jobs-parse.test.js`
+Expected: `fail 0`（共通表の全件で `parseJobCommand` が同じ結果。**1件でも違ったら、`src/jobs/parse.js` も表も変えずに、ここで止めて、どの入力で何が違ったかを報告する**）
+
+- [ ] **Step 5: コミット**
+
+```bash
+git add test/fixtures/job-command-cases.json test/jobs-parse-shared.test.js
+git commit -m "$(cat <<'COMMIT'
+test(jobs): 依頼文の読み取りを aisecretary と共通の表で全件固定する
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+COMMIT
+)"
+```
+
+---
+
+### Task 6: 全体のテストと、本番への取り込みの手順
 
 **Files:**
 - なし（確認と取り込みだけ。コードは変えない）
 
 **Interfaces:**
-- Consumes: Task 1〜4 のコミット（ブランチ `feature/group-obi-deliver`）
-- Produces: 本番の作業ツリー（`feature/v1`）への fast-forward の取り込み（下村さんの承認後）
+- Consumes: Task 1〜5 のコミット（ブランチ `feature/group-obi-deliver`）。P4 の本番確認（Vercel の閲覧ページ）
+- Produces: 本番の作業ツリー（`feature/v1`）への fast-forward の取り込み（P4 が本番に出て確かめられた後、下村さんの承認後）
+
+テストのコマンドに `| tail` などのパイプを付けない（終了コードが消えて、失敗が成功に見える）。出力を絞りたいときは先頭に `set -o pipefail;` を付ける。
 
 - [ ] **Step 1: 全体のテスト**
 
 Run: `npm test`
-Expected: `fail 0`（`test/*.test.js` と `delivery/test/*.test.js` の全部）。`git status --short` が空（テストが作るのは `tmp/` の下だけで、`test/fixtures/dtoken-vector-group.json` はコミット済み）
+Expected: `fail 0`（`test/*.test.js` と `delivery/test/*.test.js` の全部）。`git status --short` が空（テストが作るのは `tmp/` の下だけで、`test/fixtures/dtoken-vector-group.json` と `test/fixtures/job-command-cases.json` はコミット済み）
 
 - [ ] **Step 2: 差分の確認**
 
@@ -1195,17 +1445,19 @@ git log --oneline feature/v1..feature/group-obi-deliver
 git diff --stat feature/v1..feature/group-obi-deliver
 ```
 
-Expected: Task 1〜4 の4コミット。変わるのは `src/dtoken.js`・`src/jobs/ledger.js`・`src/jobs/deliver.js`・`test/dtoken.test.js`・`test/jobs-ledger.test.js`・`test/jobs-deliver.test.js`・`test/fixtures/dtoken-vector-group.json` だけ（`src/poll.js`・`launchd/`・`.env`・`delivery/` は変わらない）
+Expected: Task 1〜5 の5コミット。変わるのは `src/dtoken.js`・`src/jobs/ledger.js`・`src/jobs/deliver.js`・`test/dtoken.test.js`・`test/jobs-ledger.test.js`・`test/jobs-deliver.test.js`・`test/jobs-parse-shared.test.js`・`test/fixtures/dtoken-vector-group.json`・`test/fixtures/job-command-cases.json` だけ（`src/jobs/parse.js`・`src/poll.js`・`launchd/`・`.env`・`delivery/` は変わらない）
 
 - [ ] **Step 3: 取り込みの順番を確かめてから、下村さんに承認を求める（ここで止まる）**
 
-取り込みの順番（設計書の4計画の依存）：
-1. P1（portal の claim に `replyKind`・`replyGroupId`）が本番に出ていること。出ていなくてもこの変更は壊れない（項目なし＝秘書室だけ）が、グループには送られない
-2. P3（この計画）を取り込む
-3. P4（閲覧ページの `aud`・`g` の検査）を Vercel に出す。P4 より前にグループあてのリンクが出ると、今の閲覧ページは印を見ずに名簿を確かめるので、名簿にいない社員は開けない（壊れはしない）
+実装の順番は P1 → P3 → P4 → P2（P4 の作業ブランチはこのブランチから作る）。**本番に出す順番は P1 → P4 → P3 → P2**。この計画の取り込み（Mac の本番ツリー）は、P4 が本番に出て確かめられた後に行う：
+1. P1（portal の claim に `replyKind`・`replyGroupId`）が Railway の本番に出ていること。出ていなくてもこの変更は壊れない（項目なし＝秘書室だけ）が、グループには送られない
+2. P4（閲覧ページの `aud`・`g` の検査）が Vercel の本番に出て、確かめられていること（グループあてのトークンで開ける・印のない秘書室あてトークンは今までどおり名簿を見る・値が違えば拒否）。**P3 より先に出すのは、P3 を取り込むとグループに `aud: "line-group"` 付きのリンクが出るため、閲覧ページが先にそれを読めないと開けないから**
+3. この計画（P3）を `feature/v1` に fast-forward で取り込む（下の Step 4）
 4. 最後に P2（aisecretary の帯替えの受付）を有効にする（グループからの依頼が実際に始まる）
 
-下村さんに伝えること：上の順番、Step 1・2 の結果、取り込むと次の60秒ごとの巡回から新しいコードになること、戻すときの注意（下の Step 5）。**承認が出るまで Step 4 に進まない。**
+注意：P4 のブランチはこのブランチを土台にしているので、P4 のブランチを先に `feature/v1` へ入れると P3 のコミットも一緒に入り、Mac が先に新しいコードで動き出してしまう。P4 の本番確認は Vercel のデプロイ（ブランチのまま）で行い、`feature/v1` への取り込みはこの Step 4 の後にする。
+
+下村さんに伝えること：上の順番、P4 の本番確認の結果、Step 1・2 の結果、取り込むと次の60秒ごとの巡回から新しいコードになること、戻すときの注意（下の Step 5）。**承認が出るまで Step 4 に進まない。**
 
 - [ ] **Step 4: 取り込み（下村さんの承認後。下村さんが自分で行うか、承認を得て実行）**
 
@@ -1213,9 +1465,9 @@ Expected: Task 1〜4 の4コミット。変わるのは `src/dtoken.js`・`src/j
 # 本番の作業ツリーが綺麗で feature/v1 にいること
 git -C /Users/shimo/AI開発/apps/line-secretary status --short
 git -C /Users/shimo/AI開発/apps/line-secretary branch --show-current   # → feature/v1
-# feature/v1 がこの枝の作成後に進んでいたら（P4 が先に入ったなど）、worktree で載せ直して全体のテストをやり直す
-git -C /Users/shimo/AI開発/apps/line-secretary/.worktrees/group-obi-deliver rebase feature/v1
-(cd /Users/shimo/AI開発/apps/line-secretary/.worktrees/group-obi-deliver && npm test)
+# feature/v1 がこの枝の作成後に進んでいたら止めて下村さんに聞く（rebase しない。P4 がこの枝を土台にしているため、
+# 書き換えると P4 側も載せ直しになる）
+git -C /Users/shimo/AI開発/apps/line-secretary merge-base --is-ancestor feature/v1 feature/group-obi-deliver && echo "ff 可能" || echo "止める"
 # fast-forward だけで取り込む（merge コミットを作らない。できなければ止める）
 git -C /Users/shimo/AI開発/apps/line-secretary merge --ff-only feature/group-obi-deliver
 ```
@@ -1234,14 +1486,14 @@ grep -E "job-deliver (ledger-broken|ledger-write-failed)" /Users/shimo/AI開発/
 
 Expected: `broken=false`、`異常なし`。
 
-戻すとき（`git -C … reset` などは下村さんの判断で）：前のコードは台帳の `dests` を読まずに保存で落とすので、戻した後にやり直しの予約が起きると、グループへ再送されうる。グループからの依頼（P2）を止めてから戻す。
+戻すとき（`git -C … reset` などは下村さんの判断で）：前のコードは台帳の `dests` を読まずに保存で落とすので、戻した後にやり直しの予約が起きると、グループにも秘書室にも再送されうる。グループからの依頼（P2）を止めてから戻す。
 
 ---
 
 ## 対象外・後で行うこと
 
-- 共通の依頼テスト用データ（`parse.js` と aisecretary の移植の照合用 JSON）を line-secretary 側にも置き、`src/jobs/parse.js` で同じ結果になることをテストする作業は、P2 がデータを固めた後の別作業（この計画では `parse.js` に触らない）
 - 本番のグループでの実地の確認は、4計画がそろった後に設計書「確かめ方」の「実地」で行う（この計画のタスクには入れない）
+- P2 の実装のとき、P2 の実装者は aisecretary の `tests/fixtures/job-command-cases.json` を作った後、この計画の Task 5 で置いた line-secretary の `test/fixtures/job-command-cases.json` と中身が同じか（`diff`）を確かめる（P3 はそのファイルを P2 の計画の JSON から生成している）
 
 ## Self-Review
 
@@ -1249,7 +1501,7 @@ Expected: `broken=false`、`異常なし`。
 - 17 宛先は2つ（グループは `line-group` のとき・秘書室はいつも）→ Task 3 `wantsGroup`・`sendGroup`、Task 4
 - 17 `未着手 → 送信中 → 送信済み／はっきり失敗／結果不明` を台帳に・送る前に「送信中」を保存・再開時「送信中」→「結果不明」で送り直さない → Task 2（`dests`・`DEST_STATES`）、Task 3（グループ：`setGroup("sending")`、`group-sending-interrupted`、テスト「グループへ送った直後・台帳に書く前に落ちた」「送信中を書けなければ送らない」）、Task 4（秘書室：`sending` と同じ保存、`case "sending"`、テスト「秘書室へ送った直後・台帳に書く前に落ちた」）
 - 17 7日で既存の台帳の整理と一緒に消す → Task 2 `prune` の `DEST_KEEP_MS`（`finish()` の `ledger.prune` で毎回呼ばれる）
-- 17 「受付番号＋sha256＋宛先」で残し claim をやり直しても引き継ぐ・送信済み／結果不明には二度と送らない・秘書室がはっきり失敗して再納品でもグループに再送しない・sha256 が変わったら新しく送る → Task 2 `destKey`、Task 3 テスト「予約をやり直したとき…」「sha256 が変わったら」、Task 4「送信済みの完成品を予約し直したら」
+- 17 「受付番号＋sha256＋宛先」で残し claim をやり直しても引き継ぐ・送信済み／結果不明には（グループにも秘書室にも）二度と送らない・秘書室がはっきり失敗して再納品でもグループに再送しない・sha256 が変わったら新しく送る → Task 2 `destKey`、Task 3 テスト「予約をやり直したとき…」「sha256 が変わったら」、Task 4 の `secretary-already-sent`・`secretary-already-unknown`（人の再納品でも送り直さない）と各テスト、既存3件の更新
 - 17 順番 グループ → 秘書室・`宛先.json` の「営業部」と完全一致のときだけ・不一致は「はっきり失敗」→ Task 3（`config.DOC_REPLY.toId` と完全一致、さらに `pushText` の `expectId` で 宛先.json と照合、`events` のテスト、「宛先.json が入れ替わっていたら」のテスト）
 - 17 portal の結果は秘書室の送信で決める・控えの文にグループの状態 → Task 3 `deliveryText` の `groupState`、組み合わせのテスト
 - 18（発行側）`aud: 'line-group'`・`g` を署名の内側に・秘書室あてには付けない・両方そろえるか両方なし → Task 1、Task 3 の `issued[1].payload`
@@ -1259,15 +1511,18 @@ Expected: `broken=false`、`異常なし`。
 - 確かめ方「途中で止まる場面」：グループへの送信直後 → Task 3、秘書室への送信直後 → Task 4
 
 **2. 判断したこと（設計書があいまいだった所）**
-- 秘書室の「結果不明」：設計書 17 の「結果不明の宛先には二度と送らない」は、グループには例外なく当てはめる。秘書室については、自動では送り直さない（今どおり unknown を報告し portal が「納品要確認」にする）が、人が portal で「もう一度納品」した後の再納品では秘書室に送る（既存の流れ `test/jobs-deliver.test.js:217-238` を壊さないため）。秘書室の「送信済み」は予約し直しても送らない
+- 秘書室の「結果不明」：設計書 17 の「結果不明の宛先には二度と送らない」を、グループにも秘書室にも例外なく当てはめる（controller の判断）。人が portal で「もう一度納品」しても、同じ sha256 なら秘書室へ送り直さず、unknown のまま報告し直す。このため、人の再納品で送り直す前提だった既存の3件のテスト（`:217-238`・`:669-685`・`:847-871`）を Task 4 で更新する。送り直したいときは完成品を作り直す（sha256 が変わる）。秘書室の「送信済み」も予約し直しても送らず delivered を報告し直す。「はっきり失敗」の宛先だけが再試行の対象
+- 秘書室がもう `sent`／`unknown` の件では、グループにも新しくは送らない（秘書室の確認を先に行う。グループは秘書室より先に送るので、普通はグループの状態も残っている）
 - グループの「はっきり失敗」は、予約をやり直したときにもう一度試す（設計書が禁じるのは送信済み・結果不明だけ）
 - 営業部の ID の照合は二重にする：`config.DOC_REPLY.toId`（コードに固定）との完全一致と、送る直前の `pushText` の `expectId`（`宛先.json` の「営業部」）。どちらかが違えば「はっきり失敗」
 - `pushText` が HTTP の前に status なしで投げる失敗（トークンが無いなど）は「結果不明」として扱う（送っていない可能性が高いが、`lineapp.js` を変えずに安全側に倒す）
 - 秘書室のリンクを先に発行し、発行できない件はグループにも出さない（グループだけにリンクが出て秘書室は not_sent、を避ける）
-- `replyKind` が `secretary`・`line-group` 以外の値なら、グループあての意図があるものとして「はっきり失敗」にし、秘書室の控えで人に知らせる
-- グループあての互換ベクトル `test/fixtures/dtoken-vector-group.json` を P3 で固定し、P4 が閲覧ページ側の検査のテストに使えるようにする
+- `replyKind` が `secretary`・`line-group` 以外の値なら、グループの状態は作らず送らない。秘書室の控えに「返事先が不明のためグループには送っていません」と書いて人に知らせる（`wantsGroup` は `line-group` のときだけ）
+- 共通の依頼テスト表は、P2 より先に P3 を実装するため、P2 の計画の JSON コードブロックから生成する（Task 5）。違いが出たら `parse.js` も表も直さず止めて報告する
+- グループあての互換ベクトル `test/fixtures/dtoken-vector-group.json` を P3 で固定し、P4（このブランチから分岐する）が閲覧ページ側の検査のテストに使えるようにする
+- 本番に出す順番は P1 → P4 → P3 → P2。P3 の fast-forward は P4 が Vercel に出て確かめられた後、下村さんの承認後（Task 6）
 
 **3. 抜け・置き換え忘れの点検**
 - 「TBD」「後で」「Task N と同じ」は無い。コードの段はすべて完全なコード
-- 名前の一致：`ledger.getDest` / `ledger.setDest(state, no, sha256, dest, value, nowMs)` / `ledger.destKey` / `ledger.DEST_STATES`（Task 2）を Task 3・4 で同じ名前・同じ引数順で使う。`deliveryText(entry, link, ttlSec, groupState)`・`groupText(entry, link, ttlSec)`・`replyFields(b)`・`wantsGroup(entry)`・`sendGroup(entry, dv)` は Task 3 で定義し Task 4 で同じ名前を使う。テストの `GID`・`GROUP`・`LINE_SENT`・`LINE_FAILED`・`LINE_UNKNOWN`・`lastLine`・`destOf`・`s.pushStat`・`s.pushed`・`s.pushFail`・`s.lineDest`・`s.events` は Task 3 で定義し Task 4 で使う。`failingLedger`・`seed` は既存（`test/jobs-deliver.test.js:280-295`・`:687-692`）
+- 名前の一致：`ledger.getDest` / `ledger.setDest(state, no, sha256, dest, value, nowMs)` / `ledger.destKey` / `ledger.DEST_STATES`（Task 2）を Task 3・4 で同じ名前・同じ引数順で使う。`deliveryText(entry, link, ttlSec, groupState)`・`groupText(entry, link, ttlSec)`・`replyFields(b)`・`wantsGroup(entry)`・`replyUnknown(entry)`・`sendGroup(entry, dv)` は Task 3 で定義し Task 4 で同じ名前を使う。テストの `GID`・`GROUP`・`LINE_SENT`・`LINE_FAILED`・`LINE_UNKNOWN`・`LINE_NOREPLY`・`lastLine`・`destOf`・`s.pushStat`・`s.pushed`・`s.pushFail`・`s.lineDest`・`s.events` は Task 3 で定義し Task 4 で使う。`failingLedger`・`seed` は既存（`test/jobs-deliver.test.js:280-295`・`:687-692`）
 - 宛先の名前は `"group"` と `"secretary"` だけ（`ledger.js` の `DESTS` と `DEST_KEY_RE`）

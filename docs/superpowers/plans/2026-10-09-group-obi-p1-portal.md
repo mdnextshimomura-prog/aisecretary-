@@ -18,13 +18,15 @@
 - 本文の読み取りの上限：**25,000,000 + 1,048,576 バイト**（既存の約101MiB の上限 `MAX_INPUT_BODY_BYTES` は使わない）
 - groupId の形：`^C[0-9a-f]{32}$`。`replyKind` は `'secretary'`（`replyGroupId` は null）と `'line-group'`（`replyGroupId` は groupId の形必須）の2通りだけ。検査は `src/lib/job-reply.ts` の `parseReplyTarget` の1か所
 - 外向きのエラー（`{ code, message, busyJobNo? }`）：`UNAUTHORIZED` 401／`INVALID_REQUEST` 400（項目の形・`%PDF-` でない・件数0か21以上）／`INPUT_TOO_LARGE` 413／`INTAKE_DUPLICATE` 400／`INTAKE_MISMATCH` 409／`OBI_BUSY` 409＋`busyJobNo`／`INTAKE_STOPPED` 503／`INTERNAL` 500
-- 成功：201（新しく作った）／200（同じ `lineMessageId` の照合が一致）で `{ no, status, created, inputs: [{ name, sha256, size }] }`（`inputs` は送られた順）
+- 成功：201（新しく作った）／200（同じ `lineMessageId` の照合が一致）で `{ no, status, created, inputs: [{ name, sha256, size }] }`（`inputs` は**初回に保存した順**。200 の再送で順を変えて送られても初回の順を返す。照合は sha256 の集合で、順番では比べない）
 - 既存の `POST /api/jobs`・`POST /api/jobs/{no}/inputs` の動きは変えない（`POST /api/jobs` の `OBI_BUSY` 応答に `busyJobNo` を足すことだけ）
 - 照合（`INTAKE_MISMATCH` の判定）：workflow・PDF の件数と sha256 の集合・`replyKind`・`replyGroupId`・物件名がすべて一致したときだけ既存の結果を返す
 - `JobEvent` を作るのは `src/lib/jobs.ts` の `recordEvent` だけ（`test/jobs.test.ts` がソースを検索して確かめている）。受付の確定は `jobs.ts` の中に書く
 - モデルの変更は `prisma/schema.prisma` だけ（`schema.prod.prisma` は生成物）。この repo はマイグレーションではなく `db push` 運用。**開発用 `dev.db` への `db push`（`npm run setup` など）はしない**（テストは `test/global-setup.ts` が `prisma/test.db` に push する）。本番の列の追加は `start:web` の `db push` で起きるので、push・Railway への反映は下村さんの承認の後（この計画には含めない）
 - テストは `prisma/test.db` を共有する。**vitest を同時に2つ起動しない**（`vitest.config.ts` の `fileParallelism: false`）
 - 環境変数の追加はない（鍵は既存の `JOB_API_TOKEN`）。`.env*` は開かない・書かない
+- `/api/jobs/intake` は `assigneeName` を受け付けない（受け渡しの約束）。フォームに項目があれば（空でも）400 INVALID_REQUEST。担当なし（`assigneeId: null`）で作り、`ASSIGNEE_NOT_FOUND` の道は intake に作らない。既存の `POST /api/jobs` の担当の扱いは変えない
+- テストなどの確認コマンドは終了コードを隠さない：`| tail` `| head` などのパイプを付けない（付けるなら先頭に `set -o pipefail;`）。全体の確認の最後に `npx next build` を通す（tsc では見つからないバンドルのエラーがあり、この repo の本番ビルドが最近それで落ちた）
 - 帯替えの既存の判定ロジック（自動検出・学習・下準備の中身）は変えない
 - コメント・メッセージは日本語。コミットは `type: 日本語` と本文1〜3行、末尾に `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`。push はしない
 
@@ -777,7 +779,7 @@ EOF
 - Produces:
   - `src/lib/storage.ts`：`export const INTAKE_PREFIX = 'intake-'`、`saveFile(buffer: Buffer, originalName: string, opts?: { prefix?: string }): Promise<string>`
   - `src/lib/jobs.ts`：
-    - `type IntakeRequest = { workflow?: string; lineMessageId?: string; property?: string; requestText?: string; requestedBy?: string; assigneeName?: string; replyKind?: string; replyGroupId?: string; files: { name: string; data: Buffer }[] }`
+    - `type IntakeRequest = { workflow?: string; lineMessageId?: string; property?: string; requestText?: string; requestedBy?: string; replyKind?: string; replyGroupId?: string; files: { name: string; data: Buffer }[] }`
     - `type IntakeInput = { name: string; sha256: string; size: number }`
     - `type IntakeResult = { job: Job; created: boolean; inputs: IntakeInput[] }`
     - `async function createIntakeJob(input: IntakeRequest): Promise<IntakeResult>`
@@ -901,10 +903,11 @@ describe('createIntakeJob', () => {
     const a = await jobs.createIntakeJob(request());
     const before = await files();
     await jobs.setIntakeStopped(true);
-    // 並びが違っても、集合が同じなら同じ依頼
+    // 並びが違っても、集合が同じなら同じ依頼。inputs は初回に保存した順（a, b）のまま返す
     const b = await jobs.createIntakeJob(request({ files: [...request().files].reverse() }));
     expect(b.created).toBe(false);
     expect(b.job.no).toBe(a.job.no);
+    expect(b.inputs.map((i) => i.name)).toEqual(['a.pdf', 'b.pdf']);
     expect(b.inputs).toEqual(a.inputs);
     expect(await files()).toEqual(before);
   });
@@ -942,7 +945,6 @@ describe('createIntakeJob', () => {
       { property: 'あ'.repeat(101) },
       { requestText: 'あ'.repeat(1001) },
       { requestedBy: 'あ'.repeat(61) },
-      { assigneeName: 'あ'.repeat(61) },
       { replyKind: undefined },
       { replyKind: 'group' },
       { replyKind: 'secretary' }, // groupId があるのに secretary
@@ -1105,7 +1107,6 @@ export type IntakeRequest = {
   property?: string;
   requestText?: string;
   requestedBy?: string;
-  assigneeName?: string;
   replyKind?: string;
   replyGroupId?: string;
   files: { name: string; data: Buffer }[];
@@ -1120,7 +1121,6 @@ type IntakeFields = {
   property: string;
   requestText: string;
   requestedBy: string;
-  assigneeName: string;
   reply: ReplyTarget;
 };
 
@@ -1145,7 +1145,6 @@ function parseIntakeFields(input: IntakeRequest): IntakeFields {
     property,
     requestText: optional(input.requestText, 1000, 'requestText'),
     requestedBy: optional(input.requestedBy, 60, 'requestedBy'),
-    assigneeName: optional(input.assigneeName, 60, 'assigneeName'),
     reply,
   };
 }
@@ -1223,18 +1222,13 @@ export async function createIntakeJob(input: IntakeRequest): Promise<IntakeResul
   const existing = await prisma.job.findUnique({ where: { lineMessageId: f.lineMessageId } });
   if (existing) return reconcileIntake(existing, f, shas);
 
-  const assignee = f.assigneeName ? await resolveAssignee(f.assigneeName) : null;
-  if (f.assigneeName && !assignee) {
-    throw new JobError('assignee_not_found', `担当「${f.assigneeName.slice(0, 30)}」が見つかりません。表示名を確認してください`);
-  }
   const data: Prisma.JobCreateInput = {
     workflow: f.workflow,
     lineMessageId: f.lineMessageId,
     property: f.property,
     requestText: f.requestText,
     requestedBy: f.requestedBy,
-    assigneeId: assignee?.id ?? null,
-    assigneeName: assignee?.displayName ?? '',
+    // 担当はこの入口では受け付けない（受け渡しの約束）。担当なし（assigneeId: null）で作る
     replyKind: f.reply.kind,
     replyGroupId: f.reply.groupId,
   };
@@ -1683,6 +1677,11 @@ describe('POST /api/jobs/intake', () => {
     const again = await send({}, twoPdfs());
     expect(again.res.status).toBe(200);
     expect(again.body).toEqual({ ...first.body, created: false });
+    // ファイルの順を逆にして再送しても 200。inputs は初回に保存した順（a, b）のまま（照合は sha256 の集合）
+    const reversed = await send({}, [...twoPdfs()].reverse());
+    expect(reversed.res.status).toBe(200);
+    expect(reversed.body.inputs.map((i: { name: string }) => i.name)).toEqual(['a.pdf', 'b.pdf']);
+    expect(reversed.body).toEqual({ ...first.body, created: false });
     expect((await readdir(storageDir)).sort()).toEqual(before);
     await http.lastPrepKick();
     expect(runPrepOnce).not.toHaveBeenCalled();
@@ -1713,6 +1712,16 @@ describe('POST /api/jobs/intake', () => {
     ];
     for (const [fields, files] of cases) {
       const { res, body } = await send(fields, files);
+      expect(res.status).toBe(400);
+      expect(body.code).toBe('INVALID_REQUEST');
+    }
+    expect(await prisma.job.count()).toBe(0);
+    expect(await readdir(storageDir)).toEqual([]);
+  });
+
+  it('assigneeName は受け付けず、あれば（空でも）400 INVALID_REQUEST。何も残さない', async () => {
+    for (const v of ['山田', '']) {
+      const { res, body } = await send({ assigneeName: v }, twoPdfs());
       expect(res.status).toBe(400);
       expect(body.code).toBe('INVALID_REQUEST');
     }
@@ -1902,14 +1911,16 @@ import { jobErrorResponse, kickPrep, MAX_INTAKE_BODY_BYTES, readLimitedForm, una
 export const dynamic = 'force-dynamic';
 
 // POST /api/jobs/intake — MD NEXT秘書（aisecretary）が、LINE のグループで頼まれた帯替えを1回で受け付ける。鍵が必須。
-// multipart：workflow=obi・lineMessageId・property・requestText・requestedBy・assigneeName・replyKind・replyGroupId・
+// multipart：workflow=obi・lineMessageId・property・requestText・requestedBy・replyKind・replyGroupId・
 // files（1〜20件、出た順）。依頼の作成と PDF の確定は1つのトランザクション（途中で切れても半端に残らない）。
 // 同じ lineMessageId の再送は照合して 200 で同じ結果、中身が違えば 409 INTAKE_MISMATCH。
+// assigneeName はこの入口では受け付けない（あれば 400 INVALID_REQUEST）。
 // 本文は合計の上限（25,000,000 バイト）＋区切りの分までしか読まない（/inputs の約101MiB の上限は使わない）
 export async function POST(request: NextRequest) {
   if (!isJobApiRequest(request)) return unauthorized();
   try {
     const form = await readLimitedForm(request, MAX_INTAKE_BODY_BYTES, INTAKE_TOTAL_TEXT);
+    if (form.has('assigneeName')) throw new JobError('invalid', 'assigneeName は受け付けません');
     const entries = form.getAll('files');
     if (entries.some((f) => !(f instanceof File))) throw new JobError('invalid', 'files にファイル以外が含まれています');
     const files = entries as File[];
@@ -1928,7 +1939,6 @@ export async function POST(request: NextRequest) {
       property: field('property'),
       requestText: field('requestText'),
       requestedBy: field('requestedBy'),
-      assigneeName: field('assigneeName'),
       replyKind: field('replyKind'),
       replyGroupId: field('replyGroupId'),
       files: await Promise.all(files.map(async (f) => ({ name: f.name, data: Buffer.from(await f.arrayBuffer()) }))),
@@ -1989,12 +1999,17 @@ Expected: PASS（全件。失敗があれば出力ごと報告し、直すまで
 Run: `npx tsc --noEmit`
 Expected: エラー0
 
-- [ ] **Step 3: 既存の入口の形が変わっていないことを差分で確かめる**
+- [ ] **Step 3: 本番と同じビルドを通す**
+
+Run: `npx next build`
+Expected: 終了コード0（`Compiled successfully`）。tsc が見つけないバンドルのエラーがここで出る。パイプを付けずに実行し、失敗したら出力ごと報告して直すまで次へ進まない
+
+- [ ] **Step 4: 既存の入口の形が変わっていないことを差分で確かめる**
 
 Run: `git diff origin/main -- "src/app/api/jobs/route.ts" "src/app/api/jobs/[no]/inputs/route.ts"`
 Expected: 差分なし（`POST /api/jobs` の `busyJobNo` は `jobs.ts`・`job-http.ts` の側で足している）
 
-- [ ] **Step 4: 判断の記録を progress.md に足す**
+- [ ] **Step 5: 判断の記録を progress.md に足す**
 
 `progress.md` の末尾に追記：
 
@@ -2009,12 +2024,13 @@ Expected: 差分なし（`POST /api/jobs` の `busyJobNo` は `jobs.ts`・`job-h
 - 確定のトランザクションの中の順番は「OBI のロック → 同じ lineMessageId → 受付停止 → 取り込み中 → 作成」。同じ依頼の確認を先にするのは、確定の後の再送へ停止中・取り込み中でも同じ結果を返すため（`createJob` の「二重登録の防止は停止判定より先」と同じ考え）
 - 件数0・21件以上は受け渡しの約束どおり 400 INVALID_REQUEST（/inputs は今どおり 413）
 - 項目が長すぎるときは切らずに 400 で断る（`createJob` は切り詰めるが、照合の対象の物件名がずれないように）
-- `assigneeName` で担当が見つからないときは既存どおり 422 ASSIGNEE_NOT_FOUND（約束の表には無いが、MD NEXT秘書は送らない）
+- `assigneeName` は intake では受け付けない（受け渡しの約束）。あれば 400 INVALID_REQUEST。担当なしで作るので ASSIGNEE_NOT_FOUND の道も無い
+- 200（照合一致）の `inputs` は初回に保存した順。再送で並びを変えても同じ（照合は sha256 の集合）
 - 応答の `inputs[].name` は保存用に整えた名前。送り手は sha256 で照合する
 - Job の2列（`replyKind`・`replyGroupId`）は `schema.prisma` だけを変え、本番は `start:web` の `db push` で入る。push・デプロイは下村さんの承認の後
 ```
 
-- [ ] **Step 5: コミット**
+- [ ] **Step 6: コミット**
 
 ```bash
 git add progress.md
@@ -2028,11 +2044,22 @@ EOF
 )"
 ```
 
-- [ ] **Step 6: 報告（push・デプロイはしない）**
+- [ ] **Step 7: 報告（push・デプロイはしない）**
 
-ブランチ `feat/group-obi-intake` のコミット一覧（`git log --oneline origin/main..HEAD`）と、Step 1・2 の結果（件数・エラー0）をそのまま報告する。本番への反映（push・Railway のデプロイで `db push` が2列を足す）は、下村さんの承認を待つと明記する。
+ブランチ `feat/group-obi-intake` のコミット一覧（`git log --oneline origin/main..HEAD`）と、Step 1〜3 の結果（テスト件数・tsc エラー0・`next build` 成功）をそのまま報告する。本番への反映（push・Railway のデプロイで `db push` が2列を足す）は、下村さんの承認を待つと明記する。
 
 ---
+
+## 本番への出し方（この計画の範囲外。下村さんの承認の後）
+
+4本の計画の本番投入の順番は **P1 → P4 → P3 → P2**（受け渡しの約束。各段は前の段の本番確認の後）。P1（この計画）はその最初。
+
+1. 下村さんに「`feat/group-obi-intake` を main に入れて push してよいか」を確認し、承認を得る（承認なしに push しない）
+2. 承認後に main へ反映して push する（Railway が自動でデプロイする）
+3. Railway のデプロイが新しい版に切り替わったことを確かめる（ビルド成功・稼働中の版が今回のコミット）
+4. `start:web` の起動時の `db push` で `Job.replyKind`・`Job.replyGroupId` の2列が本番 DB に足されたことを確かめる（起動ログの `db push` の結果と、本番 DB の列。既存の行は `replyKind='secretary'`・`replyGroupId` が null）
+5. 本番で `POST /api/jobs/intake` が鍵なしで 401 を返すこと、既存の `POST /api/jobs`・`/inputs` が今までどおり動くことを確かめる
+6. P1 の本番確認が済んだ後にだけ P4（Vercel の閲覧ページ）へ進む。P2 は最後（環境変数を入れて受付を有効にする）
 
 ## Self-Review
 

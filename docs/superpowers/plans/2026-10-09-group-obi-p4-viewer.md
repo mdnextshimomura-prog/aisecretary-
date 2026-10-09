@@ -10,24 +10,25 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-09-group-obi-intake-design.md`（aisecretary リポジトリ）の「決めたこと」18・19 と「影響する所 › 閲覧ページ」「確かめ方 › 閲覧ページ」。受け渡しの形は `docs/superpowers/plans/2026-10-09-group-obi-contract.md` の「P3 が作り、P4 が使う：配布トークンの印」。
 
-**作業場所（実装時）：** `apps/line-secretary` の新しい worktree `/Users/shimo/AI開発/apps/line-secretary/.worktrees/group-obi-viewer`（ブランチ `feature/group-obi-viewer`、`feature/v1` から作る）。**launchd が動かしている本体の作業ツリー `/Users/shimo/AI開発/apps/line-secretary` のファイルは一切編集しない**（`git worktree add` によるメタ情報の追加だけ）。P3（同じリポジトリの `src/`）とは別の worktree・別ブランチで進め、ファイルは重ならない（P4 は `delivery/` だけを変える）。
+**作業場所（実装時）：** `apps/line-secretary` の新しい worktree `/Users/shimo/AI開発/apps/line-secretary/.worktrees/group-obi-viewer`（ブランチ `feature/group-obi-viewer`）。**ブランチは P3 のブランチ `feature/group-obi-deliver` から作る**（`feature/v1` からではない）。P3 の Task 1 のコミット（`test/fixtures/dtoken-vector-group.json` を含む）が入っているのが前提で、無ければ止めて報告する。**launchd が動かしている本体の作業ツリー `/Users/shimo/AI開発/apps/line-secretary` のファイルは一切編集しない**（`git worktree add` によるメタ情報の追加だけ）。P3（同じリポジトリの `src/`）とは別の worktree で進め、P4 が変えるのは `delivery/` だけ（P3 のコミットは土台として含むが、P4 のコミットは `delivery/` の外を変えない）。本番へは `delivery/` だけを Vercel に出すので、P3 のコミットが一緒に出ることはない。
 
 ## Global Constraints
 
 - LINE の ID の形：userId `^U[0-9a-f]{32}$`、groupId `^C[0-9a-f]{32}$`
 - 配布トークンの印：`aud: "line-group"` と `g: "<groupId>"`。`aud` が無い → 今どおり名簿を見る／`aud === 'line-group'` かつ `g === 閲覧ページの LINE_GROUP_ID` → 名簿を省く（**在籍は必ず見る**）／それ以外（`aud` の値が違う・`g` が無い・形が違う・値が違う）→ 拒否
-- 全体を返すのは PDF が **4,000,000 バイト以下** のとき（今どおり）。それより大きければ「分けて渡す」の案内
+- 全体を返すのは PDF が **4,000,000 バイト以下**（固定値。`deps.maxBytes`・`MAX_PDF_BYTES` には依らない）のとき（今どおり）。それより大きければ「分けて渡す」の案内
 - 部分の大きさ：**3,500,000 バイト**。分けて渡す上限：**50MiB（52,428,800 バイト）**。部分の数の上限は 15
 - `viewId`：KV に **10 分**（600 秒）。トークンの `jti`・LINE の userId・ファイル（driveFileId・sha256）・部分の数に結び付ける
 - 1 つの部分は 1 つの `viewId` の中で **合計 3 回まで**。これとは別に速さの上限 **1 分あたり「部分の数×2」回**
 - 部分の取得では毎回、トークン（期限切れなら拒否）・ログイン（IDトークン）・名簿（必要なとき）・**グループ在籍（キャッシュしない）**・失効を確かめる。`viewId` の無い部分の取得は拒否。`Cache-Control: no-store`
 - 監査は 1 回の閲覧＝1 件（案内を出すとき）。部分ごとには書かない
 - 閲覧側は全体の sha256 をトークンの `h` と照合してから表示。合わなければ表示しない。部分の取得に失敗したら、その部分だけ 3 回まで取り直す
-- 保存（`mode: "ticket"`）は全体が 4,000,000 バイト以下のときだけ。**券を出す前に** Drive の大きさを確かめ、大きいときは券を出さず、画面に「大きいためこの画面でご覧ください」
+- 保存（`mode: "ticket"`）は全体が 4,000,000 バイト（固定値）以下と分かったときだけ。**券を出す前に** Drive の大きさを確かめ、大きいときは券を出さず、画面に「大きいためこの画面でご覧ください」。大きさが読めない（size が無い）ときも券を出さない（`retry`）
 - Drive の範囲取得は 206 と `Content-Range`（start・end・全体の長さ）を確かめてから使う（Codex 残件 d）
 - 本文・トークン・鍵・viewId はログに出さない（今の方針どおり。console には理由コードと ref だけ）
 - 新しい環境変数は足さない（`LINE_GROUP_ID` は既存のもの）。本番の環境変数の値は画面に出さない
-- 本番反映（`cd delivery && vercel deploy --prod`）は **下村さんの承認の後**。この計画のタスクには含めない
+- 本番反映（P4 のブランチの worktree で `cd delivery && vercel deploy --prod`）は **下村さんの承認の後**。この計画のタスクには含めない。全体の順番は P1 → P4 → P3 → P2
+- テストのコマンドに `| tail` などのパイプは付けない（終了コードが隠れて失敗を見逃すため）
 - コミットは `type(delivery): 日本語`、最後の行に `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
 
 ---
@@ -61,13 +62,13 @@
 
 ## 判断したこと（設計書で決め切っていなかった点）
 
-1. 全体を返す境目は既存の `deps.maxBytes`（`MAX_PDF_BYTES`、既定 4,000,000）を使う。設計書の値と既定値が一致しており、券の判定・`/api/dl` と同じ値になるため。Vercel に `MAX_PDF_BYTES` を別の値で入れていると境目がずれる（値の確認は下村さんに。画面には出さない）
+1. 全体を返す境目と券を出す境目は、設計書の固定値 **4,000,000 バイト**（`parts.WHOLE_MAX`）で、`deps.maxBytes`（`MAX_PDF_BYTES`）ではない。Vercel の `MAX_PDF_BYTES` がどんな値でも境目は動かない（大きい値を入れていても、4,000,000 を超えるものは全体で返さず、券も出さない）。`MAX_PDF_BYTES` は全体を返す経路の「1 回の応答の上限」としてだけ残し、実際に使う上限は `Math.min(maxBytes, WHOLE_MAX)`
 2. 速さの上限を超えたときは新しいコード `slow`（429）。閲覧側は待って取り直し、**3 回の回数に数えない**（サーバ側も、速さの判定は総数のカウントより前に行うので総数に数えない）。総数の上限を超えたときは新しいコード `reopen`（410、「もう一度開いてください」）
 3. 部分の取得では gate の IP・トークン・人ごとの回数（30/60/20 回/分）を使わず、閲覧ごとの別枠（部分の数×2/分）に置き換える（`viewId` は認証済みの人にだけ出す 192 ビットの乱数で、KV に無ければ gate より前で拒否するため）。監査の予約も省く
 4. `aud`・`g` の形の違いは `dtoken.verify` が `bad-aud`（gate では `bad-token` と同じ一様な拒否）。形は正しいが `g` が閲覧ページのグループと違うものは gate の回数の確認の後で `bad-audience`（★ALERT）の一様な拒否
-5. 券の前の大きさ確認で Drive の大きさが読めないとき（size が無い）は券を出す（`/api/dl` が実際のバイト数で上限を確かめるため。今の動きを変えない）
+5. 券の前の大きさ確認で Drive の大きさが読めないとき（size が無い）は **券を出さず** 503 `retry`（監査は `denied`・`ticket-no-size`）。大きさの分からないものに券を出すと、分けて渡す対象の資料に保存の道ができてしまうため。全体を返す経路で size が無いときは今どおり実際のバイト数で確かめる
 6. 分けて渡した資料では保存ボタンを出さず、ページ数の横に「大きい資料のため保存はできません。この画面でご覧ください」と出す。サーバ側も券を出さない（二重）
-7. テストのトークンは `test/signtoken.js` で作る（Mac 側 `src/dtoken.js` の `_signRaw` を使う）。P3 の `issue({aud, g})` を待たずに、印の有無・値違い・形違いを作れるようにするため。P3 が入った後に通る互換の試験も 1 本置く（P3 が未反映なら skip）
+7. テストのトークンは `test/signtoken.js` で作る（Mac 側 `src/dtoken.js` の `_signRaw` を使う）。印の有無・値違い・形違いを自由に作れるようにするため。これとは別に、P3 が固定した互換ベクトル `test/fixtures/dtoken-vector-group.json`（P3 の本物の `issue` が作ったグループあてトークン）を閲覧ページの `verify`・`audienceOf` で読む試験を **必須** で置く（skip しない。P4 のブランチは P3 のブランチから作るので、ファイルは必ずある。無ければ試験は失敗し、P3 が入っていないことに気づける）
 8. 本番反映の順番：**P4 を先に反映してから**、P3（Mac 側が `aud` 付きのトークンを出す）を本番で動かす。逆だと古い閲覧ページは `aud` を無視して名簿を見るので、名簿に無いグループの人が開けない（危険側ではないが、設計 5 が満たせない）
 
 ---
@@ -91,11 +92,13 @@
 
 ```bash
 cd /Users/shimo/AI開発/apps/line-secretary
-git worktree add .worktrees/group-obi-viewer -b feature/group-obi-viewer feature/v1
-cd .worktrees/group-obi-viewer/delivery
-npm test 2>&1 | tail -8
+git worktree add .worktrees/group-obi-viewer -b feature/group-obi-viewer feature/group-obi-deliver
+cd .worktrees/group-obi-viewer
+test -f test/fixtures/dtoken-vector-group.json && echo FIXTURE-OK
+cd delivery
+npm test
 ```
-Expected: `ℹ fail 0`（2026-10-09 時点で 78 件 pass）。以下のコマンドはすべて `/Users/shimo/AI開発/apps/line-secretary/.worktrees/group-obi-viewer/delivery` で実行する。
+Expected: `FIXTURE-OK` が出る（出なければ P3 の Task 1 が入っていない。ここで止めて報告し、先へ進まない）。`npm test` は `ℹ fail 0`。以下のコマンドはすべて `/Users/shimo/AI開発/apps/line-secretary/.worktrees/group-obi-viewer/delivery` で実行する。
 
 - [ ] **Step 1: テスト用の署名の部品を作る**
 
@@ -134,7 +137,6 @@ module.exports = { keyPair, signToken, issueWith };
 
 ```js
 const { keyPair, issueWith } = require("./signtoken.js");
-const dtokenMac = require("../../src/dtoken.js");
 
 const G = "C" + "1".repeat(32);
 
@@ -175,31 +177,29 @@ test("verify: 印が正しければ通り、payload に aud・g が残る。印�
   assert.equal(dtoken.verify(plain.d, { publicKeys: keys, now }).ok, true);
 });
 
-test("互換：P3 の Mac 側 issue が aud・g を入れたトークンを、閲覧ページが line-group と読める", (t) => {
-  const kp = dtokenMac.generateKeyPair();
-  const now = Date.UTC(2026, 9, 9, 3, 0, 0);
-  let d;
-  try {
-    ({ d } = dtokenMac.issue({ shelfId: "s1", driveFileId: "F1", sha256: "a".repeat(64), now, aud: "line-group", g: G }, { privateKeyPem: kp.privateKeyPem, kid: "k1" }));
-  } catch (e) {
-    t.skip(`P3 の issue がまだ aud・g を受けない（${e.message}）`);
-    return;
-  }
-  const payload = JSON.parse(Buffer.from(d.split(".")[0], "base64url").toString("utf8"));
-  if (payload.aud === undefined) {
-    t.skip("P3 の issue がまだ aud・g を入れない");
-    return;
-  }
-  const r = dtoken.verify(d, { publicKeys: { k1: kp.publicKeyPem }, now });
+test("互換（必須）：P3 が固定したグループあてトークンのベクトルを、閲覧ページが line-group と読む", () => {
+  const fsx = require("fs");
+  const pathx = require("path");
+  // P3 の test/fixtures（line-secretary の直下）。P4 のブランチは feature/group-obi-deliver から作るので必ずある。skip しない
+  const p = pathx.join(__dirname, "..", "..", "test", "fixtures", "dtoken-vector-group.json");
+  assert.ok(fsx.existsSync(p), `P3 の互換ベクトルが無い（P4 のブランチは feature/group-obi-deliver から作る）: ${p}`);
+  const raw = fsx.readFileSync(p, "utf8");
+  assert.doesNotMatch(raw, /PRIVATE/, "秘密鍵が入っていてはいけない");
+  const v = JSON.parse(raw);
+  assert.equal(v.aud, "line-group");
+  const r = dtoken.verify(v.d, { publicKeys: { [v.kid]: v.publicKeyPem }, now: v.now + 1000 });
   assert.equal(r.ok, true);
-  assert.deepEqual(dtoken.audienceOf(r.payload), { kind: "line-group", g: G });
+  assert.equal(r.payload.jti, v.jti);
+  assert.equal(r.payload.aud, "line-group");
+  assert.equal(r.payload.g, v.g);
+  assert.deepEqual(dtoken.audienceOf(r.payload), { kind: "line-group", g: v.g });
 });
 ```
 
 - [ ] **Step 3: 失敗を確かめる**
 
 Run: `node --test test/dtoken.test.js`
-Expected: FAIL（`dtoken.audienceOf is not a function`、`bad-aud` の比較で `undefined !== 'bad-aud'` など）。互換の試験は P3 未反映なら skip。
+Expected: FAIL（`dtoken.audienceOf is not a function`、`bad-aud` の比較で `undefined !== 'bad-aud'` など）。互換の試験は必須（ベクトルが無ければ失敗する。skip はしない）。
 
 - [ ] **Step 4: 実装する**
 
@@ -242,8 +242,8 @@ module.exports = { verify, verifyAdmin, peek, parsePublicKeys, audienceOf, TOKEN
 
 - [ ] **Step 5: 通ることを確かめる**
 
-Run: `node --test test/dtoken.test.js && npm test 2>&1 | tail -8`
-Expected: dtoken の全件 PASS（互換の試験は P3 未反映なら skipped 1）。全体も `ℹ fail 0`。
+Run: `node --test test/dtoken.test.js && npm test`
+Expected: dtoken の全件 PASS（互換の試験も PASS。skipped は 0）。全体も `ℹ fail 0`。
 
 - [ ] **Step 6: Commit**
 
@@ -506,7 +506,7 @@ async function decide({ d, idToken, ip }, deps, opts = {}) {
 
 - [ ] **Step 4: 通ることを確かめる**
 
-Run: `node --test test/gate-aud.test.js test/gate.test.js && npm test 2>&1 | tail -8`
+Run: `node --test test/gate-aud.test.js test/gate.test.js && npm test`
 Expected: 両方 PASS（既存の gate.test.js は変更なしで通る）。全体 `ℹ fail 0`
 
 - [ ] **Step 5: Commit**
@@ -722,7 +722,7 @@ module.exports = { createDrive, fetchPdf, statPdf, fetchRange };
 
 - [ ] **Step 4: 通ることを確かめる**
 
-Run: `node --test test/drive.test.js && npm test 2>&1 | tail -8`
+Run: `node --test test/drive.test.js && npm test`
 Expected: drive の全件 PASS（既存の 2 件も変更なしで通る）。全体 `ℹ fail 0`
 
 - [ ] **Step 5: Commit**
@@ -749,10 +749,10 @@ EOF
 
 **Interfaces:**
 - Produces:
-  - `parts.PART_SIZE = 3500000`、`parts.MAX_BYTES = 52428800`、`parts.MAX_PARTS = 15`、`parts.VIEW_TTL_SEC = 600`、`parts.FETCH_MAX = 3`、`parts.RATE_PER_PART = 2`
+  - `parts.WHOLE_MAX = 4000000`（全体を返す境目・券を出す境目。設計書の固定値。`deps.maxBytes` とは無関係）、`parts.PART_SIZE = 3500000`、`parts.MAX_BYTES = 52428800`、`parts.MAX_PARTS = 15`、`parts.VIEW_TTL_SEC = 600`、`parts.FETCH_MAX = 3`、`parts.RATE_PER_PART = 2`
   - `parts.plan(size) → { parts: number, partSize: 3500000 }`（size は 1〜MAX_BYTES の整数。違えば投げる）
   - `parts.rangeOf(view, part) → { start, end }`（end は含む）
-  - `parts.validView(v) → boolean`（閲覧の記録 `{ jti, userId, s, f, h, i, size, parts, partSize, ref }` の形）
+  - `parts.validView(v) → boolean`（閲覧の記録の形。検査するのは `jti`・`userId`・`f`（driveFileId）・`h`（sha256）・`size`・`parts`・`partSize`・`ref`。記録には `s`・`i` も入れるが（Task 5）、`validView` も部分の取得の照合（Task 6）も見ない）
   - `kv.viewPut(viewId, rec, ttlSec)`、`kv.viewGet(viewId) → object | null`、`kv.viewPartHit(viewId, part, limit, ttlSec) → boolean`
   - `errors.authed("slow", ref)` → 429、`errors.authed("reopen", ref)` → 410
 
@@ -765,7 +765,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const parts = require("../lib/parts.js");
 
-test("定数：部分 3,500,000 バイト・上限 50MiB・部分は最大 15・閲覧 10 分・1 部分 3 回・速さは部分の数×2", () => {
+test("定数：全体の境目 4,000,000（固定）・部分 3,500,000 バイト・上限 50MiB・部分は最大 15・閲覧 10 分・1 部分 3 回・速さは部分の数×2", () => {
+  assert.equal(parts.WHOLE_MAX, 4000000);
   assert.equal(parts.PART_SIZE, 3500000);
   assert.equal(parts.MAX_BYTES, 50 * 1024 * 1024);
   assert.equal(parts.MAX_PARTS, 15);
@@ -795,6 +796,9 @@ test("validView: 閲覧の記録の形を確かめる（壊れていれば使わ
   for (const patch of [{ jti: "x" }, { userId: "x" }, { f: "" }, { h: "A".repeat(64) }, { size: 0 }, { size: parts.MAX_BYTES + 1 }, { parts: 2 }, { partSize: 1000 }, { ref: 1 }]) {
     assert.equal(parts.validView({ ...ok, ...patch }), false, JSON.stringify(patch));
   }
+  // s・i は記録するが検査しない（無くても通る）
+  const { s: _s, i: _i, ...noSI } = ok;
+  assert.equal(parts.validView(noSI), true);
   assert.equal(parts.validView(null), false);
 });
 ```
@@ -848,8 +852,9 @@ Expected: FAIL（`Cannot find module '../lib/parts.js'`、`unknown code: slow`�
 
 ```js
 // 大きい PDF を「分けて渡す」ための定数と計算（2026-10-09 設計 19）。
-// 全体を返すのは 4,000,000 バイト（deps.maxBytes）以下だけ。それを超え 50MiB までは、
+// 全体を返すのは 4,000,000 バイト（WHOLE_MAX・固定値。deps.maxBytes ではない）以下だけ。それを超え 50MiB までは、
 // 3,500,000 バイトずつの部分に分け、閲覧の番号（viewId・KV に 10 分）に結び付けて 1 部分ずつ渡す
+const WHOLE_MAX = 4000000; // 全体を返す・保存の券を出す境目（設計書の固定値。MAX_PDF_BYTES には依らない）
 const PART_SIZE = 3500000;
 const MAX_BYTES = 50 * 1024 * 1024; // portal の完成品の上限に合わせる（MiB）
 const MAX_PARTS = Math.ceil(MAX_BYTES / PART_SIZE); // 15
@@ -880,7 +885,7 @@ function validView(v) {
     typeof v.ref === "string";
 }
 
-module.exports = { PART_SIZE, MAX_BYTES, MAX_PARTS, VIEW_TTL_SEC, FETCH_MAX, RATE_PER_PART, plan, rangeOf, validView };
+module.exports = { WHOLE_MAX, PART_SIZE, MAX_BYTES, MAX_PARTS, VIEW_TTL_SEC, FETCH_MAX, RATE_PER_PART, plan, rangeOf, validView };
 ```
 
 `delivery/lib/errors.js` の 4 行目を置き換える:
@@ -923,7 +928,7 @@ const AUTHED = { expired: 410, retry: 503, replaced: 409, "too-large": 413, stop
 
 - [ ] **Step 4: 通ることを確かめる**
 
-Run: `node --test test/parts.test.js test/errors.test.js test/kv.test.js && npm test 2>&1 | tail -8`
+Run: `node --test test/parts.test.js test/errors.test.js test/kv.test.js && npm test`
 Expected: PASS。全体 `ℹ fail 0`
 
 - [ ] **Step 5: Commit**
@@ -948,12 +953,13 @@ EOF
 - Test: `delivery/test/open-parts.test.js`（新規）
 
 **Interfaces:**
-- Consumes: Task 2 `decide`、Task 3 `statPdf`・`fetchPdf(…, { stat })`、Task 4 `parts.plan`・`parts.MAX_BYTES`・`parts.VIEW_TTL_SEC`・`kv.viewPut`
+- Consumes: Task 2 `decide`、Task 3 `statPdf`・`fetchPdf(…, { stat })`、Task 4 `parts.WHOLE_MAX`・`parts.plan`・`parts.MAX_BYTES`・`parts.VIEW_TTL_SEC`・`kv.viewPut`
 - Produces:
   - 案内の応答（200・JSON）：`{ ok: true, mode: "parts", viewId: string(32, base64url), size: number, parts: number, partSize: 3500000, name: string }`
   - 閲覧の記録（`kv.viewPut` の rec）：`{ jti, userId, s, f, h, i, size, parts, partSize, ref }`
   - 監査：案内を出すと `auditConfirm(auditId, { result: "parts-issued", bytes: size, parts })`
-  - 券（`mode: "ticket"`）：Drive の大きさが `maxBytes` を超えれば券を出さず 413 `too-large`（監査は `denied`・`too-large-ticket`）
+  - 境目はすべて固定値 `parts.WHOLE_MAX`（4,000,000）。`deps.maxBytes` は全体を返す経路の 1 回の応答の上限として `Math.min(maxBytes, WHOLE_MAX)` の形で使うだけ（境目にはしない）
+  - 券（`mode: "ticket"`）：Drive の大きさが `WHOLE_MAX` を超えれば券を出さず 413 `too-large`（監査は `denied`・`too-large-ticket`）／大きさが読めない（size が null）ときも券を出さず 503 `retry`（監査は `denied`・`ticket-no-size`）
   - `module.exports.displayName(name) → string`（制御文字を除き 200 文字まで）
 
 - [ ] **Step 1: 失敗するテストを書く**
@@ -1029,6 +1035,33 @@ test("open: 4,000,000 バイトちょうどは今どおり全体を返し、1 �
   assert.equal(r2.headers["content-type"], "application/json");
   assert.equal(r2.body.mode, "parts");
   assert.equal(r2.body.parts, 2);
+});
+
+test("open: 境目は固定の 4,000,000。deps.maxBytes（MAX_PDF_BYTES）が大きくても小さくても動かない", async () => {
+  // MAX_PDF_BYTES を大きく入れていても、4,000,001 は全体で返さず分けて渡す
+  const big = setup({ bytes: pdfOf(4000001) }); await big.ready;
+  big.deps.maxBytes = 10000000;
+  const r1 = await call(big, { d: big.d, idToken: TOK });
+  assert.equal(r1.headers["content-type"], "application/json");
+  assert.equal(r1.body.mode, "parts");
+  assert.equal(r1.body.parts, 2);
+  // 大きく入れていても、4,000,001 には保存の券を出さない
+  const t1 = await call(big, { d: big.d, idToken: TOK, mode: "ticket" });
+  assert.equal(t1.statusCode, 413);
+  assert.equal(t1.body.code, "too-large");
+  // 全体を返す経路でも、実際の上限は 4,000,000 を超えない（メタが嘘で小さく、中身が 4,000,001 でも返さない）
+  const liar = setup(); await liar.ready;
+  liar.deps.maxBytes = 10000000;
+  liar.deps.drive = { meta: async () => ({ id: "F1", name: "x.pdf", size: "10", trashed: false }), bytes: async () => Buffer.alloc(4000001) };
+  const r2 = await call(liar, { d: liar.d, idToken: TOK });
+  assert.equal(r2.statusCode, 413);
+  assert.equal(r2.body.code, "too-large");
+  // 小さく入れていても、4,000,000 以下のものは分けない（全体の経路で too-large になるだけ）
+  const small = setup({ bytes: pdfOf(2000000) }); await small.ready;
+  small.deps.maxBytes = 1000000;
+  const r3 = await call(small, { d: small.d, idToken: TOK });
+  assert.equal(r3.statusCode, 413);
+  assert.equal(r3.body.code, "too-large");
 });
 
 test("open 案内: viewId・全体の大きさ・部分の数・部分の大きさ・ファイル名を返し、中身は取らない。監査は parts-issued の 1 件", async () => {
@@ -1175,8 +1208,9 @@ test("open ticket: 通れば /api/dl?k=<32字> を返し、KV に 60 秒の券�
   assert.match(rec.ref, /^[0-9a-f]{8}$/);
 });
 
-test("open ticket: Drive の大きさが 4,000,000 を超えれば券を出さず 413 too-large。監査は too-large-ticket", async () => {
+test("open ticket: Drive の大きさが 4,000,000 を超えれば券を出さず 413 too-large。監査は too-large-ticket（maxBytes が大きくても同じ）", async () => {
   const s = setup(); await s.ready;
+  s.deps.maxBytes = 10000000;
   let puts = 0;
   s.kv.ticketPut = async () => { puts += 1; };
   s.deps.drive = { meta: async () => ({ id: "F1", name: "x.pdf", size: "4000001", trashed: false }), bytes: async () => PDF };
@@ -1188,6 +1222,24 @@ test("open ticket: Drive の大きさが 4,000,000 を超えれば券を出さ�
   const list = await s.kv.auditList(5);
   assert.equal(list[0].result, "denied");
   assert.equal(list[0].reason, "too-large-ticket");
+});
+
+test("open ticket: Drive の大きさが無い（size 欠落）なら券を出さず 503 retry。監査は ticket-no-size。maxBytes が大きくても同じ", async () => {
+  const s = setup(); await s.ready;
+  s.deps.maxBytes = 10000000;
+  let puts = 0;
+  s.kv.ticketPut = async () => { puts += 1; };
+  for (const meta of [{ id: "F1", name: "x.pdf", trashed: false }, { id: "F1", name: "x.pdf", size: "", trashed: false }, { id: "F1", name: "x.pdf", size: "abc", trashed: false }]) {
+    s.deps.drive = { meta: async () => meta, bytes: async () => PDF };
+    const res = fakeRes();
+    await handle(s.req({ d: s.d, idToken: TOK, mode: "ticket" }), res, s.deps);
+    assert.equal(res.statusCode, 503, JSON.stringify(meta));
+    assert.equal(res.body.code, "retry");
+  }
+  assert.equal(puts, 0);
+  const list = await s.kv.auditList(5);
+  assert.equal(list[0].result, "denied");
+  assert.equal(list[0].reason, "ticket-no-size");
 });
 
 test("open ticket: Drive の大きさが読めない（障害）なら券を出さず 503 retry。消えていれば 409 replaced", async () => {
@@ -1220,8 +1272,8 @@ Expected: FAIL（4,000,001 バイトで `too-large` が返り `mode` が無い�
 // POST /api/open  本文: { d: 配布トークン, idToken: LIFF の IDトークン, mode?: "ticket" }
 // mode: "ticket" のときは PDF を返さず、同じ判定を通った人にだけ保存用の受け取り券（60 秒・1 回限り）を出す。
 // 券は /api/dl?k=... で Safari から受け取る（設計書 §9 の例外）。券を出す前に Drive の大きさを確かめ、
-// 4,000,000 バイト（maxBytes）を超えるものには出さない（2026-10-09 設計 19）
-// 判定（gate）→ Drive の大きさ → 4,000,000 以下なら全体を取り sha256 照合 → PDF を inline で返す。
+// 4,000,000 バイト（parts.WHOLE_MAX・固定値。maxBytes ではない）を超えるもの、大きさが分からないものには出さない（2026-10-09 設計 19）
+// 判定（gate）→ Drive の大きさ → 4,000,000 以下（固定値）なら全体を取り sha256 照合 → PDF を inline で返す。
 // それを超え 50MiB までなら、全体は返さず「分けて渡す」案内（viewId）を返す。監査は予約 → 確定（1 回の閲覧＝1 件）。
 // 本文・トークン・鍵・viewId はログに出さない。console には理由コードと ref だけ
 const crypto = require("crypto");
@@ -1263,7 +1315,9 @@ async function handle(req, res, deps) {
     return reply(res, g.response);
   }
 
-  const { kv, drive, maxBytes } = deps;
+  const { kv, drive } = deps;
+  // 全体を返す・券を出す境目は設計書の固定値（MAX_PDF_BYTES には依らない）。maxBytes は 1 回の応答の上限としてだけ使い、4,000,000 を超えさせない
+  const maxBytes = Math.min(Number.isFinite(deps.maxBytes) ? deps.maxBytes : parts.WHOLE_MAX, parts.WHOLE_MAX);
   const fail = async (code, reason, alert) => {
     // 先にログを出す。auditConfirm が落ちても、理由と ALERT の合図はここで必ず残る
     console.log(`open ${reason}${alert ? " ALERT" : ""} ref=${g.ref}`);
@@ -1286,9 +1340,10 @@ async function handle(req, res, deps) {
   if (!st.ok) return failDrive(st.reason);
 
   if (body.mode === "ticket") {
-    // 保存は全体が maxBytes（4,000,000）以下のときだけ。大きいものは券を出さない（分けての保存は次の段）。
-    // 大きさが読めないときは券を出す（/api/dl が実際のバイト数で上限を確かめる）
-    if (st.size != null && st.size > maxBytes) return fail("too-large", "too-large-ticket", false);
+    // 保存は全体が 4,000,000 バイト（WHOLE_MAX）以下と分かったときだけ。大きいものは券を出さない（分けての保存は次の段）。
+    // 大きさが読めない（size が無い）ときも券を出さない（分けて渡す対象に保存の道を作らないため。開き直してもらう）
+    if (st.size == null) return fail("retry", "ticket-no-size", false);
+    if (st.size > parts.WHOLE_MAX) return fail("too-large", "too-large-ticket", false);
     // 券の鍵は 24 バイトの乱数（base64url で 32 字）。鍵そのものはログに出さない
     const key = crypto.randomBytes(24).toString("base64url");
     const p = g.payload;
@@ -1306,7 +1361,7 @@ async function handle(req, res, deps) {
     return reply(res, { status: 200, body: { ok: true, url: `/api/dl?k=${key}` } });
   }
 
-  if (st.size != null && st.size > maxBytes) {
+  if (st.size != null && st.size > parts.WHOLE_MAX) {
     if (st.size > parts.MAX_BYTES) return fail("too-large", "too-large", false);
     // 分けて渡す案内（設計 19）。閲覧の番号を KV に 10 分置き、トークンの jti・この人・ファイル・部分の数に結び付ける。
     // 監査はこの 1 件だけ（部分の取得では書かない）
@@ -1365,7 +1420,7 @@ module.exports.displayName = displayName;
 
 - [ ] **Step 4: 通ることを確かめる**
 
-Run: `node --test test/open-parts.test.js test/open.test.js test/dl.test.js && npm test 2>&1 | tail -8`
+Run: `node --test test/open-parts.test.js test/open.test.js test/dl.test.js && npm test`
 Expected: PASS（`dl.test.js` は券を本物の `open.handle` で作るが、PDF は小さいので今どおり通る）。全体 `ℹ fail 0`
 
 - [ ] **Step 5: Commit**
@@ -1683,7 +1738,7 @@ async function handlePart(body, ip, res, deps) {
 
 - [ ] **Step 4: 通ることを確かめる**
 
-Run: `node --test test/open-parts.test.js test/open.test.js && npm test 2>&1 | tail -8`
+Run: `node --test test/open-parts.test.js test/open.test.js && npm test`
 Expected: PASS。全体 `ℹ fail 0`（速さの上限の試験は 1 分の窓の境目をまたぐと揺れうる。既存の gate の回数の試験と同じ前提。落ちたらもう一度流して確かめる）
 
 - [ ] **Step 5: Commit**
@@ -1985,7 +2040,7 @@ export async function assembleAndVerify({ info, d, fetchPart, sleep = defaultSle
 
 - [ ] **Step 4: 通ることを確かめる**
 
-Run: `node --test test/parts-client.test.js && npm test 2>&1 | tail -8`
+Run: `node --test test/parts-client.test.js && npm test`
 Expected: PASS。全体 `ℹ fail 0`
 
 - [ ] **Step 5: Commit**
@@ -2009,46 +2064,167 @@ EOF
 - Test: `delivery/test/app.test.js`（新規）
 
 **Interfaces:**
-- Consumes: Task 7 `assembleAndVerify`・`validInfo`（`/parts.mjs`）、Task 5 の案内、Task 6 の部分の応答、`errors` のコード `slow`・`reopen`、Task 5 の券の `too-large`
-- Produces: 画面の動き（テストは配線の確認だけ。描画は手元の確認で見る）
+- Consumes: Task 7 `assembleAndVerify`・`validInfo`（`/parts.mjs`）、既存の `token.mjs`、Task 5 の案内、Task 6 の部分の応答、`errors` のコード `slow`・`reopen`、Task 5 の券の `too-large`
+- Produces: 画面の動き。テストは偽物の DOM・LIFF・fetch・pdf.js の上で `app.js` 自体を node で実行し、①大きい資料は保存ボタンが出ない ②sha256 の照合に通るまで描かない（pdf.js に渡さない）③照合に通らなければ「もう一度開いてください」を出す、を確かめる。実際の描画と LIFF の実物は本番反映の節の実機の確認で見る
 
 - [ ] **Step 1: 失敗するテストを書く**
 
 `delivery/test/app.test.js`:
 
 ```js
-// app.js はブラウザ（LIFF・pdf.js）でしか動かないので、配線だけを文字で確かめる。組み立ての中身は parts-client.test.js
+// app.js を、偽物の DOM・LIFF・fetch・pdf.js の上で node のまま実行して、画面の動きを確かめる。
+// app.js は ES Module（import 3 行・LIFF の liff・document などのグローバル）なので、import の 3 行だけを取り除き、
+// 本物の parts.mjs・token.mjs（sha256 の照合も本物）と偽物を引数として渡した async 関数として動かす。
+// pdf.js・LIFF・実際の描画は偽物なので、そこは反映前の実機の確認（本番反映の節）で見る
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { pathToFileURL } = require("url");
+const { keyPair, issueWith } = require("./signtoken.js");
 
-const src = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+const SRC = fs.readFileSync(path.join(__dirname, "..", "public", "app.js"), "utf8");
+const pub = (f) => import(pathToFileURL(path.join(__dirname, "..", "public", f)).href);
+const sha = (b) => crypto.createHash("sha256").update(b).digest("hex");
+const kp = keyPair();
+const NOW = Date.UTC(2026, 9, 9, 3, 0, 0);
+const DATA = Buffer.from("%PDF-1.4\nabcdefghijklmnop"); // 25 バイト → 部分 10 バイトで 3 部分
+const tokenFor = (bytes) => issueWith({ sha256: sha(bytes), now: NOW }, kp).d;
+const VIEW_ID = "v".repeat(32);
+const INFO = { ok: true, mode: "parts", viewId: VIEW_ID, size: DATA.length, parts: 3, partSize: 10, name: "x.pdf" };
 
-test("app.js: 分けて渡す案内なら parts.mjs で組み立て、sha256 を照合してから描く", () => {
-  assert.match(src, /import \{ assembleAndVerify, validInfo \} from "\/parts\.mjs";/);
-  assert.match(src, /body\.ok === true && body\.mode === "parts"/);
-  assert.match(src, /assembleAndVerify\(\{/);
-  assert.match(src, /JSON\.stringify\(\{ d: t, idToken, viewId, part \}\)/);
-  assert.match(src, /application\/octet-stream/);
+// app.js 本体を、import を除いた async 関数に変える。最後の即時実行の async を返り値にして、終わりを待てるようにする
+function compile() {
+  const noImports = SRC.replace(/^import .*$/gm, "");
+  assert.notEqual(noImports, SRC, "import の行が見つからない");
+  const m = noImports.match(/^\(async \(\) => \{$/gm);
+  assert.equal(m && m.length, 1, "最後の即時実行の async が 1 つだけあるはず");
+  const body = noImports.replace(/^\(async \(\) => \{$/m, "const __done = (async () => {") + "\nreturn __done;";
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  return new AsyncFunction("pdfjs", "loginRedirectUri", "readParam", "readToken", "assembleAndVerify", "validInfo",
+    "document", "window", "location", "history", "liff", "fetch", body);
+}
+
+function fakeDom() {
+  const make = (tag) => ({
+    tag, children: [], style: {}, hidden: tag === "save", disabled: false, className: "", textContent: "",
+    getContext: () => ({}), appendChild(c) { this.children.push(c); return c; }, replaceChildren() { this.children = []; },
+  });
+  // index.html にある 3 つの要素。保存ボタンは最初は隠れている（hidden 属性つき）
+  const els = { status: make("status"), save: make("save"), pages: make("pages") };
+  return { els, document: { getElementById: (id) => els[id], createElement: (tag) => make(tag) } };
+}
+
+// server(req) → { status, type, body }。fetch の記録は calls（本文を JSON にして残す。トークン本体は比べるだけ）
+async function run({ d, server, inClient = false }) {
+  const parts = await pub("parts.mjs");
+  const token = await pub("token.mjs");
+  const dom = fakeDom();
+  const events = []; // 順番の記録：part-0, part-1, ..., getDocument
+  const calls = [];
+  let rendered = null;
+  const pdfjs = {
+    GlobalWorkerOptions: {},
+    getDocument: ({ data }) => {
+      events.push("getDocument");
+      rendered = Buffer.from(data);
+      return { promise: Promise.resolve({
+        numPages: 1,
+        getPage: async () => ({ getViewport: () => ({ width: 100, height: 100 }), render: () => ({ promise: Promise.resolve() }), cleanup() {} }),
+        cleanup: async () => {}, destroy: async () => {},
+      }) };
+    },
+  };
+  const fetchImpl = async (url, init) => {
+    const req = JSON.parse(init.body);
+    calls.push({ url, req });
+    if (req.part !== undefined) events.push(`part-${req.part}`);
+    const r = await server(req);
+    const headers = { "content-type": r.type };
+    const payload = r.type === "application/json" ? JSON.stringify(r.body) : r.body;
+    return new Response(payload, { status: r.status, headers });
+  };
+  const liff = {
+    init: async () => {}, isLoggedIn: () => true, getIDToken: () => "idtoken", isInClient: () => inClient,
+    login() {}, openWindow() {},
+  };
+  const location = { search: `?t=${d}`, pathname: "/", origin: "https://viewer.test" };
+  const fn = compile();
+  await fn(pdfjs, token.loginRedirectUri, token.readParam, token.readToken, parts.assembleAndVerify, parts.validInfo,
+    dom.document, { innerWidth: 400, devicePixelRatio: 1 }, location, { replaceState() {} }, liff, fetchImpl);
+  return { dom, events, calls, rendered: () => rendered, status: () => dom.els.status.textContent, saveHidden: () => dom.els.save.hidden, pages: () => dom.els.pages.children.length };
+}
+
+// 分けて渡す側の偽サーバ：案内 → 部分。bytes を変えれば中身のすり替えを作れる
+function partsServer(bytes, info = INFO) {
+  return async (req) => {
+    if (req.mode === "ticket") return { status: 500, type: "application/json", body: { ok: false, code: "retry" } };
+    if (req.viewId === undefined) return { status: 200, type: "application/json", body: info };
+    const start = req.part * info.partSize;
+    return { status: 200, type: "application/octet-stream", body: bytes.subarray(start, Math.min(bytes.length, start + info.partSize)) };
+  };
+}
+
+test("app: 大きい資料は部分を全部取ってから描き、保存ボタンを出さず、保存の券も求めない", async () => {
+  const d = tokenFor(DATA);
+  const r = await run({ d, server: partsServer(DATA) });
+  assert.deepEqual(r.events, ["part-0", "part-1", "part-2", "getDocument"], "sha256 の照合に通ってから描く");
+  assert.equal(Buffer.compare(r.rendered(), DATA), 0);
+  assert.equal(r.saveHidden(), true, "大きい資料には保存ボタンを出さない");
+  assert.match(r.status(), /1 ページ/);
+  assert.match(r.status(), /保存はできません/);
+  assert.equal(r.calls.some((c) => c.req.mode === "ticket"), false);
+  assert.equal(r.calls[0].req.viewId, undefined, "最初は案内を求める");
+  assert.deepEqual(r.calls.slice(1).map((c) => [c.req.viewId, c.req.part]), [[VIEW_ID, 0], [VIEW_ID, 1], [VIEW_ID, 2]]);
 });
 
-test("app.js: 分けて渡した資料では保存ボタンを出さず、保存で大きいと言われたら「この画面でご覧ください」", () => {
-  const start = src.indexOf('body.mode === "parts"');
-  const end = src.indexOf("say(MESSAGES[body.code]", start);
-  assert.ok(start > 0 && end > start);
-  assert.doesNotMatch(src.slice(start, end), /showSaveButton\(\)/);
-  assert.match(src, /"too-large": "大きいためこの画面でご覧ください。"/);
-  assert.match(src, /reopen: /);
-  assert.match(src, /slow: /);
-  assert.match(src, /hash: /);
+test("app: つないだ sha256 がトークンと違えば描かず、「もう一度開いてください」を出す", async () => {
+  const d = tokenFor(DATA);
+  const swapped = Buffer.from(DATA);
+  swapped[20] ^= 0xff; // 長さは同じで中身だけ違う
+  const r = await run({ d, server: partsServer(swapped) });
+  assert.equal(r.events.includes("getDocument"), false, "照合に通らなければ pdf.js に渡さない");
+  assert.equal(r.rendered(), null);
+  assert.equal(r.pages(), 0);
+  assert.match(r.status(), /確かめられませんでした/);
+  assert.match(r.status(), /もう一度開いてください/);
+  assert.equal(r.saveHidden(), true);
+});
+
+test("app: 部分の取得が拒否されたら描かず、その理由の案内を出す（取り直さない拒否）", async () => {
+  const d = tokenFor(DATA);
+  const server = async (req) => {
+    if (req.viewId === undefined) return { status: 200, type: "application/json", body: INFO };
+    return { status: 410, type: "application/json", body: { ok: false, code: "reopen", ref: "abcd1234" } };
+  };
+  const r = await run({ d, server });
+  assert.equal(r.events.includes("getDocument"), false);
+  assert.match(r.status(), /うまく取り出せませんでした/);
+  assert.equal(r.calls.filter((c) => c.req.part !== undefined).length, 1, "reopen は取り直さない");
+});
+
+test("app: 4MB 以下の PDF は今どおり全体で描き、保存ボタンを出す。保存で「大きい」と言われたら「この画面でご覧ください」", async () => {
+  const d = tokenFor(DATA);
+  const server = async (req) => {
+    if (req.mode === "ticket") return { status: 413, type: "application/json", body: { ok: false, code: "too-large", ref: "r1r1r1r1" } };
+    return { status: 200, type: "application/pdf", body: DATA };
+  };
+  const r = await run({ d, server });
+  assert.deepEqual(r.events, ["getDocument"]);
+  assert.equal(r.saveHidden(), false, "小さい資料には保存ボタンが出る");
+  assert.equal(r.calls.length, 1);
+  await r.dom.els.save.onclick();
+  assert.equal(r.calls.length, 2);
+  assert.equal(r.calls[1].req.mode, "ticket");
+  assert.match(r.status(), /大きいためこの画面でご覧ください/);
 });
 ```
 
 - [ ] **Step 2: 失敗を確かめる**
 
 Run: `node --test test/app.test.js`
-Expected: FAIL（`parts.mjs` の import が無い）
+Expected: FAIL（今の `app.js` は分けて渡す案内を扱わないので、「大きい資料は部分を全部取ってから描き…」などが落ちる。`compile()` が import の行を見つけられない場合も落ちる）
 
 - [ ] **Step 3: 実装する**
 
@@ -2268,7 +2444,7 @@ Run:
 node --test test/app.test.js
 cp public/app.js "${TMPDIR:-/tmp}/app-check.mjs" && node --check "${TMPDIR:-/tmp}/app-check.mjs" && echo SYNTAX-OK
 cp public/parts.mjs "${TMPDIR:-/tmp}/parts-check.mjs" && node --check "${TMPDIR:-/tmp}/parts-check.mjs" && echo SYNTAX-OK
-npm test 2>&1 | tail -8
+npm test
 ```
 Expected: app.test.js PASS、`SYNTAX-OK` が 2 回、全体 `ℹ fail 0`
 
@@ -2288,10 +2464,14 @@ EOF
 
 ## 本番反映（この計画のタスクの外。下村さんの承認の後）
 
-- 承認を取ってから、worktree の `delivery` で反映する。worktree には `.vercel/`（gitignore）が無いので、`vercel link --project mdnext-doc-delivery` でつなぐか、本体の `delivery/.vercel/project.json` を写す（中身はプロジェクトの番号だけで秘密は無い）。そのうえで `cd delivery && vercel deploy --prod`
-- 環境変数は足さない（`LINE_GROUP_ID` は既存）。`MAX_PDF_BYTES` が Vercel に入っているかは下村さんに確かめてもらう（入っていれば全体と分割の境目がその値になる。値は画面に出さない）
-- 反映の順番：**P4 を先に**本番へ。その後に P3（Mac 側が `aud`・`g` 付きのトークンを出す）を本番で動かす
-- 反映後の手元の確認（テスト用の図面で。実在のお客様の資料は使わない）：①今までの秘書室あてのリンクが今どおり開ける ②4MB 以下は保存ボタンが出て保存できる ③4MB を超える図面が「取り出しています…（n/m）」の後に表示され、保存ボタンが出ない ④（P3 反映後）グループあてのリンクを名簿に無いグループの社員が開ける
+**全体の本番の順番：P1（Railway）→ P4（この計画・Vercel 閲覧ページ）→ P3（Mac の本番ツリーへ fast-forward）→ P2（Vercel。最後に環境変数を入れて受付を有効にする）。** 各段は前の段の本番確認の後。P4 より先に P3 を動かさない（古い閲覧ページは `aud` を無視して名簿を見るため、グループのリンクが開けない）。
+
+- **反映前の確認（必須・下村さんと一緒に）**：①全部のテストが通る（`npm test`、`ℹ fail 0`）②下の「実機の確認」を、テスト用の図面で（実在のお客様の資料は使わない）。pdf.js と LIFF の実物はテストでは偽物なので、描画そのものはここで見る。③承認を取る
+- 承認を取ってから、**P4 の worktree**（ブランチ `feature/group-obi-viewer`）の `delivery` で反映する：`cd /Users/shimo/AI開発/apps/line-secretary/.worktrees/group-obi-viewer/delivery && vercel deploy --prod`。worktree には `.vercel/`（gitignore）が無いので、先に `vercel link --project mdnext-doc-delivery` でつなぐか、本体の `delivery/.vercel/project.json` を写す（中身はプロジェクトの番号だけで秘密は無い）。反映するのは `delivery/` の中身だけで、P3 の `src/` は Vercel に出ない
+- 環境変数は足さない（`LINE_GROUP_ID` は既存）。境目は固定値になったので `MAX_PDF_BYTES` の値は結果に影響しない（Vercel に入っていても、4,000,000 を超えるものは全体で返さず券も出さない）
+- **反映後に、古いリンクが今までどおり開くことを必ず確かめる**：`aud` の無い今までの秘書室あてのリンクが、名簿の確認つきで今までどおり開く（P3 が `aud` 付きを出す前なので、手元にある今までのリンクで確かめる）。開かなければ `vercel rollback` で前の反映に戻す
+- 実機の確認（テスト用の図面で）：①今までの秘書室あてのリンクが今どおり開ける ②4MB 以下は保存ボタンが出て保存できる ③4MB を超える図面が「取り出しています…（n/m）」の後に表示され、保存ボタンが出ない ④（P3 反映後）グループあてのリンクを名簿に無いグループの社員が開ける
+- その後に P3、最後に P2 へ進む（それぞれの計画の手順に従う）
 
 ---
 
@@ -2306,14 +2486,14 @@ EOF
 | 18 | `aud` 無しは今どおり名簿 | Task 2（既存 gate.test.js がそのまま通る＋gate-aud の 1 本目） |
 | 18 | `aud` の値違い・`g` 違いは拒否 | Task 1・2（`bad-token`・`bad-audience`。期限切れの peek の経路も） |
 | 19 | 上限 50MiB | Task 4（`MAX_BYTES`）、Task 5（超えたら too-large）、Task 7（`validInfo`） |
-| 19 | 4,000,000 以下は今どおり全体、超えたら案内（全体の大きさ・部分の数・部分の大きさ 3,500,000・ファイル名・viewId） | Task 5 |
+| 19 | 4,000,000 以下は今どおり全体、超えたら案内（全体の大きさ・部分の数・部分の大きさ 3,500,000・ファイル名・viewId）。境目は固定値で `MAX_PDF_BYTES` に依らない | Task 4（`WHOLE_MAX`）、Task 5 |
 | 19 | 案内の前に今どおりの確認を通し、監査を 1 件 | Task 5（gate＋`parts-issued`）、Task 6（部分では書かない） |
-| 19 | `viewId` を KV に 10 分、jti・userId・driveFileId・sha256・部分の数に結び付け | Task 4（`viewPut`・`validView`）、Task 5（記録）、Task 6（照合） |
+| 19 | `viewId` を KV に 10 分、jti・userId・driveFileId（`f`）・sha256（`h`）・部分の数（`parts`）に結び付け（`s`・`i` は記録のみで照合しない） | Task 4（`viewPut`・`validView`）、Task 5（記録）、Task 6（照合） |
 | 19 | 部分ごとにトークン（期限切れ拒否）・ログイン・在籍（キャッシュしない）・結び付き・失効を確かめ、範囲だけ返す。viewId 無しは拒否。no-store | Task 6 |
 | 19 | 1 部分は合計 3 回まで（総数）、別に 1 分あたり部分の数×2（速さ） | Task 4（定数・`viewPartHit`）、Task 6（`reopen`・`slow`） |
 | 19 | Drive から範囲で取る（206・Content-Range の確認＝Codex 残件 d） | Task 3（`fetchRange`）、Task 6 |
 | 19 | 閲覧側：順につなぎ、全体の sha256 をトークンの値と照合してから表示。合わなければ「もう一度開いてください」。1 部分 3 回まで取り直し | Task 7（`parts.mjs`）、Task 8（`app.js`） |
-| 19 | 保存は 4,000,000 以下だけ。券の前に Drive の大きさを確かめ、大きければ券を出さず「大きいためこの画面でご覧ください」 | Task 5（`too-large-ticket`）、Task 8（`SAVE_MESSAGES`・保存ボタンを出さない） |
+| 19 | 保存は 4,000,000 以下と分かったときだけ。券の前に Drive の大きさを確かめ、大きければ券を出さず「大きいためこの画面でご覧ください」。大きさが読めなければ券を出さず `retry` | Task 5（`too-large-ticket`・`ticket-no-size`）、Task 8（`SAVE_MESSAGES`・保存ボタンを出さない・実行する試験） |
 | 確かめ方 | 印の有無と値違いでの名簿・拒否 | Task 2 |
 | 確かめ方 | viewId の無い・他人の・期限切れの部分の取得を拒否、部分の範囲・番号の検査、監査が 1 閲覧 1 件、つないだ sha256 の照合・合わないと表示しない、大きいときは券を出さない | Task 5・6・7 |
 | 確かめ方 | 途中で止まる場面：部分の取得の途中 | Task 6（Drive が 2 回落ちても 3 回目で取れる）、Task 7（3 回失敗でその先を取らず失敗・描かない） |
@@ -2324,8 +2504,8 @@ EOF
 **3. 名前と形のそろい**：
 - `decide(…, deps, { rate, reserve })` の戻り値 `audience`・`auditId: null` は Task 2 で定義、Task 6 で使用
 - `statPdf`・`fetchPdf(…, { stat })`・`fetchRange(…, { start, end, total })`・`drive.range(fileId, start, end) → { status, contentRange, bytes }` は Task 3 で定義、Task 5・6 と `fakeDrive` で同じ形
-- `parts.plan`・`rangeOf`・`validView`・`MAX_BYTES`・`MAX_PARTS`・`VIEW_TTL_SEC`・`FETCH_MAX`・`RATE_PER_PART` は Task 4 で定義、Task 5・6 で使用
-- `kv.viewPut`・`viewGet`・`viewPartHit` は Task 4、Task 5・6 で使用。閲覧の記録の項目 `{ jti, userId, s, f, h, i, size, parts, partSize, ref }` は Task 5 の `viewPut` と Task 4 の `validView` で一致
+- `parts.WHOLE_MAX`・`plan`・`rangeOf`・`validView`・`MAX_BYTES`・`MAX_PARTS`・`VIEW_TTL_SEC`・`FETCH_MAX`・`RATE_PER_PART` は Task 4 で定義、Task 5・6 で使用
+- `kv.viewPut`・`viewGet`・`viewPartHit` は Task 4、Task 5・6 で使用。閲覧の記録の項目 `{ jti, userId, s, f, h, i, size, parts, partSize, ref }` は Task 5 の `viewPut` が書く。`validView`（Task 4）と Task 6 の照合が見るのは `jti`・`userId`・`f`・`h`・`size`・`parts`・`partSize`・`ref` だけで、一致している
 - 案内の応答 `{ ok, mode: "parts", viewId, size, parts, partSize, name }` は Task 5 と Task 7 の `validInfo` で一致
 - 応答コード `slow`（429）・`reopen`（410）は Task 4、Task 6・7・8 で同じ綴り
 - テスト用 `issueWith`・`keyPair` は Task 1、Task 2・5・6・7 で同じ引数
