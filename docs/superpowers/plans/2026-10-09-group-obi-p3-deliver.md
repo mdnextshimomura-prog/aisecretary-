@@ -34,10 +34,10 @@
 - 「送れたか分からない」送信は送り直さない（`isDefinitelyNotSent`＝応答のある 4xx だけが「はっきり失敗」）
 - ログには依頼番号・code・段階名だけを出す（物件名・リンク・本文・groupId は出さない）（`src/jobs/deliver.js:7` の約束）
 - 環境変数の追加なし（営業部の ID は既存の `config.DOC_REPLY.toId` と `tools/line-send/宛先.json` を使う）。`.env`・`宛先.json`・トークンの値は開かない・表示しない
-- `src/jobs/parse.js` は変えない。共通の依頼テスト用データ（`job-command-cases.json`）は P2 の持ち物だが、P3 は P2 より先に実装するので、**P2 の計画に書いてある JSON をそのまま取り出して** line-secretary の `test/fixtures/` に置き、`parse.js` が全件同じ結果を出すことをテストで固定する（Task 5）。違いが出たら `parse.js` も表も直さず、止めて報告する
+- `src/jobs/parse.js` は変えない。共通の依頼テスト用データ（`job-command-cases.json`）は P2 の持ち物だが、P3 は P2 より先に実装するので、**この計画の Task 5 に埋め込んだ JSON（P2 の最終版〔`1fd4def`〕から取り出した全文）をそのまま** line-secretary の `test/fixtures/` に置き、`parse.js` が全件同じ結果を出すことをテストで固定する（Task 5）。違いが出たら `parse.js` も表も直さず、止めて報告する
 - テストのコマンドに `| tail` などのパイプを付けない（終了コードが消える）。付けるなら先頭に `set -o pipefail;`
 - コミット：`type(scope): 日本語`（このリポジトリの書き方。例 `feat(jobs): …`）で、最後の行に `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
-- 本番への取り込み（`feature/v1` への `git merge --ff-only`）は、P4 が本番に出て確かめられた後、下村さんの承認後（Task 6）。`git push` は別に確認を取る
+- 本番への取り込み（`feature/v1` への `git merge --ff-only`）は、P4 の本番反映の段階 b（今までの形のリンク・4MB 以下は全体・4MB 超は部分、を実機で確認）が済んだ後、下村さんの承認後（Task 6）。グループあてリンクの確認は P4 の段階 c で、P3 の取り込みの後・P2 を有効にする前。`git push` は別に確認を取る
 
 ---
 
@@ -52,7 +52,7 @@
 | `test/jobs-ledger.test.js` | 同上のテスト | `dests` のテスト（Task 2） |
 | `src/jobs/deliver.js` | 納品の巡回 | claim の返事先の記録、グループへの送信、秘書室の宛先状態、控えの文（Task 3・4） |
 | `test/jobs-deliver.test.js` | 同上のテスト | 偽物に lineapp・`DOC_REPLY`・claim の返事先を足し、グループの各場面・途中で止まる場面のテスト、再納品でも送り直さないテスト（Task 3・4。既存3件を更新） |
-| `test/fixtures/job-command-cases.json` | 依頼文の読み取りの共通表（P2 の計画の JSON から生成。aisecretary と同じ中身） | 新規（Task 5） |
+| `test/fixtures/job-command-cases.json` | 依頼文の読み取りの共通表（Task 5 に全文を埋め込み。aisecretary の P2 実装が作るものとバイト同一） | 新規（Task 5） |
 | `test/jobs-parse-shared.test.js` | `parse.js` が共通表の全件で同じ結果を出すテスト | 新規（Task 5） |
 
 `src/poll.js` は変えない（`deliver.run` は `opts.lineapp` が無ければ `require("../lineapp.js")` を使い、`config` は今も `d.jobsConfig`＝`src/config.js` 全体を渡しているので `DOC_REPLY` が届く。`src/poll.js:409-413`）。
@@ -252,7 +252,7 @@ test("ledger(dests): 宛先・状態・no・sha256 の形が違えば setDest �
   assert.deepEqual(s.dests, {});
 });
 
-test("ledger(dests): 形が違えば broken", () => {
+test("ledger(dests): 形が違えば broken（at が日時として読めない場合を含む）", () => {
   const at = new Date(T0).toISOString();
   const bad = [
     [],
@@ -261,6 +261,9 @@ test("ledger(dests): 形が違えば broken", () => {
     { [`12:zz:group`]: { state: "sent", at } },
     { [`12:${SHA}:group`]: { state: "sent" } },
     { [`12:${SHA}:group`]: "sent" },
+    { [`12:${SHA}:group`]: { state: "sent", at: "not-a-date" } },
+    { [`12:${SHA}:group`]: { state: "sent", at: "" } },
+    { [`12:${SHA}:group`]: { state: "sent", at: "2026-13-45T99:99:99Z" } },
   ];
   for (const dests of bad) {
     const file = tmpFile();
@@ -286,6 +289,19 @@ test("ledger(dests): prune は7日より古い宛先の状態を消し、新し�
   assert.deepEqual(Object.keys(s.dests), [`2:${SHA}:group`]);
   assert.equal(s.history.length, 1, "history は30日まで残す");
   assert.equal(ledger.prune(s, T0), false, "消すものが無ければ false");
+});
+
+test("ledger(dests): at が壊れた状態（メモリ上）があっても prune は止まらず、それを消し、他は残す。setDest は読めない時刻で書かない", () => {
+  const s = ledger.load(tmpFile());
+  s.dests[`1:${SHA}:group`] = { state: "sent", at: "not-a-date" };
+  s.dests[`2:${SHA}:group`] = { state: "sent", at: new Date(T0 - DAY).toISOString() };
+  assert.doesNotThrow(() => ledger.prune(s, T0));
+  assert.deepEqual(Object.keys(s.dests), [`2:${SHA}:group`], "壊れた at は残さない");
+  assert.equal(ledger.prune(s, T0), false);
+  const s2 = ledger.load(tmpFile());
+  assert.throws(() => ledger.setDest(s2, 12, SHA, "group", "sent", NaN), /時刻/);
+  assert.throws(() => ledger.setDest(s2, 12, SHA, "group", "sent", undefined), /時刻/);
+  assert.deepEqual(s2.dests, {}, "投げたときは何も書かない");
 });
 ```
 
@@ -322,10 +338,11 @@ function empty() {
 `src/jobs/ledger.js:49-52`（`looksLikeInputWait`）の直後に足す：
 
 ```js
-// 宛先ごとの状態 { "<no>:<sha256>:<宛先>": { state, at } }
+// 宛先ごとの状態 { "<no>:<sha256>:<宛先>": { state, at } }。at は日時として読めるものだけ（読めない値が1つでもあれば台帳全体を broken にする。他の項目と同じ扱い）
 function looksLikeDests(x) {
   return isPlainObject(x) && Object.entries(x).every(([k, v]) => DEST_KEY_RE.test(k)
-    && isPlainObject(v) && DEST_STATES.includes(v.state) && typeof v.at === "string");
+    && isPlainObject(v) && DEST_STATES.includes(v.state)
+    && typeof v.at === "string" && Number.isFinite(Date.parse(v.at)));
 }
 ```
 
@@ -394,6 +411,7 @@ function setDest(state, no, sha256, dest, value, nowMs) {
   if (!Number.isInteger(no) || no <= 0 || typeof sha256 !== "string" || !/^[0-9a-f]{64}$/.test(sha256)) {
     throw new Error("no・sha256 の形が違います");
   }
+  if (!Number.isFinite(nowMs)) throw new Error("時刻の形が違います");
   if (!state.dests) state.dests = {};
   state.dests[destKey(no, sha256, dest)] = { state: value, at: new Date(nowMs).toISOString() };
 }
@@ -406,7 +424,8 @@ function setDest(state, no, sha256, dest, value, nowMs) {
   const destCutoff = nowMs - DEST_KEEP_MS;
   for (const [k, d] of Object.entries(state.dests)) {
     const t = d ? Date.parse(d.at) : NaN;
-    if (!d || (Number.isFinite(t) && t < destCutoff)) {
+    // at が読めない（NaN）ものは「古い」として消す。NaN のまま残して prune や台帳の整理を妨げない（load は読めない at を broken にするので、通常は来ない）
+    if (!d || !Number.isFinite(t) || t < destCutoff) {
       delete state.dests[k];
       changed = true;
     }
@@ -1336,15 +1355,15 @@ COMMIT
 ### Task 5: 共通の依頼テスト表を写して、`parse.js` が全件同じ結果を出すことを固定する
 
 **Files:**
-- Create: `test/fixtures/job-command-cases.json`（P2 の計画から取り出す）
+- Create: `test/fixtures/job-command-cases.json`（下の Step 3 の全文をそのまま置く）
 - Create: `test/jobs-parse-shared.test.js`
 - 変えない：`src/jobs/parse.js`、`test/jobs-parse.test.js`
 
 **Interfaces:**
-- Consumes: P2 の計画（`/Users/shimo/AI開発/apps/aisecretary/.worktrees/group-obi/docs/superpowers/plans/2026-10-09-group-obi-p2-aisecretary.md`）の Task 1 Step 1 にある `tests/fixtures/job-command-cases.json` の JSON 全文（`{ "about": …, "cases": [{ "input", "expected" }] }`、2026-10-09 時点で35件）。既存の `src/jobs/parse.js` の `parseJobCommand`
+- Consumes: 既存の `src/jobs/parse.js` の `parseJobCommand`。表の正本は、この計画の Step 3 に埋め込んだ JSON（P2 の最終版〔コミット `1fd4def`、`2026-10-09-group-obi-p2-aisecretary.md` の Task 2 Step 1〕から取り出した全文・35件）。動く文書（P2 の計画）には依存しない
 - Produces: line-secretary の `test/fixtures/job-command-cases.json`（P2 が aisecretary に作る同名のファイルと同じ中身）と、全件の照合テスト
 
-**注意（実装の順番）：** 実装の順番は P1 → P3 → P4 → P2 なので、P3 を実装する時点では aisecretary の `tests/fixtures/job-command-cases.json` はまだ存在しない（P2 が作る）。そのため、**P3 の実装者は P2 の計画の JSON コードブロック（全文が書いてある）から表を生成する**。aisecretary のファイルを探したり、手で写したりしない。後で P2 を実装するとき、P2 の実装者は自分のファイルとこのファイルの中身が同じか（`diff`）を確かめる。
+**注意（正本と同一性）：** 実装の順番は P1 → P3 → P4 → P2 なので、P3 の時点では aisecretary 側のファイルは無い。P3 は **Step 3 の JSON をそのまま**（1文字も変えず、末尾の改行1つを含めて）ファイルにする。後で P2 の実装者が作る `tests/fixtures/job-command-cases.json` は、これと**バイト単位で同一**でなければならない。同一性は両方の sha256 の比較で確かめる（Task 6 の「引き継ぎ」と P2 の最終確認）。違いが出たら `parse.js` も表も直さず、止めて報告する。
 
 - [ ] **Step 1: 失敗するテストを書く**（`test/jobs-parse-shared.test.js`）
 
@@ -1382,26 +1401,60 @@ for (const c of table.cases) {
 Run: `node --test test/jobs-parse-shared.test.js`
 Expected: FAIL（表のファイルがまだ無いので `ENOENT: no such file or directory … test/fixtures/job-command-cases.json`）
 
-- [ ] **Step 3: 表を P2 の計画から生成する**
+- [ ] **Step 3: 表を置く（下の JSON 全文を、そのまま `test/fixtures/job-command-cases.json` にする。末尾に改行1つ）**
 
-```bash
-node -e '
-const fs = require("fs");
-const plan = "/Users/shimo/AI開発/apps/aisecretary/.worktrees/group-obi/docs/superpowers/plans/2026-10-09-group-obi-p2-aisecretary.md";
-const t = fs.readFileSync(plan, "utf8");
-const i = t.indexOf("`tests/fixtures/job-command-cases.json`:");
-if (i < 0) throw new Error("P2 の計画に表の見出しが見つかりません");
-const m = /```json\n([\s\S]*?)\n```/.exec(t.slice(i));
-if (!m) throw new Error("P2 の計画に JSON の塊が見つかりません");
-const data = JSON.parse(m[1]);
-if (!Array.isArray(data.cases) || data.cases.length < 30) throw new Error("表の形が違います");
-fs.mkdirSync("test/fixtures", { recursive: true });
-fs.writeFileSync("test/fixtures/job-command-cases.json", m[1] + "\n");
-console.log("cases=" + data.cases.length);
-'
+`test/fixtures/job-command-cases.json`:
+```json
+{
+  "about": "依頼文の読み取りの共通テスト表。aisecretary（src/lib/obi/parse.ts）と line-secretary（src/jobs/parse.js）が同じ結果を返すことを固定する。expected は line-secretary の parse.js を実行して作った。片方だけ直すときは、この表を両方のリポジトリで同時に直すこと。",
+  "cases": [
+    {"input":"帯替えして 香椎2丁目の戸建","expected":{"action":"request","workflow":"obi","property":"香椎2丁目の戸建","assigneeName":""}},
+    {"input":"帯替えお願いします","expected":{"action":"request","workflow":"obi","property":"","assigneeName":""}},
+    {"input":"査定して グランドメゾン香椎 305 担当田中","expected":{"action":"request","workflow":"satei","property":"グランドメゾン香椎 305","assigneeName":"田中"}},
+    {"input":"査定 ○○マンション3階 担当：佐藤さん","expected":{"action":"request","workflow":"satei","property":"○○マンション3階","assigneeName":"佐藤"}},
+    {"input":"＃Ｊ１２　ＯＫ","expected":{"action":"review","no":12,"verdict":"ok"}},
+    {"input":"#j12 直す","expected":{"action":"review","no":12,"verdict":"fix"}},
+    {"input":"#J12OK","expected":{"action":"review","no":12,"verdict":"ok"}},
+    {"input":"#12 送って","expected":null},
+    {"input":"明日帯替えしておいて","expected":null},
+    {"input":"査定書の件ありがとう","expected":null},
+    {"input":"査定","expected":{"action":"request","workflow":"satei","property":"","assigneeName":""}},
+    {"input":"査定を ○○マンション","expected":{"action":"request","workflow":"satei","property":"○○マンション","assigneeName":""}},
+    {"input":"帯替え依頼 架空邸","expected":{"action":"request","workflow":"obi","property":"架空邸","assigneeName":""}},
+    {"input":"査定額も書き足して","expected":null},
+    {"input":"帯替えの件で質問","expected":null},
+    {"input":"帯替えの件ですが、明日でいいです","expected":null},
+    {"input":"","expected":null},
+    {"input":"   ","expected":null},
+    {"input":"帯替えをお願いします 香椎2丁目","expected":{"action":"request","workflow":"obi","property":"香椎2丁目","assigneeName":""}},
+    {"input":"査定依頼お願いします ○○","expected":{"action":"request","workflow":"satei","property":"○○","assigneeName":""}},
+    {"input":"査定して下さい 香椎","expected":{"action":"request","workflow":"satei","property":"香椎","assigneeName":""}},
+    {"input":"査定してください 香椎","expected":{"action":"request","workflow":"satei","property":"香椎","assigneeName":""}},
+    {"input":"帯替え下さい 香椎","expected":{"action":"request","workflow":"obi","property":"香椎","assigneeName":""}},
+    {"input":"オビ替え 香椎","expected":{"action":"request","workflow":"obi","property":"香椎","assigneeName":""}},
+    {"input":"おび替えして","expected":{"action":"request","workflow":"obi","property":"","assigneeName":""}},
+    {"input":"帯かえ　香椎３丁目","expected":{"action":"request","workflow":"obi","property":"香椎3丁目","assigneeName":""}},
+    {"input":"帯変えお願い 担当 田中さん 架空ハイツ","expected":{"action":"request","workflow":"obi","property":"架空ハイツ","assigneeName":"田中"}},
+    {"input":"帯替え 担当:佐藤 架空邸 101","expected":{"action":"request","workflow":"obi","property":"架空邸 101","assigneeName":"佐藤"}},
+    {"input":"帯替え\n架空邸","expected":{"action":"request","workflow":"obi","property":"架空邸","assigneeName":""}},
+    {"input":"帯替え。架空邸","expected":null},
+    {"input":"帯替えして、架空邸。","expected":{"action":"request","workflow":"obi","property":"架空邸","assigneeName":""}},
+    {"input":"帯替えしてほしい","expected":{"action":"request","workflow":"obi","property":"ほしい","assigneeName":""}},
+    {"input":"  帯替え 架空邸  ","expected":{"action":"request","workflow":"obi","property":"架空邸","assigneeName":""}},
+    {"input":"帯替えを","expected":{"action":"request","workflow":"obi","property":"","assigneeName":""}},
+    {"input":"帯替え  架空 　 ハイツ","expected":{"action":"request","workflow":"obi","property":"架空 ハイツ","assigneeName":""}}
+  ]
+}
 ```
 
-Expected: `cases=35`（P2 の計画の表の件数。P2 の計画がその後直されていて件数が違っても、30件以上なら進めてよい）
+置いたら、形と件数と sha256 を確かめて控える（sha256 は P2 側との同一性の確認に使う。値はこの計画の実装記録に書く）：
+
+```bash
+node -e 'const j=JSON.parse(require("fs").readFileSync("test/fixtures/job-command-cases.json","utf8"));console.log("cases="+j.cases.length)'
+shasum -a 256 test/fixtures/job-command-cases.json
+```
+
+Expected: `cases=35`。この計画を書いた時点の P2 最終版（`1fd4def`）の JSON ブロックから取り出した内容の sha256 は `b30b3f1c4a1951a63ed05d5dacdc837efec75466ddbaedee399db8004e7d98fa`（末尾改行1つを含む）。違う場合は、埋め込みの写し間違いなので Step 3 の JSON を見直す。
 
 - [ ] **Step 4: 通ることを確かめる**
 
@@ -1429,7 +1482,7 @@ COMMIT
 
 **Interfaces:**
 - Consumes: Task 1〜5 のコミット（ブランチ `feature/group-obi-deliver`）。P4 の本番確認（Vercel の閲覧ページ）
-- Produces: 本番の作業ツリー（`feature/v1`）への fast-forward の取り込み（P4 が本番に出て確かめられた後、下村さんの承認後）
+- Produces: 本番の作業ツリー（`feature/v1`）への fast-forward の取り込み（P4 の段階 b が済んだ後、下村さんの承認後）
 
 テストのコマンドに `| tail` などのパイプを付けない（終了コードが消えて、失敗が成功に見える）。出力を絞りたいときは先頭に `set -o pipefail;` を付ける。
 
@@ -1449,15 +1502,16 @@ Expected: Task 1〜5 の5コミット。変わるのは `src/dtoken.js`・`src/j
 
 - [ ] **Step 3: 取り込みの順番を確かめてから、下村さんに承認を求める（ここで止まる）**
 
-実装の順番は P1 → P3 → P4 → P2（P4 の作業ブランチはこのブランチから作る）。**本番に出す順番は P1 → P4 → P3 → P2**。この計画の取り込み（Mac の本番ツリー）は、P4 が本番に出て確かめられた後に行う：
+実装の順番は P1 → P3 → P4 → P2（P4 の作業ブランチはこのブランチから作る）。**本番に出す順番は P1 → P4 → P3 → P2**。この計画の取り込み（Mac の本番ツリー）は、P4 の本番反映の段階 b が済んだ後に行う：
 1. P1（portal の claim に `replyKind`・`replyGroupId`）が Railway の本番に出ていること。出ていなくてもこの変更は壊れない（項目なし＝秘書室だけ）が、グループには送られない
-2. P4（閲覧ページの `aud`・`g` の検査）が Vercel の本番に出て、確かめられていること（グループあてのトークンで開ける・印のない秘書室あてトークンは今までどおり名簿を見る・値が違えば拒否）。**P3 より先に出すのは、P3 を取り込むとグループに `aud: "line-group"` 付きのリンクが出るため、閲覧ページが先にそれを読めないと開けないから**
+2. P4（閲覧ページ）が Vercel の本番に出て、**P4 の本番反映の段階 b が済んでいること**：今までの形（`aud` なし）の秘書室あてリンクが名簿の確認つきで今までどおり開く／4,000,000 バイト以下の図面は全体で開き保存できる／4,000,000 バイトを超える図面は部分で取り出して表示され保存ボタンが出ない、を実機（LINE アプリ内）で確認した記録があること。**グループあてリンクの確認は、ここでは要らない（できない）。** P3 を取り込むまで `aud: "line-group"` のリンクは発行されないので、グループあてリンクの確認は P4 の段階 c（P3 の取り込みの後・P2 を有効にする前）で行う。段階 b が済んでいなければ、Step 4 に進まない
 3. この計画（P3）を `feature/v1` に fast-forward で取り込む（下の Step 4）
-4. 最後に P2（aisecretary の帯替えの受付）を有効にする（グループからの依頼が実際に始まる）
+4. **P4 の段階 c**：P2 の環境変数はまだ入れず（受付は無効のまま）、試験用の案件（テスト用の図面）にグループあての配布リンクを1本だけ発行し、営業部に在籍していて名簿に載っていない社員の端末で開けること・在籍していない人は開けないこと・4,000,000 超の図面でも開くことを確かめる（手順は P4 の計画の「本番反映」段階 c）。取れなければ P2 に進まない
+5. 最後に P2（aisecretary の帯替えの受付）の環境変数を入れて有効にする（グループからの依頼が実際に始まる）
 
-注意：P4 のブランチはこのブランチを土台にしているので、P4 のブランチを先に `feature/v1` へ入れると P3 のコミットも一緒に入り、Mac が先に新しいコードで動き出してしまう。P4 の本番確認は Vercel のデプロイ（ブランチのまま）で行い、`feature/v1` への取り込みはこの Step 4 の後にする。
+注意：P4 のブランチはこのブランチを土台にしているので、P4 のブランチを先に `feature/v1` へ入れると P3 のコミットも一緒に入り、Mac が先に新しいコードで動き出してしまう。P4 の段階 b の確認は Vercel のデプロイ（ブランチのまま）で行い、`feature/v1` への取り込みはこの Step 4 の後にする。
 
-下村さんに伝えること：上の順番、P4 の本番確認の結果、Step 1・2 の結果、取り込むと次の60秒ごとの巡回から新しいコードになること、戻すときの注意（下の Step 5）。**承認が出るまで Step 4 に進まない。**
+下村さんに伝えること：上の順番、P4 の段階 b の確認の結果、Step 1・2 の結果、取り込むと次の60秒ごとの巡回から新しいコードになること、戻すときの注意（下の Step 5）。**承認が出るまで Step 4 に進まない。**
 
 - [ ] **Step 4: 取り込み（下村さんの承認後。下村さんが自分で行うか、承認を得て実行）**
 
@@ -1493,7 +1547,7 @@ Expected: `broken=false`、`異常なし`。
 ## 対象外・後で行うこと
 
 - 本番のグループでの実地の確認は、4計画がそろった後に設計書「確かめ方」の「実地」で行う（この計画のタスクには入れない）
-- P2 の実装のとき、P2 の実装者は aisecretary の `tests/fixtures/job-command-cases.json` を作った後、この計画の Task 5 で置いた line-secretary の `test/fixtures/job-command-cases.json` と中身が同じか（`diff`）を確かめる（P3 はそのファイルを P2 の計画の JSON から生成している）
+- P2 の実装のとき、P2 の実装者は aisecretary の `tests/fixtures/job-command-cases.json` を作った後、この計画の Task 5 で置いた line-secretary の `test/fixtures/job-command-cases.json` と**バイト同一か**を `shasum -a 256` で両方比べて確かめる（P2 の最終確認の項目。一致しなければ P2 の有効化に進まない）
 
 ## Self-Review
 
@@ -1518,9 +1572,9 @@ Expected: `broken=false`、`異常なし`。
 - `pushText` が HTTP の前に status なしで投げる失敗（トークンが無いなど）は「結果不明」として扱う（送っていない可能性が高いが、`lineapp.js` を変えずに安全側に倒す）
 - 秘書室のリンクを先に発行し、発行できない件はグループにも出さない（グループだけにリンクが出て秘書室は not_sent、を避ける）
 - `replyKind` が `secretary`・`line-group` 以外の値なら、グループの状態は作らず送らない。秘書室の控えに「返事先が不明のためグループには送っていません」と書いて人に知らせる（`wantsGroup` は `line-group` のときだけ）
-- 共通の依頼テスト表は、P2 より先に P3 を実装するため、P2 の計画の JSON コードブロックから生成する（Task 5）。違いが出たら `parse.js` も表も直さず止めて報告する
+- 共通の依頼テスト表は、P2 より先に P3 を実装するため、P2 の最終版（`1fd4def`）の JSON ブロックから取り出した全文を Task 5 に埋め込んで置く（動く文書に依存しない）。P2 の実装が作るファイルはバイト同一でなければならず、sha256 で照合する。違いが出たら `parse.js` も表も直さず止めて報告する
 - グループあての互換ベクトル `test/fixtures/dtoken-vector-group.json` を P3 で固定し、P4（このブランチから分岐する）が閲覧ページ側の検査のテストに使えるようにする
-- 本番に出す順番は P1 → P4 → P3 → P2。P3 の fast-forward は P4 が Vercel に出て確かめられた後、下村さんの承認後（Task 6）
+- 本番に出す順番は P1 → P4 → P3 → P2。P3 の fast-forward は P4 の段階 b（今までの形のリンクでの実機確認）が済んだ後、下村さんの承認後（Task 6）。グループあてリンクの確認は P3 の取り込みの後の P4 の段階 c で、P2 の有効化の前
 
 **3. 抜け・置き換え忘れの点検**
 - 「TBD」「後で」「Task N と同じ」は無い。コードの段はすべて完全なコード
