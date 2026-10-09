@@ -5,10 +5,11 @@
  *   控えから PDF を選ぶ → LINE から全部取り出す → 同じ中身を1つに →
  *   portal の /api/jobs/intake に1回で送る → 返った一覧を照合 → グループに返事
  *
- * 時間：Webhook の開始から55秒を締め切りにし、各段階は残り時間を分け合う
- *   LINE の取得は1件15秒・全体30秒まで（portal のために10秒は残す）、portal は1回20秒まで。
- *   Webhook の関数は maxDuration = 60。既存のイベントの予約（3分）より短いので、
- *   別の処理が同じ依頼を途中から引き継ぐことはない。
+ * 時間：Webhook の関数は maxDuration = 60。その中に収まるように段階ごとに上限を置く
+ *   LINE の取得は1件15秒・全体30秒まで、かつ開始+35秒まで（portal のために10秒は残す）。
+ *   portal の段階は開始+45秒までに終える（1回 min(20秒, 開始+45秒−今)、残り5秒未満なら呼ばない）。
+ *   その後の返事の段階は、KV の印（NX）3秒・reply 5秒・push 5秒が上限（45+3+5+5＝58秒）。
+ *   既存のイベントの予約（3分）より短いので、別の処理が同じ依頼を途中から引き継ぐことはない。
  *
  * 「済み」の境目：portal から受付番号と PDF の一覧が返り、**その一覧が送った PDF と一致した**時点
  * （件数と sha256 の集合。onCommitted）。その後の返事の失敗では受付を取り消さない。
@@ -16,6 +17,9 @@
  * portal が `INTAKE_MISMATCH`（409）で断ったときも同じ返事を同じ NX（`obi-unconfirmed-notified:<id>`）で1回だけ
  * 返す（こちらははっきり断られたので済みにする＝retry:false・onCommitted は呼ばない）。NX が既にある・NX が例外のときは送らない。
  * portal の結果が分からないときは「結果不明」として LINE の再送を待つ（retry）。
+ * 結果不明の後の呼び直しで portal が断った（OBI_BUSY・INTAKE_STOPPED など）ときも、はっきりした
+ * 断りとは扱わず結果不明のままにする（1回目が通っていて、自分の依頼で busy になっているかもしれない）。
+ * ただし INTAKE_MISMATCH は「同じ lineMessageId で中身が違う」というはっきりした答えなので、そのまま扱う。
  * portal は1つの依頼につき、1回の Webhook の中で最大2回（最初の1回＋締め切りの中での呼び直し1回）。
  *
  * 返事は依頼1つにつき1回だけ：受付の返事は `obi-accepted-notified:<id>`、結果不明の返事は
@@ -37,10 +41,19 @@ import { dedupeBySha256, fetchObiPdfs } from "./fetch-pdfs";
 import { inputsMatch, postIntake, type IntakeOutcome, type IntakeRequest } from "./portal";
 import { propertyFor, requestTextFor, sanitizeForReply } from "./sanitize";
 
+/**
+ * 設計 10 の締め切り（開始+55秒）。実際の時間の割り振りは下の段階ごとの上限で行う
+ * （portal の段階は開始+45秒まで、その後の返事の段階は最長13秒。合計で maxDuration 60 に収まる）。
+ */
 export const OBI_DEADLINE_MS = 55_000;
+/** portal の段階を終える時刻（開始からの ms）。この後の返事の段階が maxDuration 60 に収まるように */
+const PORTAL_PHASE_END_MS = 45_000;
 const LINE_FETCH_TOTAL_MS = 30_000;
 const PORTAL_RESERVE_MS = 10_000; // 取り出しの段階で portal のために残す時間
 const PORTAL_CALL_MS = 20_000;
+const REPLY_TIMEOUT_MS = 5_000;
+const PUSH_TIMEOUT_MS = 5_000;
+const KV_TIMEOUT_MS = 3_000; // 返事の印（NX）を置く時間の上限
 const PORTAL_MIN_MS = 5_000; // これより短い残り時間では portal を呼ばない（呼び直さない）
 const MAX_PORTAL_ATTEMPTS = 2; // 最初の1回＋呼び直し1回
 const REQUESTED_BY = "LINEグループ（営業部）";
@@ -91,12 +104,14 @@ export interface ObiIntakeDeps {
   fetchImpl: typeof fetch;
   lineToken: string;
   now: () => number;
-  /** 依頼への reply（結果を3つに分けて返す。例外は投げない作り） */
-  reply: (text: string) => Promise<ReplyOutcome>;
-  /** reply がはっきり断られたときの push（送れたら true） */
-  push: (to: string, text: string) => Promise<boolean>;
+  /** 依頼への reply（結果を3つに分けて返す。例外は投げない作り）。timeoutMs で打ち切る */
+  reply: (text: string, timeoutMs: number) => Promise<ReplyOutcome>;
+  /** reply がはっきり断られたときの push（送れたら true）。timeoutMs で打ち切る */
+  push: (to: string, text: string, timeoutMs: number) => Promise<boolean>;
   /** portal で受付が確定し、一覧も一致した（以後は再送させない） */
   onCommitted: () => void;
+  /** 返事の印（NX）を置く時間の上限（ms）。省略時は3秒。テストで短くする */
+  kvTimeoutMs?: number;
 }
 
 export interface ObiIntakeResult {
@@ -104,6 +119,26 @@ export interface ObiIntakeResult {
   outcome: "accepted" | "refused" | "pending" | "unconfirmed";
   /** true なら Webhook はこのイベントを済みにせず、5xx で LINE の再送を待つ */
   retry: boolean;
+}
+
+/**
+ * 返事の印（NX）を時間の上限つきで置く。上限を過ぎたら例外（KV の障害と同じ扱い）。
+ * ObiStore.setNx は打ち切りの手段を持たないので、待つのをやめるだけ（KV への書込み自体は
+ * 後で通るかもしれない。そのときは返事が出ないだけで、二重にはならない）。
+ */
+async function setNxBounded(deps: ObiIntakeDeps, key: string): Promise<boolean> {
+  const ms = deps.kvTimeoutMs ?? KV_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      deps.store.setNx(key, OBI_NOTIFY_TTL_SECONDS),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`KV の印が${ms}ms で返らない`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function rejectionMessage(o: Extract<IntakeOutcome, { kind: "rejected" }>): string {
@@ -125,10 +160,7 @@ async function notifyUnconfirmedOnce(
 ): Promise<void> {
   let first: boolean;
   try {
-    first = await deps.store.setNx(
-      `obi-unconfirmed-notified:${input.requestMessageId}`,
-      OBI_NOTIFY_TTL_SECONDS
-    );
+    first = await setNxBounded(deps, `obi-unconfirmed-notified:${input.requestMessageId}`);
   } catch (err) {
     console.error(
       "帯替え：確かめられない返事の印を置けない（返事は出さない）:",
@@ -144,9 +176,12 @@ export async function runObiIntake(
   input: ObiIntakeInput,
   deps: ObiIntakeDeps
 ): Promise<ObiIntakeResult> {
-  const deadline = input.startedAt + OBI_DEADLINE_MS;
+  const portalPhaseEnd = input.startedAt + PORTAL_PHASE_END_MS;
   const say = (text: string) =>
-    deliverReply(text, { reply: deps.reply, push: (t) => deps.push(input.groupId, t) });
+    deliverReply(text, {
+      reply: (t) => deps.reply(t, REPLY_TIMEOUT_MS),
+      push: (t) => deps.push(input.groupId, t, PUSH_TIMEOUT_MS),
+    });
   const refuse = async (text: string): Promise<ObiIntakeResult> => {
     await say(text);
     return { outcome: "refused", retry: false };
@@ -184,7 +219,7 @@ export async function runObiIntake(
     fetchImpl: deps.fetchImpl,
     lineToken: deps.lineToken,
     now: deps.now,
-    deadline: Math.min(deps.now() + LINE_FETCH_TOTAL_MS, deadline - PORTAL_RESERVE_MS),
+    deadline: Math.min(deps.now() + LINE_FETCH_TOTAL_MS, portalPhaseEnd - PORTAL_RESERVE_MS),
   });
   if (fetched.kind === "too-large") return refuse(OBI_MESSAGES.tooLarge);
   if (fetched.kind === "failed") {
@@ -205,12 +240,13 @@ export async function runObiIntake(
     files: files.map((f) => ({ fileName: f.fileName, bytes: f.bytes })),
   };
 
-  // ③ portal へ1回で送る。結果が分からなければ、締め切りの中で同じ内容をもう1回だけ（同じ
-  //    lineMessageId なので portal 側で二重にならない）。呼ぶのは最大2回
+  // ③ portal へ1回で送る。結果が分からなければ、開始+45秒までの中で同じ内容をもう1回だけ（同じ
+  //    lineMessageId なので portal 側で二重にならない）。呼ぶのは最大2回。1回の時間は
+  //    min(20秒, 開始+45秒−今) なので、portal の段階は開始+45秒を越えない
   let outcome: IntakeOutcome | null = null;
   let sawUnknown = false;
   for (let i = 0; i < MAX_PORTAL_ATTEMPTS; i++) {
-    const remaining = deadline - deps.now();
+    const remaining = portalPhaseEnd - deps.now();
     if (remaining < PORTAL_MIN_MS) break;
     outcome = await postIntake(request, {
       fetchImpl: deps.fetchImpl,
@@ -222,12 +258,13 @@ export async function runObiIntake(
       sawUnknown = true;
       continue;
     }
-    // 前の呼び出しが届いたか分からないまま「つながらない」になっても、受付できなかったとは言えない
-    if (outcome.kind === "unreachable" && sawUnknown) continue;
+    // unknown 以外は呼び直さない。unknown の後の「つながらない」も、ここでやめて下で結果不明として
+    // 扱う（前の呼び出しが届いたか分からないので、受付できなかったとは言えない）
     break;
   }
   // 一度も送っていない＝portal に受付は無い
   if (outcome === null) return refuse(OBI_MESSAGES.timeUp);
+  // 2回目を呼ぶ時間が無かったときは outcome が1回目の unknown のまま残る＝下の結果不明へ
 
   if (outcome.kind === "accepted") {
     // 一覧が送った PDF と合わなければ済みにしない（受付の返事も出さない）。
@@ -240,10 +277,7 @@ export async function runObiIntake(
     deps.onCommitted();
     let first: boolean;
     try {
-      first = await deps.store.setNx(
-        `obi-accepted-notified:${input.requestMessageId}`,
-        OBI_NOTIFY_TTL_SECONDS
-      );
+      first = await setNxBounded(deps, `obi-accepted-notified:${input.requestMessageId}`);
     } catch (err) {
       // 受付は確定済み。印が置けないまま送ると二重になりうるので、返事は出さずにログだけ
       console.error(
@@ -271,18 +305,16 @@ export async function runObiIntake(
       await notifyUnconfirmedOnce(input, deps, say);
       return { outcome: "refused", retry: false };
     }
-    return refuse(rejectionMessage(outcome));
+    // 結果不明の後の断りは、はっきりした断りとは言えない（1回目が通っていて、OBI_BUSY が
+    // 自分の依頼のことかもしれない）。下の結果不明へ
+    if (!sawUnknown) return refuse(rejectionMessage(outcome));
   }
   if (outcome.kind === "unreachable" && !sawUnknown) return refuse(OBI_MESSAGES.unreachable);
 
   // ④ 結果不明：受付できなかったとは言わない。返事は1回だけにして、LINE の再送を待つ
   console.error("帯替え：portal の受付の結果が分からない:", input.requestMessageId);
-  if (
-    await deps.store.setNx(
-      `obi-pending-notified:${input.requestMessageId}`,
-      OBI_NOTIFY_TTL_SECONDS
-    )
-  ) {
+  // 印が置けない（例外・時間切れ）ときは例外のまま外へ（受付は確定していないので再送を待ってよい）
+  if (await setNxBounded(deps, `obi-pending-notified:${input.requestMessageId}`)) {
     await say(OBI_MESSAGES.pending);
   }
   return { outcome: "pending", retry: true };

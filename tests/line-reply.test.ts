@@ -5,6 +5,7 @@ import {
   replyLineMessageDetailed,
   deliverReply,
   pushLineMessage,
+  pushLineMessageDetailed,
   sendLineMessage,
   type ReplyOutcome,
 } from "../src/lib/line";
@@ -19,7 +20,9 @@ const ok = (name: string, cond: boolean, d = "") => {
 
 const calls: Array<{ url: string; body: Record<string, unknown> | null }> = [];
 let respond: () => Promise<Response> = async () => new Response("{}", { status: 200 });
+let lastSignal: AbortSignal | null | undefined;
 globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+  lastSignal = init?.signal;
   calls.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
   return respond();
 }) as typeof fetch;
@@ -78,6 +81,22 @@ async function main() {
     push: (t) => pushLineMessage("Cgroup", t).catch(() => false),
   });
   ok("reply 400 → push で同じ本文をグループへ", d === "pushed" && calls[1].url.endsWith("/v2/bot/message/push") && calls[1].body?.to === "Cgroup", JSON.stringify(calls.map((c) => c.url)));
+
+  // ── 時間の上限つきの push（帯替えの返事の送り直し用） ──
+  calls.length = 0;
+  respond = json(200, {});
+  ok("pushLineMessageDetailed：送れたら true・宛先と本文", (await pushLineMessageDetailed("Cgroup", "本文", 5000)) === true && calls[0].url.endsWith("/v2/bot/message/push") && calls[0].body?.to === "Cgroup");
+  ok("pushLineMessageDetailed：時間の上限（AbortSignal）を付けて呼ぶ", lastSignal instanceof AbortSignal);
+  respond = json(400, {});
+  ok("pushLineMessageDetailed：断られたら false", (await pushLineMessageDetailed("Cgroup", "x", 5000)) === false);
+  respond = async () => {
+    throw new DOMException("timed out", "TimeoutError");
+  };
+  ok("pushLineMessageDetailed：時間切れは false（例外を投げない）", (await pushLineMessageDetailed("Cgroup", "x", 5000)) === false);
+  respond = async () => {
+    throw new TypeError("fetch failed");
+  };
+  ok("pushLineMessageDetailed：通信の失敗も false", (await pushLineMessageDetailed("Cgroup", "x", 5000)) === false);
 
   // ── 既存の sendLineMessage は今の動きのまま ──
   respond = json(400, {});

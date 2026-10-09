@@ -39,6 +39,18 @@ const ab = (u8: Uint8Array) => {
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
+/**
+ * AbortSignal.timeout(ms) の ms を覚えておく（portal の1回の時間の上限・push の時間の上限を確かめるため）。
+ * 偽の時計の上で「時間切れまで待った」を表すのに使う。
+ */
+const timeoutOf = new WeakMap<AbortSignal, number>();
+const origTimeout = AbortSignal.timeout.bind(AbortSignal);
+AbortSignal.timeout = (ms: number) => {
+  const s = origTimeout(ms);
+  timeoutOf.set(s, ms);
+  return s;
+};
+
 type PortalAnswer = Response | "timeout" | "refused" | ((form: FormData) => Promise<Response>);
 
 interface World {
@@ -48,7 +60,12 @@ interface World {
   lineDelayMs: number; // 1件取り出すごとに進める時間
   portal: PortalAnswer[]; // 呼ばれるたびに先頭から使う（最後の1つは使い回す）
   portalDelayMs: number;
+  /** true なら portal は1回の時間の上限（AbortSignal.timeout）で時間切れになる（偽の時計もその分だけ進む） */
+  portalHonorsTimeout: boolean;
+  portalCalls: Array<{ at: number; ms: number | undefined }>;
   portalForms: FormData[];
+  replyTimeouts: number[];
+  pushTimeouts: number[];
   replies: string[];
   pushes: string[];
   replyMode: "sent" | "rejected" | "unknown" | "crash" | "crash-after-send";
@@ -65,7 +82,11 @@ function world(): World {
     lineDelayMs: 0,
     portal: [],
     portalDelayMs: 0,
+    portalHonorsTimeout: false,
+    portalCalls: [],
     portalForms: [],
+    replyTimeouts: [],
+    pushTimeouts: [],
     replies: [],
     pushes: [],
     replyMode: "sent",
@@ -96,6 +117,12 @@ function deps(w: World): ObiIntakeDeps {
     }
     if (u === "https://portal.example.test/api/jobs/intake") {
       w.portalForms.push(init?.body as FormData);
+      const ms = init?.signal ? timeoutOf.get(init.signal) : undefined;
+      w.portalCalls.push({ at: w.clock.t, ms });
+      if (w.portalHonorsTimeout && ms !== undefined && w.portalDelayMs >= ms) {
+        w.clock.t += ms;
+        throw new DOMException("timed out", "TimeoutError");
+      }
       w.clock.t += w.portalDelayMs;
       const a = w.portal.length > 1 ? w.portal.shift()! : w.portal[0];
       if (a === "timeout") throw new DOMException("timed out", "TimeoutError");
@@ -110,7 +137,8 @@ function deps(w: World): ObiIntakeDeps {
     fetchImpl,
     lineToken: "line-token",
     now: () => w.clock.t,
-    reply: async (text: string): Promise<ReplyOutcome> => {
+    reply: async (text: string, timeoutMs: number): Promise<ReplyOutcome> => {
+      w.replyTimeouts.push(timeoutMs);
       if (w.replyMode === "crash") throw new Error("crash");
       w.replies.push(text);
       if (w.replyMode === "crash-after-send") throw new Error("crash");
@@ -118,7 +146,8 @@ function deps(w: World): ObiIntakeDeps {
       if (w.replyMode === "unknown") return { kind: "unknown" };
       return { kind: "sent", messageId: "bot-1" };
     },
-    push: async (to: string, text: string) => {
+    push: async (to: string, text: string, timeoutMs: number) => {
+      w.pushTimeouts.push(timeoutMs);
       w.pushes.push(`${to}|${text}`);
       if (w.pushMode === "crash-after-send") throw new Error("crash");
       return w.pushMode === "ok";
@@ -516,6 +545,95 @@ async function main() {
     w.clock.t = T + 100_000;
     const r = await run(w, { startedAt: w.clock.t });
     ok("その後の再送で受付が分かれば受付の返事は出す", r.outcome === "accepted" && w.replies.length === 1 && w.replies[0].startsWith("#J33"));
+  }
+
+  // ── 結果不明の後の断りは、はっきりした断りとして扱わない（自分の依頼が通っているかもしれない） ──
+  {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = ["timeout", json(409, { code: "OBI_BUSY", message: "busy", busyJobNo: 11 })];
+    const r = await run(w);
+    ok("不明の後の OBI_BUSY は不明のまま（処理中の返事は出さない）", r.outcome === "pending" && r.retry && w.committed === 0 && w.replies.join("|") === OBI_MESSAGES.pending && !w.replies.some((t) => t.includes("処理中です")), w.replies.join("|"));
+  }
+  {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = ["timeout", json(503, { code: "INTAKE_STOPPED", message: "x" })];
+    const r = await run(w);
+    ok("不明の後の INTAKE_STOPPED は不明のまま", r.outcome === "pending" && r.retry && w.replies.join("|") === OBI_MESSAGES.pending, w.replies.join("|"));
+  }
+  {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = ["timeout", json(400, { code: "INVALID_REQUEST", message: "x" })];
+    const r = await run(w);
+    ok("不明の後のそれ以外の断りも不明のまま", r.outcome === "pending" && r.retry && w.replies.join("|") === OBI_MESSAGES.pending, w.replies.join("|"));
+  }
+  {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = ["timeout", json(409, { code: "INTAKE_MISMATCH", message: "x" })];
+    const r = await run(w);
+    ok("不明の後の INTAKE_MISMATCH は「確かめられませんでした」を1回・済みにする", r.outcome === "refused" && !r.retry && w.committed === 0 && w.replies.join("|") === OBI_MESSAGES.unconfirmed, w.replies.join("|"));
+    w.portal = ["timeout", json(409, { code: "INTAKE_MISMATCH", message: "x" })];
+    w.clock.t = T + 70_000;
+    await run(w, { startedAt: w.clock.t });
+    ok("不明の後の INTAKE_MISMATCH：再送でも通知は1通", w.replies.length === 1, w.replies.join("|"));
+  }
+
+  // ── portal の段階は開始から45秒で終える（maxDuration 60 の中に返事の時間を残す） ──
+  for (const lineDelayMs of [0, 10_000, 17_000]) {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = [accept(50)];
+    w.lineDelayMs = lineDelayMs;
+    w.portalDelayMs = 600_000; // portal が返ってこない
+    w.portalHonorsTimeout = true;
+    const start = T + 1000;
+    const r = await run(w);
+    const ends = w.portalCalls.map((c) => c.at + (c.ms ?? Infinity));
+    ok(`portal の段階は開始+45秒までに終わる（取り出し${lineDelayMs / 1000}秒）`, r.outcome === "pending" && w.portalCalls.length >= 1 && ends.every((e) => e <= start + 45_000) && w.clock.t <= start + 45_000, JSON.stringify(w.portalCalls.map((c) => [c.at - start, c.ms])));
+  }
+  {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = [accept(51)];
+    w.lineDelayMs = 21_000; // 1回目は 21→41秒、残りは4秒
+    w.portalDelayMs = 600_000;
+    w.portalHonorsTimeout = true;
+    const r = await run(w);
+    ok("残りが5秒未満なら2回目は呼ばず、結果不明として再送を待つ", r.outcome === "pending" && r.retry && w.portalForms.length === 1 && w.replies.join("|") === OBI_MESSAGES.pending, `${w.portalForms.length} ${w.replies.join("|")}`);
+  }
+
+  // ── 返事の段階にも時間の上限を付ける ──
+  {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = [accept(52)];
+    w.replyMode = "rejected";
+    await run(w);
+    ok("reply と push は時間の上限つきで呼ぶ（5秒）", w.replyTimeouts.join() === "5000" && w.pushTimeouts.join() === "5000", `${w.replyTimeouts} ${w.pushTimeouts}`);
+  }
+  {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = [accept(53)];
+    const d = deps(w);
+    d.kvTimeoutMs = 20;
+    d.store = { ...w.store, setNx: () => new Promise<boolean>(() => undefined) }; // KV が返ってこない
+    const r = await runObiIntake(input(), d);
+    ok("受付の返事の印（NX）が返ってこない：上限で打ち切り、返事は出さず再送もさせない", r.outcome === "accepted" && !r.retry && w.committed === 1 && w.replies.length === 0, JSON.stringify(r));
+  }
+  {
+    const w = world();
+    await seed(w, [{ id: "600000000000000002", name: "a.pdf", ago: 60_000 }]);
+    w.portal = [json(502, {})];
+    const d = deps(w);
+    d.kvTimeoutMs = 20;
+    d.store = { ...w.store, setNx: () => new Promise<boolean>(() => undefined) };
+    let threw = false;
+    await runObiIntake(input(), d).catch(() => (threw = true));
+    ok("確かめ中の返事の印（NX）が返ってこない：上限で打ち切り、例外にして再送を待つ（返事は出さない）", threw && w.replies.length === 0 && w.committed === 0);
   }
 
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);

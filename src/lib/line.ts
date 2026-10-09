@@ -227,6 +227,41 @@ export async function replyLineMessageDetailed(
   }
 }
 
+const PUSH_TIMEOUT_MS = 5_000;
+
+/**
+ * 時間の上限つきの push（帯替えの返事の送り直し用）。送れたら true。
+ * 時間切れ・通信の失敗・断られたときは false（例外は投げない。投げると呼び出し側が
+ * 「途中で止まった」として再送を待ち、二重の push になりうる）。
+ * 既存の pushLineMessage は時間の上限なしのまま（呼び出し元の動きを変えない）。
+ */
+export async function pushLineMessageDetailed(
+  to: string,
+  text: string,
+  timeoutMs: number = PUSH_TIMEOUT_MS
+): Promise<boolean> {
+  try {
+    const res = await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+      },
+      body: JSON.stringify({ to, messages: [{ type: "text", text }] }),
+      signal: AbortSignal.timeout(timeoutMs),
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      console.error("LINE push を断られた:", res.status);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("LINE push の結果が分からない:", (err as { name?: string })?.name ?? err);
+    return false;
+  }
+}
+
 export type ReplyDelivery = "replied" | "pushed" | "push-failed" | "unknown";
 
 /**
