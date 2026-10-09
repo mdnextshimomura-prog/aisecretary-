@@ -35,6 +35,8 @@ export type ObiConfigResult =
 
 function parsePortalBaseUrl(raw: string | undefined): string | null {
   if (!raw) return null;
+  // 空白・改行は削らずに止める（JOB_API_TOKEN と同じ）。空の ? や # は URL にすると消えて見逃すので、元の文字で断る
+  if (/[\s?#]/.test(raw)) return null;
   let u: URL;
   try {
     u = new URL(raw);

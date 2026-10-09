@@ -4,34 +4,34 @@
  * LINE のファイル名や依頼文は誰でも好きに付けられる。改行や見えない文字が入ると、
  * グループの返事の見た目を崩したり、別の行の文に見せかけたりできるため取り除く。
  */
-// 改行・タブを含む制御文字（C0・DEL・C1）
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/g;
-// 幅のない文字・文字の向きを変える文字
-const INVISIBLE_RE = /[​-‏‪-‮⁠-⁤﻿]/g;
+// 改行（CR/LF と U+2028 行区切り・U+2029 段落区切り）。空白に置き換える
+// （tsconfig の target が es5 のため u フラグの正規表現リテラルは書けない。実行環境（Node）は対応しているので RegExp で作る）
+const LINE_BREAK_RE = new RegExp("\\r\\n|[\\r\\n\\p{Zl}\\p{Zp}]", "gu");
+// 制御文字（Cc：C0・DEL・C1、タブを含む）と書式文字（Cf：幅のない文字・文字の向きを変える／隔てる文字・BOM など）
+const INVISIBLE_RE = new RegExp("[\\p{Cc}\\p{Cf}]", "gu");
 
 function cut(s: string, max: number): string {
   const chars = Array.from(s);
   return chars.length > max ? chars.slice(0, max - 1).join("") + "…" : s;
 }
 
-/** 返事に書く1項目（ファイル名・物件名）。改行は空白に、制御文字は除き、max 文字まで */
-export function sanitizeForReply(s: string, max = 40): string {
-  const flat = String(s ?? "")
+/** 改行は空白に、制御文字・見えない文字は除き、空白の連続を1つにしてトリムする（長さは切らない） */
+function flatten(s: string): string {
+  return String(s ?? "")
+    .replace(LINE_BREAK_RE, " ")
     .replace(INVISIBLE_RE, "")
-    .replace(/\r\n|\r|\n/g, " ")
-    .replace(CONTROL_RE, "")
     .replace(/ {2,}/g, " ")
     .trim();
-  return cut(flat, max);
+}
+
+/** 返事に書く1項目（ファイル名・物件名）。改行は空白に、制御文字は除き、max 文字まで */
+export function sanitizeForReply(s: string, max = 40): string {
+  return cut(flatten(s), max);
 }
 
 /** portal に送るファイル名。区切り文字（/ \）を潰し、100文字まで、末尾は必ず .pdf */
 export function sanitizeUploadName(name: string): string {
-  let s = String(name ?? "")
-    .replace(INVISIBLE_RE, "")
-    .replace(CONTROL_RE, "")
-    .replace(/[\\/]/g, "_")
-    .trim();
+  let s = flatten(name).replace(/[\\/]/g, "_");
   if (!/\.pdf$/i.test(s)) s = `${s || "file"}.pdf`;
   const chars = Array.from(s);
   if (chars.length > 100) s = chars.slice(0, 96).join("") + ".pdf";
@@ -50,16 +50,6 @@ export function cutUtf16(s: string, max: number): string {
     if (c >= 0xd800 && c <= 0xdbff) end -= 1; // 上位サロゲートで終わる＝対を割る（または対の相手が無い）
   }
   return s.slice(0, end);
-}
-
-/** 改行・制御文字・幅のない文字を除いた1項目（長さは切らない） */
-function flatten(s: string): string {
-  return String(s ?? "")
-    .replace(INVISIBLE_RE, "")
-    .replace(/\r\n|\r|\n/g, " ")
-    .replace(CONTROL_RE, "")
-    .replace(/ {2,}/g, " ")
-    .trim();
 }
 
 /** portal の property 用：トリム後 max ユニット以内（超えたら max-1 ユニットで切って … を付ける） */

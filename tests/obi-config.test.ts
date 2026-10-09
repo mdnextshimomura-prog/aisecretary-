@@ -58,6 +58,10 @@ const req = (over: Partial<Parameters<typeof classifyObiEntry>[0]> = {}) => ({
   bad("JOB_API_TOKEN に改行が混ざると止める", { JOB_API_TOKEN: "tok\n" }, "JOB_API_TOKEN");
   const local = loadObiConfig({ ...env, PORTAL_BASE_URL: "http://localhost:3000" });
   ok("localhost だけは http を許す（手元の確認用）", local.ok);
+  bad("PORTAL_BASE_URL に空白が混ざると止める（削らない）", { PORTAL_BASE_URL: " https://portal.example.test" }, "PORTAL_BASE_URL");
+  bad("PORTAL_BASE_URL に改行が混ざると止める", { PORTAL_BASE_URL: "https://portal.example.test\n" }, "PORTAL_BASE_URL");
+  bad("PORTAL_BASE_URL に ? があると止める（空のクエリも）", { PORTAL_BASE_URL: "https://portal.example.test/?" }, "PORTAL_BASE_URL");
+  bad("PORTAL_BASE_URL に # があると止める（空の # も）", { PORTAL_BASE_URL: "https://portal.example.test/#" }, "PORTAL_BASE_URL");
 }
 
 // ── 入口の判定 ──
@@ -133,6 +137,21 @@ const req = (over: Partial<Parameters<typeof classifyObiEntry>[0]> = {}) => ({
   ok("絵文字だけの1002ユニットは500個（1000ユニット）", requestTextFor(tMany) === E.repeat(500));
   ok("依頼文は空でもよい", requestTextFor("   ") === "" && requestTextFor(undefined as unknown as string) === "");
   ok("cutUtf16 は割れる位置で1つ手前に切る", cutUtf16("ab" + E, 3) === "ab" && cutUtf16("ab" + E, 4) === "ab" + E);
+}
+
+// ── 行・段落の区切り（U+2028/2029）と向きを隔てる文字（U+2066〜2069）も除く ──
+{
+  const LS = "\u2028", PS = "\u2029", LRI = "\u2066", PDI = "\u2069";
+  const hasBad = (s: string) => /[\u2028\u2029\u2066-\u2069]/.test(s);
+  const r = sanitizeForReply(`a${LS}b${PS}c${LRI}d${PDI}e`);
+  ok("返事：U+2028/2029 は空白に、U+2066/2069 は除く", r === "a b cde", JSON.stringify(r));
+  const p = propertyFor(`架空${LS}邸${LRI}A${PDI}`, "x.pdf");
+  ok("物件名：U+2028・U+2066・U+2069 を残さない", p === "架空 邸A", JSON.stringify(p));
+  const pf = propertyFor(`${PS}${LRI}${PDI}`, `図面${LS}B${PDI}.pdf`);
+  ok("物件名が区切りだけなら PDF 名へ（その名前からも除く）", pf === "図面 B", JSON.stringify(pf));
+  const u = sanitizeUploadName(`図${LS}面${PS}${LRI}x${PDI}.pdf`);
+  ok("送るファイル名：U+2028/2029/2066/2069 を残さない", !hasBad(u) && u.endsWith(".pdf") && u.includes("図") && u.includes("x"), JSON.stringify(u));
+  ok("区切りの改行は引き続き空白", sanitizeForReply("a\r\nb\rc") === "a b c");
 }
 
 console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
