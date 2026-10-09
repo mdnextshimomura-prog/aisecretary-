@@ -2,7 +2,9 @@
 
 設計書：`docs/superpowers/specs/2026-10-09-group-obi-intake-design.md`（この約束と食い違えば設計書が正）
 
-計画は4本。実行の順番は P1 → P2 → P3 → P4（P2 は P1 の API、P3 は P1 の claim、P4 は P3 のトークンを使う）。
+計画は4本。
+- **実装の順番**：P1 → P3 → P4 → P2（P4 の作業ブランチは P3 のブランチから作り、P3 が作るトークンの互換データを必ず使う試験にする）
+- **本番に出す順番**：P1（Railway）→ P4（Vercel 閲覧ページ）→ P3（Mac の本番ツリーへ fast-forward）→ P2（Vercel。最後に環境変数を入れて受付を有効にする）。各段は前の段の本番確認の後
 各計画は自分のリポジトリだけを変え、ほかの計画の中身はこの約束の形だけを頼りにする。
 
 | 計画 | リポジトリ | ファイル |
@@ -23,7 +25,7 @@
   - `workflow`＝`obi`（必須・これだけ）
   - `lineMessageId`（必須・依頼の LINE メッセージ id。1〜64文字の数字）
   - `property`（必須・物件名、1〜100文字）
-  - `requestText`（任意・〜1000文字）、`requestedBy`（任意・〜60文字）、`assigneeName`（任意）
+  - `requestText`（任意・〜1000文字）、`requestedBy`（任意・〜60文字）。**`assigneeName` はこの入口では受け付けない**（P2 は送らない。`担当:` は読み取っても portal には渡さない）
   - `replyKind`（必須）、`replyGroupId`（`line-group` のとき必須）
   - `files`（1〜20個、出た順。各 PDF。ファイル名つき）
 - 成功：201（新しく作った）／200（同じ `lineMessageId` の既存を照合して一致）
@@ -31,7 +33,7 @@
   { "no": 12, "status": "下準備中", "created": true,
     "inputs": [ { "name": "a.pdf", "sha256": "<64桁16進>", "size": 123456 } ] }
   ```
-  `inputs` は送られた順
+  `inputs` は**初回に保存した順**（200 の再送の応答でも初回の順）。P2 は sha256 の集合で照合する（順番では比べない）
 - 失敗：`{ "code": string, "message": string, "busyJobNo"?: number }`
   | code | HTTP | 意味 |
   |---|---|---|
@@ -59,6 +61,9 @@
 - 秘書室あて（今まで）のトークンには `aud`・`g` を付けない
 - P4 の閲覧ページは：`aud` が無い → 今どおり名簿を見る／`aud === 'line-group'` かつ `g === 閲覧ページの LINE_GROUP_ID` → 名簿を省く（在籍は必ず見る）／それ以外（`aud` の値が違う・`g` が無い・形が違う・値が違う）→ 拒否
 - `issue` の引数は `{ shelfId, driveFileId, sha256, ttlSec, now, aud?, g? }`。`aud` と `g` は両方そろえて渡すか、両方渡さないか
+
+## P2 と P3 の間：依頼の読み方の共通テストデータ
+- P2 が aisecretary の `tests/fixtures/` に共通の JSON 表を作る。P3 がそれを line-secretary に写し、既存の `src/jobs/parse.js` が全件同じ結果を出すことをテストで固定する（写しの中身は同一。違いが出たら P3 は parse.js ではなく表を疑い、止めて報告）
 
 ## P2 と P3 の間（直接のやり取りはない）
 - P2 は portal に `replyKind: 'line-group'`・`replyGroupId: <営業部の groupId>` を付けて受付ける
