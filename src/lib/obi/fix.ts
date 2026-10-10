@@ -1,0 +1,310 @@
+/**
+ * 帯替えの完成リンクへの「番号で直す」（設計 2026-10-10 の E11・E12・「流れ」・「文」・「うまくいかないとき」）。
+ *
+ * 2段に分ける。呼ぶのは webhook-event.ts。
+ *   locateObiFix … どの依頼への返事かを決める（イベントの予約より前。portal は何も書き換えない）
+ *     - #J つき           ：その番号（portal は呼ばない）
+ *     - 聞き返しへの引用   ：KV の `obi-fix-askmsg:<引用先の id>` → 受付番号（portal は呼ばない）
+ *     - 完成の知らせへの引用：portal の resolve（quotedMessageId）。NOT_FOUND なら訂正として扱わない
+ *     - 引用先を確かめられない：返事も予約もせず、初回から今までの流れへ（LINE の Webhook の再送は本番で無効。Z3）
+ *   runObiFix … 認可 → resolve（まだなら）→ 聞き返し／fix → 返事
+ *
+ * 認可は呼ぶ側が済ませ、ここには「許可されたか」の真偽だけが来る（userId は受け取らない。
+ * portal・KV・ログ・返事のどこにも出さない）。許可されていなければ fix は呼ばない。
+ *
+ * portal を呼ぶのは1通につき resolve 1回＋fix 1回まで。同じ Webhook の中での呼び直しはしない。
+ * 時間（Webhook の開始から25秒）：KV は1回1秒、resolve 6秒、fix 8秒、reply 4秒、push 4秒。
+ *   返事より前の段階（KV・resolve・fix・返事の印）は開始+17秒までに終える。
+ *   fix の時間は min(8秒, 開始+17秒−今−返事の印の1秒)。2秒に満たなければ fix を呼ばない。
+ *
+ * resolve の見込み（fixable・closable・current）は、fix を呼ばないとき（聞き返し）の案内にだけ使う。
+ * ページまで揃った訂正は、見込みに関わらず fix を呼び、portal の答えで返事を決める
+ * （fix は同じ message.id を先に照合するので、同じ発言がもう一度届いても最初の結果が返る。Z11）。
+ *
+ * 返事は1通につき1回：`obi-fix-replied:<id>`（結果不明は `obi-fix-pending-notified:<id>`、
+ * 断りは `obi-fix-forbidden:<id>`）を NX で置けたときだけ送る。聞き返しは依頼ごとに1回
+ * （`obi-fix-ask:<受付番号>`）。印が置けない・読めないときは返事をしない。かぎの期限はどれも8日。
+ *
+ * LINE の Webhook の再送は本番で無効。どの場面でも「503 を返して、同じ発言がもう一度届くのを待つ」ことはしない（AA1）。
+ *   fix を呼んだ後、はっきりした答え（受け付けた・はっきり断った）が無く、届いたかどうかも分からない
+ *     （時間切れ・応答の途中の切断・5xx・形の違う応答）：結果不明。「受付の結果を確かめられませんでした…
+ *     同じ番号をもう一度送らないでください」を1回返して済みにする（人が送り直すと message.id が変わり、
+ *     portal の冪等では二重の訂正を防げないので、「もう一度送ってください」とは言わない）
+ *   fix を呼ぶ前の失敗（resolve が届かない・時間が足りない）と、fix を呼んだが送っていないことが確かな失敗
+ *     （postFix の unreachable＝ECONNREFUSED・ENOTFOUND・EAI_AGAIN。AB1）：何も変わっていないのが確かなので
+ *     「…portal に届きません。少し待ってからもう一度送ってください」を返して済みにする（送り直しても二重にならない）
+ *
+ * ログに出すのは、処理の段階・受付番号（#J）・番号・ページ・結果の code・返事の結果だけ。
+ * message.id・userId・groupId・本文・リンク・例外の文は出さない（AA4。例外は名前だけ）。
+ */
+import { deliverReply, type ReplyDelivery, type ReplyOutcome } from "../line";
+import type { ObiConfig } from "./config";
+import type { FixBody, FixCode } from "./fix-parse";
+import { OBI_MESSAGES } from "./intake";
+import { OBI_FIX_KEY_TTL_SECONDS, type ObiStore } from "./memo";
+import { postFix, postFixResolve, type FixEstimate, type FixOutcome, type FixResolved } from "./portal";
+import { sanitizeForReply } from "./sanitize";
+
+/** Webhook の開始からの締め切り */
+export const OBI_FIX_DEADLINE_MS = 25_000;
+/** 返事より前の段階（KV・resolve・fix・返事の印）を終える時刻（開始からの ms） */
+export const OBI_FIX_PORTAL_PHASE_END_MS = 17_000;
+/**
+ * これより遅く始まる訂正は、portal を呼ばない（同じ Webhook に先の処理があったとき。Z11）。
+ * LINE の Webhook の再送は本番で無効なので、503 で戻ってくるのを当てにしない（Z3）：
+ * 引用の形は今までの流れへ渡し、#J つきは「portal に届きません…」を1通につき1回返して済みにする。
+ * 17秒 −（KV 1秒＋resolve 6秒＋fix の最小 2秒＋返事の印 1秒）
+ */
+export const OBI_FIX_LATE_START_MS = 7_000;
+const KV_OP_MS = 1_000;
+const RESOLVE_MS = 6_000;
+const FIX_MS = 8_000;
+const FIX_MIN_MS = 2_000;
+const REPLY_TIMEOUT_MS = 4_000;
+const PUSH_TIMEOUT_MS = 4_000;
+const PAGE_MIN = 1;
+const PAGE_MAX = 120;
+
+const CODE_LABEL: Record<FixCode, string> = {
+  0: "問題なし",
+  1: "帯の位置",
+  2: "他社の文字",
+  3: "向き",
+  4: "順番",
+  5: "その他",
+};
+
+/** 「（3ページ・帯の位置）」。ページが無ければ「（順番）」 */
+function what(code: FixCode, page: number | null): string {
+  return page === null ? `（${CODE_LABEL[code]}）` : `（${page}ページ・${CODE_LABEL[code]}）`;
+}
+
+export const OBI_FIX_MESSAGES = {
+  closed: (no: number) => `ありがとうございます。#J${no} を完了にしました`,
+  queued: (no: number, code: FixCode, page: number) =>
+    `#J${no} の直しを受け付けました${what(code, page)}。直せたら、ここに新しいリンクを出します`,
+  queuedUpsideDown: (no: number, page: number) =>
+    `#J${no} の直しを受け付けました${what(3, page)}。逆さ（180度）として直します。右に90度なら「${page}ページ 3右」、左に90度なら「${page}ページ 3左」と返信してください`,
+  human: (no: number, code: FixCode, page: number | null) => `#J${no} 担当が確認します${what(code, page)}`,
+  humanLimit: (no: number) => `#J${no} は自動の直しが3回になりました。担当が確認します`,
+  humanRepeat: (no: number, page: number) =>
+    `#J${no} の${page}ページは帯の位置を一度直しています。担当が確認します`,
+  humanAlreadyStandard: (no: number, page: number) =>
+    `#J${no} の${page}ページの帯は、すでに標準の位置にあります。担当が確認します`,
+  askPage: (no: number) => `何ページ目ですか？ 例：3ページ 2（#J${no}。この知らせに返信してください）`,
+  notFound: (no: number) => `#J${no} は見つかりません。番号を確かめてもう一度送ってください`,
+  badPage: (no: number, page: number, pageCount: number) =>
+    pageCount > 0
+      ? `#J${no} に${page}ページはありません（全部で${pageCount}ページです）。ページを確かめてもう一度送ってください`
+      : `#J${no} に${page}ページはありません。ページを確かめてもう一度送ってください`,
+  stale: (no: number) => `#J${no} には新しい完成の知らせがあります。いちばん新しい知らせに返信してください`,
+  notReady: (no: number) => `#J${no} はいま処理中です。少し待ってからもう一度送ってください`,
+  alreadyClosed: (no: number) => `#J${no} は完了にしてあります。直すときは、もう一度依頼してください`,
+  expired: "期限（7日）を過ぎたので直せません。もう一度依頼してください",
+  unavailable: (no: number) => `#J${no} は番号では直せません。担当に声をかけてください`,
+  rejected: (code: string) => `訂正を受け付けられませんでした（${code}）。担当に声をかけてください`,
+  unreachable: "訂正を受け付けられませんでした（portal に届きません）。少し待ってからもう一度送ってください",
+  /** fix の結果が分からない。「もう一度送ってください」とは書かない（送り直すと二重の訂正になりうる） */
+  unknown:
+    "受付の結果を確かめられませんでした。届く知らせか portal の依頼ボックスで確かめてください。同じ番号をもう一度送らないでください",
+};
+
+export interface ObiFixInput {
+  /** 訂正の発言の LINE message.id（数字の文字列）。冪等のかぎ・返事の印のかぎ。ログには出さない */
+  messageId: string;
+  body: FixBody;
+  /** 引用リプライの引用先（無ければ null） */
+  quotedMessageId: string | null;
+  /** 発言者が JOB_ALLOWED_USER_IDS にいるか（照合は呼ぶ側。userId そのものは渡さない） */
+  allowed: boolean;
+  /** Webhook の開始時刻（ms） */
+  startedAt: number;
+  config: ObiConfig;
+  /** true なら、始まるのが遅すぎた（開始+7秒より後）。認可の後、portal を呼ばずに「届きません」を返す */
+  late?: boolean;
+}
+
+export interface ObiFixDeps {
+  store: ObiStore;
+  fetchImpl: typeof fetch;
+  now: () => number;
+  /** 訂正の発言への reply（例外は投げない作り）。timeoutMs で打ち切る */
+  reply: (text: string, timeoutMs: number) => Promise<ReplyOutcome>;
+  /** reply がはっきり断られたときの push。送ったメッセージの ID も返す（例外は投げない作り） */
+  push: (to: string, text: string, timeoutMs: number) => Promise<{ ok: boolean; messageId: string | null }>;
+  /** KV の1回の操作の時間の上限（ms）。省略時は1秒。テストで短くする */
+  kvTimeoutMs?: number;
+}
+
+export type FixTarget =
+  /** 訂正として扱わない（今までの流れへ）。引用先を確かめられなかったときもここ（Z3） */
+  | { kind: "rest"; reason: string }
+  | {
+      kind: "target";
+      /** number＝#J つき／ask＝聞き返しへの引用／notice＝完成の知らせへの引用 */
+      via: "number" | "ask" | "notice";
+      no: number;
+      /** notice のときだけ、もう引いてある（runObiFix は resolve を呼び直さない） */
+      resolved: FixResolved | null;
+    };
+
+export interface ObiFixResult {
+  outcome:
+    | "closed"
+    | "queued"
+    | "human"
+    | "asked"
+    | "ask-suppressed"
+    | "forbidden"
+    | "refused"
+    /** fix を呼んだが、結果が分からない（「確かめられませんでした」を1回返した） */
+    | "unknown";
+}
+
+/** runObiFix が呼ぶ側へ段階を知らせる（例外で止まったときの扱いを、呼ぶ側が決めるため） */
+export interface ObiFixStageHooks {
+  /** portal の fix を呼ぶ直前。これより前の例外は「何も変わっていない」のが確か */
+  onFixCalled: () => void;
+  /** portal の fix の結果が確かになった（受け付けた・はっきり断った・送っていないことが確か＝unreachable。AB1） */
+  onCommitted: () => void;
+}
+
+/** KV の操作を時間の上限つきで待つ（上限を過ぎたら例外）。until（時刻）を越えては待たない */
+async function kvBounded<T>(deps: ObiFixDeps, until: number, op: () => Promise<T>): Promise<T> {
+  const ms = Math.min(deps.kvTimeoutMs ?? KV_OP_MS, until - deps.now());
+  if (ms <= 0) throw new Error("KV を待つ時間が残っていない");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      op(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`KV が${ms}ms で返らない`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** 例外はログに名前だけを出す（文には、かぎ＝message.id などが入りうる） */
+const errName = (err: unknown) => (err as { name?: string })?.name ?? "error";
+
+function portalOpts(input: Pick<ObiFixInput, "config">, deps: ObiFixDeps, timeoutMs: number) {
+  return {
+    fetchImpl: deps.fetchImpl,
+    baseUrl: input.config.portalBaseUrl,
+    token: input.config.jobApiToken,
+    timeoutMs,
+  };
+}
+
+/** reply → はっきり断られたときだけ push。送れたメッセージの ID も返す（結果不明は送り直さない） */
+async function send(
+  groupId: string,
+  deps: ObiFixDeps,
+  text: string
+): Promise<{ delivery: ReplyDelivery; sentId: string | null }> {
+  let sentId: string | null = null;
+  const delivery = await deliverReply(text, {
+    reply: async (t) => {
+      const r = await deps.reply(t, REPLY_TIMEOUT_MS);
+      if (r.kind === "sent") sentId = r.messageId;
+      return r;
+    },
+    push: async (t) => {
+      const p = await deps.push(groupId, t, PUSH_TIMEOUT_MS);
+      if (p.ok) sentId = p.messageId;
+      return p.ok;
+    },
+  });
+  return { delivery, sentId };
+}
+
+type Said = { delivery: ReplyDelivery | "skipped"; sentId: string | null };
+
+/**
+ * 印（NX・8日）を置けたときだけ送る。既にある・置けない（KV の障害・時間切れ）ときは送らない
+ * （二重の返事を避ける。例外は外へ投げない）。
+ */
+async function sayOnce(
+  input: { messageId: string; startedAt: number },
+  groupId: string,
+  deps: ObiFixDeps,
+  key: string,
+  text: string
+): Promise<Said> {
+  let first: boolean;
+  try {
+    first = await kvBounded(deps, input.startedAt + OBI_FIX_PORTAL_PHASE_END_MS, () =>
+      deps.store.setNx(key, OBI_FIX_KEY_TTL_SECONDS)
+    );
+  } catch (err) {
+    console.error("帯替えの訂正：返事の印を置けない（返事は出さない）:", errName(err));
+    return { delivery: "skipped", sentId: null };
+  }
+  if (!first) return { delivery: "skipped", sentId: null };
+  return send(groupId, deps, text);
+}
+
+/**
+ * 設定が足りないとき（#J つきの営業部の発言にだけ）：「いま帯替えの受付を止めています」を1回だけ返す。
+ * 許可リストも読めないので、人の確認より先にこれを返す。portal は呼ばない。
+ */
+export async function replyObiFixStopped(
+  input: { messageId: string; groupId: string; startedAt: number },
+  deps: ObiFixDeps
+): Promise<void> {
+  const said = await sayOnce(input, input.groupId, deps, `obi-fix-replied:${input.messageId}`, OBI_MESSAGES.stopped);
+  console.log("帯替えの訂正:", "stopped", said.delivery);
+}
+
+/**
+ * 引用先を確かめられない（KV の照会の失敗・resolve の時間切れ・つながらない・5xx・形の違う 200）。
+ * LINE の Webhook の再送は本番で無効なので、503 で待たず、初回から今までの流れへ渡す（返事も予約もしない。Z3）。
+ * 帯替えの知らせへの引用だったとしても、ここでは訂正として扱われない（「#J12 3ページ 2」の形なら通る）
+ */
+function unknownTarget(why: string): FixTarget {
+  console.error("帯替えの訂正：引用先を確かめられない（今までの流れへ）:", why);
+  return { kind: "rest", reason: "resolve-unknown" };
+}
+
+/**
+ * どの依頼への返事かを決める（イベントの予約より前に呼ぶ）。
+ * 認可はここでは見ない（引用先が帯替えの知らせかどうかが分かるまで「訂正」と決められないため）。
+ */
+export async function locateObiFix(input: ObiFixInput, deps: ObiFixDeps): Promise<FixTarget> {
+  // #J つき：その場で訂正として扱う（portal も KV も呼ばない。認可が先）
+  if (input.body.no !== null) {
+    return { kind: "target", via: "number", no: input.body.no, resolved: null };
+  }
+  // #J なし・引用なしは訂正として扱わない
+  const quoted = input.quotedMessageId;
+  if (!quoted || !/^\d{1,64}$/.test(quoted)) return { kind: "rest", reason: "no-quote" };
+  const phaseEnd = input.startedAt + OBI_FIX_PORTAL_PHASE_END_MS;
+
+  // ① 自分が出した聞き返しへの引用か
+  let asked: string | null;
+  try {
+    asked = await kvBounded(deps, phaseEnd, () => deps.store.getText(`obi-fix-askmsg:${quoted}`));
+  } catch (err) {
+    return unknownTarget(`askmsg:${errName(err)}`);
+  }
+  const m = asked?.match(/^J(\d{1,6})$/);
+  if (m) return { kind: "target", via: "ask", no: Number(m[1]), resolved: null };
+
+  // ② 完成の知らせへの引用か（portal に聞く。何も書き換えない）
+  const r = await postFixResolve(
+    { groupId: input.config.groupId, quotedMessageId: quoted },
+    portalOpts(input, deps, RESOLVE_MS)
+  );
+  if (r.kind === "accepted") {
+    return { kind: "target", via: "notice", no: r.resolved.no, resolved: r.resolved };
+  }
+  if (r.kind === "rejected") {
+    // NOT_FOUND＝タスクの確認・リマインドなど別のものへの引用。それ以外の断り（FIX_DISABLED など）も、
+    // 「帯替えの完成の知らせ」と確かめられていないので、訂正として扱わない
+    if (r.code !== "NOT_FOUND") console.error("帯替えの訂正：引用先を引けない（今までの流れへ）:", sanitizeForReply(r.code));
+    return { kind: "rest", reason: r.code };
+  }
+  return unknownTarget(r.kind === "unknown" ? r.reason : "unreachable");
+}
