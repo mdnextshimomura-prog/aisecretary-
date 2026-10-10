@@ -262,6 +262,46 @@ export async function pushLineMessageDetailed(
   }
 }
 
+/**
+ * 時間の上限つきの push で、送ったメッセージの ID も返す（「番号で直す」の聞き返しが push に
+ * 回ったとき、その ID を控えて、引用の返事の相手を引けるようにする。設計 2026-10-10）。
+ * 送れたら ok: true（応答の ID が読めなければ messageId は null。送信そのものは成功のまま）。
+ * 時間切れ・通信の失敗・断られたときは ok: false（例外は投げない）。
+ * 既存の pushLineMessageDetailed は変えない（帯替えの受付の返事が使っている）。
+ */
+export async function pushLineMessageWithId(
+  to: string,
+  text: string,
+  timeoutMs: number = PUSH_TIMEOUT_MS
+): Promise<{ ok: boolean; messageId: string | null }> {
+  try {
+    const res = await fetch("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+      },
+      body: JSON.stringify({ to, messages: [{ type: "text", text }] }),
+      signal: AbortSignal.timeout(timeoutMs),
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      console.error("LINE push を断られた:", res.status);
+      return { ok: false, messageId: null };
+    }
+    try {
+      const data = (await res.json()) as { sentMessages?: Array<{ id?: unknown }> };
+      const id = data.sentMessages?.[0]?.id;
+      return { ok: true, messageId: typeof id === "string" && id ? id : null };
+    } catch {
+      return { ok: true, messageId: null };
+    }
+  } catch (err) {
+    console.error("LINE push の結果が分からない:", (err as { name?: string })?.name ?? err);
+    return { ok: false, messageId: null };
+  }
+}
+
 export type ReplyDelivery = "replied" | "pushed" | "push-failed" | "unknown";
 
 /**

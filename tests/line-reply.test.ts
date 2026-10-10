@@ -6,6 +6,7 @@ import {
   deliverReply,
   pushLineMessage,
   pushLineMessageDetailed,
+  pushLineMessageWithId,
   sendLineMessage,
   type ReplyOutcome,
 } from "../src/lib/line";
@@ -97,6 +98,29 @@ async function main() {
     throw new TypeError("fetch failed");
   };
   ok("pushLineMessageDetailed：通信の失敗も false", (await pushLineMessageDetailed("Cgroup", "x", 5000)) === false);
+
+  // ── 送ったメッセージの ID も返す push（番号で直すの聞き返し用。設計 2026-10-10） ──
+  calls.length = 0;
+  respond = json(200, { sentMessages: [{ id: "700000000000000001" }] });
+  const p1 = await pushLineMessageWithId("Cgroup", "何ページ目ですか？", 4000);
+  ok("pushLineMessageWithId：送れたら ok と ID", p1.ok && p1.messageId === "700000000000000001", JSON.stringify(p1));
+  ok("pushLineMessageWithId：宛先・本文・時間の上限", calls[0].url.endsWith("/v2/bot/message/push") && calls[0].body?.to === "Cgroup" && lastSignal instanceof AbortSignal);
+  respond = json(200, {});
+  const p2 = await pushLineMessageWithId("Cgroup", "x", 4000);
+  ok("pushLineMessageWithId：応答に ID が無くても送信は成功のまま", p2.ok && p2.messageId === null);
+  respond = async () => new Response("<html>", { status: 200 });
+  const p3 = await pushLineMessageWithId("Cgroup", "x", 4000);
+  ok("pushLineMessageWithId：応答が JSON でなくても送信は成功のまま", p3.ok && p3.messageId === null);
+  respond = json(400, {});
+  const p4 = await pushLineMessageWithId("Cgroup", "x", 4000);
+  ok("pushLineMessageWithId：断られたら ok:false", !p4.ok && p4.messageId === null);
+  respond = async () => {
+    throw new DOMException("timed out", "TimeoutError");
+  };
+  const p5 = await pushLineMessageWithId("Cgroup", "x", 4000);
+  ok("pushLineMessageWithId：時間切れは ok:false（例外を投げない）", !p5.ok && p5.messageId === null);
+  respond = json(200, {});
+  ok("既存の pushLineMessageDetailed は真偽のまま（変えていない）", (await pushLineMessageDetailed("Cgroup", "x", 5000)) === true);
 
   // ── 既存の sendLineMessage は今の動きのまま ──
   respond = json(400, {});
