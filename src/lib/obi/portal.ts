@@ -168,6 +168,14 @@ export interface FixResolved {
   fixable: FixEstimate;
   /** 0 を送ったときの見込み */
   closable: FixEstimate;
+  /**
+   * 引用で引いたとき、その知らせの種類。"completion"＝完成の知らせ。番号で引いたとき・項目の無い portal は ""。
+   * "completion"・"" 以外（差し戻しの選択肢の設計 2026-10-11 の "reject"・"review" など。いまの portal は返さない）への引用は、
+   * 「番号で直す」の返事として扱わない（約束の「差し戻しの選択肢のための土台」P1・P4）
+   */
+  kind: string;
+  /** 今の依頼が待っている返事の種類。「番号で直す」は "fix"。項目の無い portal は "fix" とみなす（P1・P4。いまは読むだけで、分岐には使わない） */
+  phase: string;
 }
 
 export type FixResolveRequest =
@@ -255,7 +263,10 @@ export async function postFixResolve(req: FixResolveRequest, opts: PortalOpts): 
       typeof b.fixable === "string" &&
       FIX_ESTIMATES.has(b.fixable) &&
       typeof b.closable === "string" &&
-      FIX_ESTIMATES.has(b.closable)
+      FIX_ESTIMATES.has(b.closable) &&
+      // kind・phase は、あれば文字列（無い portal は今までどおり受ける。文字列でなければ形の違う応答）
+      (b.kind === undefined || typeof b.kind === "string") &&
+      (b.phase === undefined || typeof b.phase === "string")
     ) {
       return {
         kind: "accepted",
@@ -266,6 +277,8 @@ export async function postFixResolve(req: FixResolveRequest, opts: PortalOpts): 
           pageCount: b.pageCount,
           fixable: b.fixable as FixEstimate,
           closable: b.closable as FixEstimate,
+          kind: typeof b.kind === "string" ? b.kind : "",
+          phase: typeof b.phase === "string" ? b.phase : "fix",
         },
       };
     }

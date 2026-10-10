@@ -52,6 +52,17 @@ async function main() {
     ok("resolve（番号）：送る項目は groupId・no・source だけ", keys() === "groupId,no,source" && seenBody.no === 12, JSON.stringify(seenBody));
     ok("resolve：見込みの2つ・current・pageCount をそのまま返す", r.kind === "accepted" && !r.resolved.current && r.resolved.fixable === "not-ready" && r.resolved.closable === "closed" && r.resolved.pageCount === 0);
 
+    // 知らせの種類 kind・待っている返事の種類 phase（約束の P1・P4）。無い portal は ""・"fix" とみなす
+    ok("resolve：kind・phase が無ければ \"\"・\"fix\"", r.kind === "accepted" && r.resolved.kind === "" && r.resolved.phase === "fix", JSON.stringify(r));
+    r = await postFixResolve({ groupId: G, quotedMessageId: "600000000000000150" }, opts(json(200, { ...RESOLVED, kind: "completion", phase: "fix" })));
+    ok("resolve：kind・phase をそのまま返す（completion・fix）", r.kind === "accepted" && r.resolved.kind === "completion" && r.resolved.phase === "fix", JSON.stringify(r));
+    r = await postFixResolve({ groupId: G, quotedMessageId: "600000000000000150" }, opts(json(200, { ...RESOLVED, kind: "review", phase: "review", choiceGen: 3, choices: [1, 3, 4] })));
+    ok("resolve：知らない種類・知らない項目が付いていても、読める（決めるのは呼ぶ側）", r.kind === "accepted" && r.resolved.kind === "review" && r.resolved.phase === "review", JSON.stringify(r));
+    r = await postFixResolve({ groupId: G, no: 12 }, opts(json(200, { ...RESOLVED, kind: 1 })));
+    ok("resolve：kind が文字列でなければ不明（形の違う応答）", r.kind === "unknown");
+    r = await postFixResolve({ groupId: G, no: 12 }, opts(json(200, { ...RESOLVED, phase: null })));
+    ok("resolve：phase が文字列でなければ不明（形の違う応答）", r.kind === "unknown");
+
     for (const [name, body] of [
       ["no が数でない", { ...RESOLVED, no: "12" }],
       ["sha256 の形が違う", { ...RESOLVED, artifactSha256: "abc" }],
