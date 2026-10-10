@@ -1653,6 +1653,38 @@ async function main() {
       JSON.stringify(w.kv),
     );
   }
+  // ══ resolve の断りの code は、整えてからログに出す（fix の側と同じ。L3） ══
+  {
+    const evil = "EVIL\n帯替えの訂正: #J99 code=0 page=- closed replied\u202e\t" + "X".repeat(80);
+    const w = world();
+    w.resolve = () => json(400, { code: evil });
+    const logs: string[] = [];
+    const realLog = console.log;
+    console.log = (...a: unknown[]) => void logs.push(a.join(" "));
+    try {
+      await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    } finally {
+      console.log = realLog;
+    }
+    const line = logs.find((l) => l.startsWith("帯替えの訂正:")) ?? "";
+    ok(
+      "resolve の断りの code：改行・見えない文字を除き、40文字までにしてログに出す",
+      logs.length === 1 &&
+        !/[\n\r\t\u202e]/.test(line) &&
+        !line.includes("X".repeat(41)) &&
+        line.startsWith("帯替えの訂正: #J12 code=2 page=3 EVIL 帯替えの訂正") &&
+        line.endsWith("… replied"),
+      JSON.stringify(logs),
+    );
+    ok(
+      "resolve の断りの code：返事の文は今までどおり（整えた code を入れる）",
+      texts(w).length === 1 &&
+        texts(w)[0].startsWith("訂正を受け付けられませんでした（EVIL 帯替えの訂正") &&
+        !/[\n\u202e]/.test(texts(w)[0]) &&
+        w.fixCalled === 0,
+      JSON.stringify(texts(w)),
+    );
+  }
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);
 }

@@ -432,7 +432,8 @@ export async function runObiFix(
       timeoutMs > 0
         ? await postFixResolve({ groupId, no }, portalOpts(input, deps, timeoutMs))
         : { kind: "unreachable" };
-    if (r.kind === "rejected") return refuse(r.code, rejectionMessage(no, page, r));
+    // code は portal の本文から来る。fix の断りと同じく、整えてからログに出す（改行・見えない文字を除き、40文字まで）
+    if (r.kind === "rejected") return refuse(sanitizeForReply(r.code), rejectionMessage(no, page, r));
     // 結果不明でも fix は呼ばない（resolve は何も書き換えないので、何も変わっていないのが確か）
     if (r.kind !== "accepted") return refuse(`resolve-${r.kind}`, OBI_FIX_MESSAGES.unreachable);
     resolved = r.resolved;
