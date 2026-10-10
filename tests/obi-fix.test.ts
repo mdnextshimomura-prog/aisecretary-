@@ -284,6 +284,39 @@ async function main() {
       signalTimeouts.join(),
     );
   }
+  // 引用先の知らせの種類（約束の P1・P4）：完成の知らせ（"completion"・項目なし）だけが「番号で直す」
+  for (const kind of ["completion", undefined]) {
+    const w = world();
+    w.resolve = () =>
+      json(200, { ...RESOLVED, ...(kind ? { kind, phase: "fix" } : {}) });
+    const t = await locateObiFix(
+      input(w, "3ページ 2", { quotedMessageId: QUOTED }),
+      deps(w),
+    );
+    ok(
+      `引用先の種類が ${kind ?? "項目なし"}：完成の知らせとして扱う`,
+      t.kind === "target" && t.via === "notice" && t.no === 12,
+      JSON.stringify(t),
+    );
+  }
+  for (const kind of ["reject", "review", "something-new"]) {
+    const w = world();
+    w.resolve = () => json(200, { ...RESOLVED, kind, phase: "choose" });
+    const t = await locateObiFix(
+      input(w, "2", { quotedMessageId: QUOTED }),
+      deps(w),
+    );
+    ok(
+      `引用先の種類が ${kind}（完成の知らせではない）：訂正として扱わない（返事をせず今までの流れへ）`,
+      t.kind === "rest" &&
+        t.reason === "notice-kind" &&
+        w.replies.length === 0 &&
+        w.pushes.length === 0 &&
+        paths(w) === RESOLVE &&
+        !w.kv.some((k) => k[0] !== "getText"),
+      JSON.stringify(t),
+    );
+  }
   {
     const w = world();
     await w.store.putText(`obi-fix-askmsg:${QUOTED}`, "J34", TTL);

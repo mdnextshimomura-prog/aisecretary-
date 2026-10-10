@@ -298,6 +298,13 @@ export async function locateObiFix(input: ObiFixInput, deps: ObiFixDeps): Promis
     portalOpts(input, deps, RESOLVE_MS)
   );
   if (r.kind === "accepted") {
+    // 「番号で直す」が受けるのは、完成の知らせ（kind が "completion"。項目の無い portal は ""）への引用だけ。
+    // ほかの種類の知らせ（差し戻しの選択肢の設計 2026-10-11 の "reject"・"review" など。いまの portal は返さない）への引用は、
+    // 訂正として扱わない（返事をせず今までの流れへ。その番号を訂正の番号と読み違えないため。約束の P1・P4）
+    if (r.resolved.kind !== "" && r.resolved.kind !== "completion") {
+      console.log("帯替えの訂正：引用先が完成の知らせではない（今までの流れへ）:", sanitizeForReply(r.resolved.kind));
+      return { kind: "rest", reason: "notice-kind" };
+    }
     return { kind: "target", via: "notice", no: r.resolved.no, resolved: r.resolved };
   }
   if (r.kind === "rejected") {
