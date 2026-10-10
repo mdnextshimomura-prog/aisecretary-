@@ -1437,6 +1437,88 @@ async function main() {
       paths(w) === `${RESOLVE},${FIX}` && w.portal[1].body.page === 120,
     );
   }
+  // ══ 完成品のまだ無い依頼（resolve の sha256 が空文字。L1） ══
+  // portal は 200 で、fixable／closable に ok 以外を入れて返す。fix は呼ばず、その値どおりの文を返す
+  for (const [text, over, want, label] of [
+    ["#J12 3ページ 2", { fixable: "not-ready" }, OBI_FIX_MESSAGES.notReady(12), "not-ready"],
+    ["#J12 2", { fixable: "not-ready" }, OBI_FIX_MESSAGES.notReady(12), "not-ready（ページなし。聞き返さない）"],
+    ["#J12 3ページ 2", { fixable: "unavailable" }, OBI_FIX_MESSAGES.unavailable(12), "unavailable"],
+    ["#J12 3ページ 2", { fixable: "closed" }, OBI_FIX_MESSAGES.alreadyClosed(12), "closed"],
+    ["#J12 3ページ 2", { fixable: "expired" }, OBI_FIX_MESSAGES.expired, "expired"],
+    ["#J12 0", { fixable: "ok", closable: "not-ready" }, OBI_FIX_MESSAGES.notReady(12), "0 は closable を見る（not-ready）"],
+    ["#J12 0", { fixable: "not-ready", closable: "unavailable" }, OBI_FIX_MESSAGES.unavailable(12), "0 は closable を見る（unavailable）"],
+    ["#J12 0", { closable: "closed" }, OBI_FIX_MESSAGES.alreadyClosed(12), "0 は closable を見る（closed）"],
+    // 本来起きない組み合わせ（ok なのに空）：番号では直せない、に倒す
+    ["#J12 3ページ 2", { fixable: "ok" }, "#J12 は番号では直せません。担当に声をかけてください", "ok なのに空"],
+    ["#J12 0", { fixable: "not-ready", closable: "ok" }, "#J12 は番号では直せません。担当に声をかけてください", "0 で ok なのに空"],
+  ] as Array<[string, Record<string, unknown>, string, string]>) {
+    const w = world();
+    w.resolve = () =>
+      json(200, { ...RESOLVED, artifactSha256: "", pageCount: 0, ...over });
+    const r = await runObiFix(input(w, text), byNumber, deps(w));
+    ok(
+      `完成品がまだ無い（sha256 が空・${label}）：fix を呼ばず、見込みどおりの文`,
+      texts(w).join("|") === want &&
+        paths(w) === RESOLVE &&
+        r.outcome === "refused" &&
+        w.fixCalled === 0 &&
+        w.committed === 0 &&
+        w.pushes.length === 0 &&
+        !texts(w).join().includes("portal に届きません"),
+      JSON.stringify(texts(w)),
+    );
+    ok(
+      `完成品がまだ無い（${label}）：聞き返しの印は置かない（返事の印だけ）`,
+      w.kv.filter((k) => k[0] === "setNx").map((k) => k[1]).join() ===
+        `obi-fix-replied:${MSG}`,
+      JSON.stringify(w.kv),
+    );
+  }
+  {
+    // 引用の形で空が返った：portal が完成の知らせと答えた（200）なら訂正の対象。文を返す
+    const w = world();
+    w.resolve = () =>
+      json(200, {
+        ...RESOLVED,
+        artifactSha256: "",
+        current: false,
+        pageCount: 0,
+        fixable: "not-ready",
+        closable: "not-ready",
+        kind: "completion",
+        phase: "fix",
+      });
+    const inp = input(w, "3ページ 2", { quotedMessageId: QUOTED });
+    const t = await locateObiFix(inp, deps(w));
+    ok(
+      "引用の形で sha256 が空：完成の知らせと確かめられたので対象",
+      t.kind === "target" && t.via === "notice" && t.no === 12,
+      JSON.stringify(t),
+    );
+    if (t.kind === "target") {
+      const r = await runObiFix(inp, t, deps(w));
+      ok(
+        "引用の形で sha256 が空：fix を呼ばず、見込みどおりの文（resolve は呼び直さない）",
+        texts(w).join("|") === OBI_FIX_MESSAGES.notReady(12) &&
+          paths(w) === RESOLVE &&
+          r.outcome === "refused" &&
+          w.fixCalled === 0,
+        JSON.stringify(texts(w)),
+      );
+    }
+  }
+  {
+    // 引用の形で空・完成の知らせではない種類：今までどおり、訂正として扱わない
+    const w = world();
+    w.resolve = () =>
+      json(200, { ...RESOLVED, artifactSha256: "", fixable: "not-ready", kind: "review", phase: "review" });
+    const t = await locateObiFix(input(w, "2", { quotedMessageId: QUOTED }), deps(w));
+    ok(
+      "引用の形で sha256 が空・完成の知らせではない：今までの流れへ（返事なし）",
+      t.kind === "rest" && t.reason === "notice-kind" && w.replies.length === 0,
+      JSON.stringify(t),
+    );
+  }
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);
 }

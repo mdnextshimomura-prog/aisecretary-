@@ -17,7 +17,7 @@
  *   返事より前の段階（KV・resolve・fix・返事の印）は開始+17秒までに終える。
  *   fix の時間は min(8秒, 開始+17秒−今−返事の印の1秒)。2秒に満たなければ fix を呼ばない。
  *
- * resolve の見込み（fixable・closable・current）は、fix を呼ばないとき（聞き返し）の案内にだけ使う。
+ * resolve の見込み（fixable・closable・current）は、fix を呼ばないとき（聞き返し・完成品がまだ無い＝sha256 が空文字）の案内にだけ使う。
  * ページまで揃った訂正は、見込みに関わらず fix を呼び、portal の答えで返事を決める
  * （fix は同じ message.id を先に照合するので、同じ発言がもう一度届いても最初の結果が返る。Z11）。
  *
@@ -423,6 +423,16 @@ export async function runObiFix(
     // 結果不明でも fix は呼ばない（resolve は何も書き換えないので、何も変わっていないのが確か）
     if (r.kind !== "accepted") return refuse(`resolve-${r.kind}`, OBI_FIX_MESSAGES.unreachable);
     resolved = r.resolved;
+  }
+
+  // 完成品がまだ無い依頼（resolve の sha256 が空文字）：fix は呼ばない（expectSha256 に渡すものが無い）。
+  //   portal の見込み（0 は closable、1〜5 は fixable。ok 以外のはず）どおりの文を返す。聞き返しもしない。
+  //   「ok なのに空」は本来起きない組み合わせ：番号では直せない、に倒す
+  if (resolved.artifactSha256 === "") {
+    const estimate = code === 0 ? resolved.closable : resolved.fixable;
+    return estimate === "ok"
+      ? refuse("no-artifact", OBI_FIX_MESSAGES.unavailable(no))
+      : refuse(`no-artifact:${estimate}`, estimateMessage(no, estimate));
   }
 
   // ページが要る番号（1・2・3）でページが無い：聞き返す（fix は呼ばない）

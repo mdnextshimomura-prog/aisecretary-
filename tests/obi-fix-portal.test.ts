@@ -76,6 +76,11 @@ async function main() {
       r = await postFixResolve({ groupId: G, no: 12 }, opts(json(200, body)));
       ok(`resolve：200 でも中身が読めなければ不明（${name}）`, r.kind === "unknown", JSON.stringify(r));
     }
+    // 完成品のまだ無い依頼（受付・入力待ち・下準備中・完成品の無い差し戻し／取消／失敗）：portal は sha256 を空文字で返す（L1）
+    r = await postFixResolve({ groupId: G, no: 12 }, opts(json(200, { ...RESOLVED, artifactSha256: "", pageCount: 0, fixable: "not-ready", closable: "not-ready" })));
+    ok("resolve：sha256 が空文字（完成品がまだ無い）は、正しい応答として読む", r.kind === "accepted" && r.resolved.artifactSha256 === "" && r.resolved.fixable === "not-ready" && r.resolved.closable === "not-ready" && r.resolved.current, JSON.stringify(r));
+    r = await postFixResolve({ groupId: G, no: 12 }, opts(json(200, { ...RESOLVED, artifactSha256: " " })));
+    ok("resolve：sha256 が空白だけは不明（空文字と64桁の16進だけを受ける）", r.kind === "unknown", JSON.stringify(r));
     r = await postFixResolve({ groupId: G, no: 12 }, opts(async () => new Response("<html>", { status: 200 })));
     ok("resolve：200 で JSON でなければ不明", r.kind === "unknown");
 

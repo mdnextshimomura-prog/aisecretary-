@@ -158,7 +158,10 @@ const FIX_ESTIMATES = new Set<string>(["ok", "closed", "expired", "not-ready", "
 
 export interface FixResolved {
   no: number;
-  /** 引用なら「その知らせが指す完成品」、番号なら「今の完成品」。fix の expectSha256 にそのまま渡す */
+  /**
+   * 引用なら「その知らせが指す完成品」、番号なら「今の完成品」。fix の expectSha256 にそのまま渡す。
+   * 空文字＝完成品がまだ無い（fix は呼べない。fixable・closable の値で返事を決める）
+   */
   artifactSha256: string;
   /** artifactSha256 が今の完成品と同じか */
   current: boolean;
@@ -255,7 +258,9 @@ export async function postFixResolve(req: FixResolveRequest, opts: PortalOpts): 
       call.bodyOk &&
       isPositiveInt(b.no) &&
       typeof b.artifactSha256 === "string" &&
-      /^[0-9a-f]{64}$/.test(b.artifactSha256) &&
+      // 空文字＝完成品のまだ無い依頼（受付・入力待ち・下準備中・完成品の無い差し戻し／取消／失敗）。正しい応答として読む。
+      // そのときは fixable・closable が ok 以外のはず。fix を呼ばないのは呼ぶ側（fix.ts）
+      (b.artifactSha256 === "" || /^[0-9a-f]{64}$/.test(b.artifactSha256)) &&
       typeof b.current === "boolean" &&
       typeof b.pageCount === "number" &&
       Number.isInteger(b.pageCount) &&
