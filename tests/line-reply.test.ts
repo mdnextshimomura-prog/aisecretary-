@@ -114,11 +114,16 @@ async function main() {
   respond = json(400, {});
   const p4 = await pushLineMessageWithId("Cgroup", "x", 4000);
   ok("pushLineMessageWithId：断られたら ok:false", !p4.ok && p4.messageId === null);
+  ok("pushLineMessageWithId：4xx は「はっきり断られた」（rejected）", p4.rejected === true, JSON.stringify(p4));
+  respond = json(500, {});
+  const p4b = await pushLineMessageWithId("Cgroup", "x", 4000);
+  ok("pushLineMessageWithId：5xx は ok:false だが、はっきり断られたとはしない（届いたか分からない）", !p4b.ok && !p4b.rejected, JSON.stringify(p4b));
   respond = async () => {
     throw new DOMException("timed out", "TimeoutError");
   };
   const p5 = await pushLineMessageWithId("Cgroup", "x", 4000);
   ok("pushLineMessageWithId：時間切れは ok:false（例外を投げない）", !p5.ok && p5.messageId === null);
+  ok("pushLineMessageWithId：時間切れは、はっきり断られたとはしない", !p5.rejected, JSON.stringify(p5));
   respond = json(200, {});
   ok("既存の pushLineMessageDetailed は真偽のまま（変えていない）", (await pushLineMessageDetailed("Cgroup", "x", 5000)) === true);
 

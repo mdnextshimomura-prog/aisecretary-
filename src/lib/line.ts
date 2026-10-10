@@ -267,13 +267,15 @@ export async function pushLineMessageDetailed(
  * 回ったとき、その ID を控えて、引用の返事の相手を引けるようにする。設計 2026-10-10）。
  * 送れたら ok: true（応答の ID が読めなければ messageId は null。送信そのものは成功のまま）。
  * 時間切れ・通信の失敗・断られたときは ok: false（例外は投げない）。
+ * rejected: true は「はっきり断られた（4xx）＝届いていないことが確か」のときだけ付ける
+ * （時間切れ・通信の失敗・5xx は、届いたかどうか分からないので付けない）。
  * 既存の pushLineMessageDetailed は変えない（帯替えの受付の返事が使っている）。
  */
 export async function pushLineMessageWithId(
   to: string,
   text: string,
   timeoutMs: number = PUSH_TIMEOUT_MS
-): Promise<{ ok: boolean; messageId: string | null }> {
+): Promise<{ ok: boolean; messageId: string | null; rejected?: boolean }> {
   try {
     const res = await fetch("https://api.line.me/v2/bot/message/push", {
       method: "POST",
@@ -287,7 +289,9 @@ export async function pushLineMessageWithId(
     });
     if (!res.ok) {
       console.error("LINE push を断られた:", res.status);
-      return { ok: false, messageId: null };
+      return res.status >= 400 && res.status < 500
+        ? { ok: false, messageId: null, rejected: true }
+        : { ok: false, messageId: null };
     }
     try {
       const data = (await res.json()) as { sentMessages?: Array<{ id?: unknown }> };

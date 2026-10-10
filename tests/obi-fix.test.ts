@@ -90,7 +90,7 @@ interface World {
   replies: Array<{ text: string; timeoutMs: number }>;
   pushes: Array<{ to: string; text: string; timeoutMs: number }>;
   replyOutcome: ReplyOutcome;
-  pushOutcome: { ok: boolean; messageId: string | null };
+  pushOutcome: { ok: boolean; messageId: string | null; rejected?: boolean };
   replyTakesMs: number;
   pushTakesMs: number;
   fixCalled: number;
@@ -114,6 +114,10 @@ function world(): World {
     getText: async (key) => {
       kv.push(["getText", key]);
       return memory.getText(key);
+    },
+    del: async (key) => {
+      kv.push(["del", key]);
+      return memory.del(key);
     },
   };
   return {
@@ -1517,6 +1521,136 @@ async function main() {
       "引用の形で sha256 が空・完成の知らせではない：今までの流れへ（返事なし）",
       t.kind === "rest" && t.reason === "notice-kind" && w.replies.length === 0,
       JSON.stringify(t),
+    );
+  }
+  // ══ 聞き返しが届いていないことが確かなときだけ、依頼ごとの印を消す（L2） ══
+  {
+    // reply をはっきり断られ（4xx）、push もはっきり断られた（4xx）：届いていないのが確か
+    const w = world();
+    w.replyOutcome = { kind: "rejected", status: 400 };
+    w.pushOutcome = { ok: false, messageId: null, rejected: true };
+    const r = await runObiFix(input(w, "#J12 2"), byNumber, deps(w));
+    ok(
+      "聞き返しが reply も push もはっきり断られた：依頼ごとの印を消す（次の機会に聞き返せる）",
+      JSON.stringify(w.kv.filter((k) => k[0] !== "getText").map((k) => [k[0], k[1]])) ===
+        JSON.stringify([
+          ["setNx", "obi-fix-ask:12"],
+          ["del", "obi-fix-ask:12"],
+        ]) &&
+        !(await w.store.has("obi-fix-ask:12")) &&
+        r.outcome === "ask-failed" &&
+        w.fixCalled === 0 &&
+        paths(w) === RESOLVE,
+      JSON.stringify([w.kv, r]),
+    );
+    // 次の発言（別の message.id）：もう一度聞き返せる
+    w.replyOutcome = { kind: "sent", messageId: "700000000000000009" };
+    w.replies.length = 0;
+    const r2 = await runObiFix(
+      input(w, "#J12 2", { messageId: "600000000000000201" }),
+      byNumber,
+      deps(w),
+    );
+    ok(
+      "印を消した後：次の発言には聞き返す",
+      r2.outcome === "asked" &&
+        texts(w).join("|") === OBI_FIX_MESSAGES.askPage(12) &&
+        (await w.store.getText("obi-fix-askmsg:700000000000000009")) === "J12",
+      JSON.stringify([texts(w), r2]),
+    );
+  }
+  for (const [label, setup] of [
+    [
+      "reply は断られ、push は結果不明（時間切れ・通信の失敗・5xx）",
+      (w: World) => {
+        w.replyOutcome = { kind: "rejected", status: 400 };
+        w.pushOutcome = { ok: false, messageId: null };
+      },
+    ],
+    [
+      "reply は断られ、push が時間切れ",
+      (w: World) => {
+        w.replyOutcome = { kind: "rejected", status: 400 };
+        w.pushOutcome = { ok: false, messageId: null, rejected: true };
+        w.pushTakesMs = 10_000;
+      },
+    ],
+    [
+      "reply の結果不明",
+      (w: World) => {
+        w.replyOutcome = { kind: "unknown" };
+      },
+    ],
+  ] as Array<[string, (w: World) => void]>) {
+    const w = world();
+    setup(w);
+    await runObiFix(input(w, "#J12 2"), byNumber, deps(w));
+    w.replyOutcome = { kind: "sent", messageId: "700000000000000009" };
+    w.pushTakesMs = 0;
+    w.replies.length = 0;
+    const r2 = await runObiFix(
+      input(w, "#J12 2", { messageId: "600000000000000201" }),
+      byNumber,
+      deps(w),
+    );
+    ok(
+      `聞き返しが届いたかどうか分からない（${label}）：印は消さない（二重に出さない）`,
+      !w.kv.some((k) => k[0] === "del") &&
+        (await w.store.has("obi-fix-ask:12")) &&
+        r2.outcome === "ask-suppressed" &&
+        w.replies.length === 0,
+      JSON.stringify([w.kv, r2]),
+    );
+  }
+  {
+    // 届いた聞き返し（reply・push）では印を消さない
+    for (const viaPush of [false, true]) {
+      const w = world();
+      if (viaPush) w.replyOutcome = { kind: "rejected", status: 400 };
+      const r = await runObiFix(input(w, "#J12 2"), byNumber, deps(w));
+      ok(
+        `聞き返しが届いた（${viaPush ? "push" : "reply"}）：印は消さない`,
+        r.outcome === "asked" && !w.kv.some((k) => k[0] === "del") && (await w.store.has("obi-fix-ask:12")),
+        JSON.stringify(w.kv),
+      );
+    }
+  }
+  {
+    // 印を消せない（KV の障害）：例外にしない。印は残る（二重に出さない側）
+    const w = world();
+    w.replyOutcome = { kind: "rejected", status: 400 };
+    w.pushOutcome = { ok: false, messageId: null, rejected: true };
+    w.store.del = async () => {
+      throw new Error(`KV 障害 obi-fix-ask:12 ${MSG}`);
+    };
+    const logs: string[] = [];
+    const realError = console.error;
+    console.error = (...a: unknown[]) => void logs.push(a.join(" "));
+    let threw = false;
+    let r: Awaited<ReturnType<typeof runObiFix>> | null = null;
+    try {
+      r = await runObiFix(input(w, "#J12 2"), byNumber, deps(w));
+    } catch {
+      threw = true;
+    } finally {
+      console.error = realError;
+    }
+    ok(
+      "聞き返しの印を消せない：例外にせず終える（ログに message.id を出さない）",
+      !threw && r?.outcome === "ask-failed" && !logs.join().includes(MSG) && !logs.join().includes(G),
+      JSON.stringify(logs),
+    );
+  }
+  {
+    // 聞き返しでない返事（断り・受付）が届かなくても、印は消さない（1通につき1回のまま）
+    const w = world();
+    w.replyOutcome = { kind: "rejected", status: 400 };
+    w.pushOutcome = { ok: false, messageId: null, rejected: true };
+    await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "聞き返しでない返事が届かない：印は消さない",
+      !w.kv.some((k) => k[0] === "del") && (await w.store.has(`obi-fix-replied:${MSG}`)),
+      JSON.stringify(w.kv),
     );
   }
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);

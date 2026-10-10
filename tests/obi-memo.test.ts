@@ -90,6 +90,7 @@ async function main() {
       exists: async (k) => { calls.push(["exists", k]); return 0; },
       setText: async (k, v, o) => { calls.push(["setText", k, v, o]); return "OK"; },
       get: async (k) => { calls.push(["get", k]); return getResult; },
+      del: async (k) => { calls.push(["del", k]); return 1; },
     };
     const s = createKvObiStore(fake);
     const z = `obi-pdf:z:${G}`;
@@ -144,6 +145,18 @@ async function main() {
     ok("値つき：無ければ null", (await s.getText("k")) === null);
     getResult = { a: 1 };
     ok("値つき：文字でも数でもなければ null", (await s.getText("k")) === null);
+
+    // 番号で直す：聞き返しの印を消す口（届いていないことが確かなときだけ使う。L2）
+    calls.length = 0;
+    await s.del("obi-fix-ask:12");
+    ok("消す：そのかぎを1回消す", JSON.stringify(calls) === JSON.stringify([["del", "obi-fix-ask:12"]]), JSON.stringify(calls));
+    const mem = createMemoryObiStore(() => T);
+    await mem.setNx("obi-fix-ask:12", OBI_FIX_KEY_TTL_SECONDS);
+    await mem.putText("obi-fix-askmsg:700", "J12", OBI_FIX_KEY_TTL_SECONDS);
+    await mem.del("obi-fix-ask:12");
+    ok("消す（メモリ）：消した印はもう無く、置き直せる。ほかのかぎは残る", !(await mem.has("obi-fix-ask:12")) && (await mem.setNx("obi-fix-ask:12", OBI_FIX_KEY_TTL_SECONDS)) && (await mem.getText("obi-fix-askmsg:700")) === "J12");
+    await mem.del("no-such-key");
+    ok("消す（メモリ）：無いかぎを消しても何も起きない", true);
   }
 
   // ── 依頼に使う PDF の選び方 ──

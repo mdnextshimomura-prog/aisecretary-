@@ -46,6 +46,11 @@ export interface ObiStore {
   putText(key: string, value: string, ttlSeconds: number): Promise<void>;
   /** 値を読む（無い・期限切れは null） */
   getText(key: string): Promise<string | null>;
+  /**
+   * かぎを消す（無くても何も起きない）。「番号で直す」の聞き返しが、届いていないことが確かなときに、
+   * 依頼ごとの印（obi-fix-ask:<受付番号>）を消して次の機会に聞き返せるようにするためだけに使う
+   */
+  del(key: string): Promise<void>;
 }
 
 /** createKvObiStore が使う KV の操作（テストで偽物に差し替えられるよう、使う分だけ） */
@@ -61,6 +66,7 @@ export interface ObiKvClient {
   exists(key: string): Promise<number>;
   setText(key: string, value: string, opts: { ex: number }): Promise<unknown>;
   get(key: string): Promise<unknown>;
+  del(key: string): Promise<unknown>;
 }
 
 const zKey = (groupId: string) => `obi-pdf:z:${groupId}`;
@@ -141,6 +147,9 @@ export function createKvObiStore(client: ObiKvClient): ObiStore {
       if (typeof v === "number") return String(v);
       return null;
     },
+    async del(key) {
+      await client.del(key);
+    },
   };
 }
 
@@ -201,6 +210,10 @@ export function createMemoryObiStore(now: () => number = Date.now): MemoryObiSto
       const e = texts.get(key);
       return e && e.exp > now() ? e.value : null;
     },
+    async del(key) {
+      flags.delete(key);
+      texts.delete(key);
+    },
     sizes(groupId) {
       return { z: sets.get(groupId)?.size ?? 0, h: hashes.get(groupId)?.size ?? 0 };
     },
@@ -219,6 +232,7 @@ const realKv: ObiKvClient = {
   exists: (key) => kv.exists(key),
   setText: (key, value, opts) => kv.set(key, value, opts),
   get: (key) => kv.get(key),
+  del: (key) => kv.del(key),
 };
 
 let memoryFallback: MemoryObiStore | null = null;

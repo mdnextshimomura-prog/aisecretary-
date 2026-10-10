@@ -77,13 +77,14 @@ export interface ObiEventDeps {
   push: (to: string, text: string, timeoutMs: number) => Promise<boolean>;
   /**
    * 「番号で直す」の返事が push に回ったときに使う。送ったメッセージの ID も返す
-   * （聞き返しの ID を控えるため。例外は投げない作り）
+   * （聞き返しの ID を控えるため。例外は投げない作り）。
+   * rejected: true は「はっきり断られた＝届いていないことが確か」のときだけ
    */
   pushWithId: (
     to: string,
     text: string,
     timeoutMs: number
-  ) => Promise<{ ok: boolean; messageId: string | null }>;
+  ) => Promise<{ ok: boolean; messageId: string | null; rejected?: boolean }>;
 }
 
 /** 断り（止めています・下村さんから）の返事の時間の上限。受付の返事（intake.ts）と同じ 5 秒 */

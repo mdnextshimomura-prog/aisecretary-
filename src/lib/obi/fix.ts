@@ -24,6 +24,8 @@
  * 返事は1通につき1回：`obi-fix-replied:<id>`（結果不明は `obi-fix-pending-notified:<id>`、
  * 断りは `obi-fix-forbidden:<id>`）を NX で置けたときだけ送る。聞き返しは依頼ごとに1回
  * （`obi-fix-ask:<受付番号>`）。印が置けない・読めないときは返事をしない。かぎの期限はどれも8日。
+ * 聞き返しの印は送る前に置くので、届いていないことが確か（reply も push もはっきり断られた）なときだけ消す
+ * （次の機会に聞き返せるように。届いたかどうか分からないときは消さない＝二重に出さない側）。
  *
  * LINE の Webhook の再送は本番で無効。どの場面でも「503 を返して、同じ発言がもう一度届くのを待つ」ことはしない（AA1）。
  *   fix を呼んだ後、はっきりした答え（受け付けた・はっきり断った）が無く、届いたかどうかも分からない
@@ -130,8 +132,15 @@ export interface ObiFixDeps {
   now: () => number;
   /** 訂正の発言への reply（例外は投げない作り）。timeoutMs で打ち切る */
   reply: (text: string, timeoutMs: number) => Promise<ReplyOutcome>;
-  /** reply がはっきり断られたときの push。送ったメッセージの ID も返す（例外は投げない作り） */
-  push: (to: string, text: string, timeoutMs: number) => Promise<{ ok: boolean; messageId: string | null }>;
+  /**
+   * reply がはっきり断られたときの push。送ったメッセージの ID も返す（例外は投げない作り）。
+   * rejected: true は「はっきり断られた（4xx）＝届いていないことが確か」のときだけ（時間切れ・通信の失敗・5xx には付けない）
+   */
+  push: (
+    to: string,
+    text: string,
+    timeoutMs: number
+  ) => Promise<{ ok: boolean; messageId: string | null; rejected?: boolean }>;
   /** KV の1回の操作の時間の上限（ms）。省略時は1秒。テストで短くする */
   kvTimeoutMs?: number;
 }
@@ -155,6 +164,8 @@ export interface ObiFixResult {
     | "human"
     | "asked"
     | "ask-suppressed"
+    /** 聞き返しが届いていないことが確か（reply も push もはっきり断られた）。依頼ごとの印は消した（消せなければ残る） */
+    | "ask-failed"
     | "forbidden"
     | "refused"
     /** fix を呼んだが、結果が分からない（「確かめられませんでした」を1回返した） */
@@ -198,13 +209,14 @@ function portalOpts(input: Pick<ObiFixInput, "config">, deps: ObiFixDeps, timeou
   };
 }
 
-/** reply → はっきり断られたときだけ push。送れたメッセージの ID も返す（結果不明は送り直さない） */
-async function send(
-  groupId: string,
-  deps: ObiFixDeps,
-  text: string
-): Promise<{ delivery: ReplyDelivery; sentId: string | null }> {
+/**
+ * reply → はっきり断られたときだけ push。送れたメッセージの ID も返す（結果不明は送り直さない）。
+ * undelivered：届いていないことが確か（reply がはっきり断られ、push もはっきり断られた）。
+ *   時間切れ・通信の失敗・5xx は「届いたかどうか分からない」ので false のまま
+ */
+async function send(groupId: string, deps: ObiFixDeps, text: string): Promise<Said> {
   let sentId: string | null = null;
+  let pushRejected = false;
   const delivery = await deliverReply(text, {
     reply: async (t) => {
       const r = await deps.reply(t, REPLY_TIMEOUT_MS);
@@ -214,13 +226,14 @@ async function send(
     push: async (t) => {
       const p = await deps.push(groupId, t, PUSH_TIMEOUT_MS);
       if (p.ok) sentId = p.messageId;
+      else pushRejected = p.rejected === true;
       return p.ok;
     },
   });
-  return { delivery, sentId };
+  return { delivery, sentId, undelivered: delivery === "push-failed" && pushRejected };
 }
 
-type Said = { delivery: ReplyDelivery | "skipped"; sentId: string | null };
+type Said = { delivery: ReplyDelivery | "skipped"; sentId: string | null; undelivered: boolean };
 
 /**
  * 印（NX・8日）を置けたときだけ送る。既にある・置けない（KV の障害・時間切れ）ときは送らない
@@ -240,9 +253,9 @@ async function sayOnce(
     );
   } catch (err) {
     console.error("帯替えの訂正：返事の印を置けない（返事は出さない）:", errName(err));
-    return { delivery: "skipped", sentId: null };
+    return { delivery: "skipped", sentId: null, undelivered: false };
   }
-  if (!first) return { delivery: "skipped", sentId: null };
+  if (!first) return { delivery: "skipped", sentId: null, undelivered: false };
   return send(groupId, deps, text);
 }
 
@@ -444,6 +457,17 @@ export async function runObiFix(
     if (said.delivery === "skipped") {
       log("ask-suppressed", said);
       return { outcome: "ask-suppressed" };
+    }
+    // 届いていないことが確か（reply も push もはっきり断られた）：依頼ごとの印を消して、次の機会に聞き返せるようにする。
+    //   届いたかどうか分からない（時間切れ・通信の失敗・5xx）ときは消さない（二重に出さない側）。消せなければ印は残る（同じ側）
+    if (said.undelivered) {
+      try {
+        await kvBounded(deps, input.startedAt + OBI_FIX_DEADLINE_MS, () => deps.store.del(`obi-fix-ask:${no}`));
+      } catch (err) {
+        console.error("帯替えの訂正：届かなかった聞き返しの印を消せない（次は聞き返さない）:", `#J${no}`, errName(err));
+      }
+      log("ask-failed", said);
+      return { outcome: "ask-failed" };
     }
     // 聞き返しへの引用の返事を引けるよう、出した聞き返しの ID → 受付番号を控える
     if (said.sentId && /^\d{1,64}$/.test(said.sentId)) {
