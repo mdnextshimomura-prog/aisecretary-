@@ -54,7 +54,7 @@ function parseInputs(v: unknown): IntakeInput[] | null {
   return out;
 }
 
-function classifyFetchError(err: unknown): IntakeOutcome {
+function classifyFetchError(err: unknown): { kind: "unreachable" } | { kind: "unknown"; reason: string } {
   const e = err as { name?: string; cause?: { code?: string } } | undefined;
   if (e?.name === "TimeoutError" || e?.name === "AbortError") return { kind: "unknown", reason: "timeout" };
   if (e?.cause?.code && UNREACHABLE_CODES.has(e.cause.code)) return { kind: "unreachable" };
@@ -143,4 +143,133 @@ export function inputsMatch(sent: FetchedPdf[], got: IntakeInput[]): boolean {
     if (sizeBySha.get(g.sha256) !== g.size) return false;
   }
   return true;
+}
+
+
+// ── 番号で直す（設計 2026-10-10・約束 2026-10-11-obi-fix-contract.md） ──
+//
+// 2つの入口を呼ぶ。どちらも本文は JSON、鍵はヘッダ `x-job-token`。結果は受付（postIntake）と同じ4つに分ける。
+//   POST /api/jobs/fix/resolve … 引用先・受付番号から、直せる依頼かを引く（何も書き換えない）
+//   POST /api/jobs/{no}/fix    … 訂正を受け付ける（冪等のかぎは訂正の発言の message.id）
+// **発言者を表す項目は送らない**（userId・表示名。誰が訂正できるかは呼ぶ前に確かめてある）。
+
+export type FixEstimate = "ok" | "closed" | "expired" | "not-ready" | "unavailable";
+const FIX_ESTIMATES = new Set<string>(["ok", "closed", "expired", "not-ready", "unavailable"]);
+
+export interface FixResolved {
+  no: number;
+  /** 引用なら「その知らせが指す完成品」、番号なら「今の完成品」。fix の expectSha256 にそのまま渡す */
+  artifactSha256: string;
+  /** artifactSha256 が今の完成品と同じか */
+  current: boolean;
+  /** 今の1冊のページ数（分からなければ 0） */
+  pageCount: number;
+  /** 1〜5 を送ったときの見込み */
+  fixable: FixEstimate;
+  /** 0 を送ったときの見込み */
+  closable: FixEstimate;
+}
+
+export type FixResolveRequest =
+  | { groupId: string; quotedMessageId: string }
+  | { groupId: string; no: number };
+
+export type FixResolveOutcome =
+  | { kind: "accepted"; resolved: FixResolved }
+  | { kind: "rejected"; code: string; httpStatus: number }
+  | { kind: "unreachable" }
+  | { kind: "unknown"; reason: string };
+
+interface PortalOpts {
+  fetchImpl: typeof fetch;
+  baseUrl: string;
+  token: string;
+  timeoutMs: number;
+}
+
+type JsonCall =
+  | { kind: "http"; status: number; body: Record<string, unknown>; bodyOk: boolean }
+  | { kind: "unreachable" }
+  | { kind: "unknown"; reason: string };
+
+async function postJson(path: string, payload: Record<string, unknown>, opts: PortalOpts): Promise<JsonCall> {
+  let res: Response;
+  try {
+    res = await opts.fetchImpl(`${opts.baseUrl}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-job-token": opts.token },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(opts.timeoutMs),
+      cache: "no-store",
+    });
+  } catch (err) {
+    return classifyFetchError(err);
+  }
+  let body: Record<string, unknown> = {};
+  let bodyOk = true;
+  try {
+    const parsed = (await res.json()) as unknown;
+    if (parsed && typeof parsed === "object") body = parsed as Record<string, unknown>;
+    else bodyOk = false;
+  } catch {
+    bodyOk = false;
+  }
+  return { kind: "http", status: res.status, body, bodyOk };
+}
+
+const isPositiveInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+
+/**
+ * 断りの共通の分け方。503 は、portal がはっきり止めていると答えた code（stopCodes）のときだけ断り。
+ * それ以外の 5xx は「届いたか分からない」。
+ */
+function rejectionOf(
+  call: Extract<JsonCall, { kind: "http" }>,
+  stopCodes: string[]
+): { kind: "rejected"; code: string; httpStatus: number } | { kind: "unknown"; reason: string } {
+  const code = typeof call.body.code === "string" ? call.body.code : "";
+  if (call.status === 503 && stopCodes.includes(code)) return { kind: "rejected", code, httpStatus: 503 };
+  if (call.status >= 400 && call.status < 500) {
+    return { kind: "rejected", code: code || `HTTP_${call.status}`, httpStatus: call.status };
+  }
+  return { kind: "unknown", reason: `http-${call.status}` };
+}
+
+export async function postFixResolve(req: FixResolveRequest, opts: PortalOpts): Promise<FixResolveOutcome> {
+  const payload: Record<string, unknown> = { source: "line-group", groupId: req.groupId };
+  if ("quotedMessageId" in req) payload.quotedMessageId = req.quotedMessageId;
+  else payload.no = req.no;
+  const call = await postJson("/api/jobs/fix/resolve", payload, opts);
+  if (call.kind !== "http") return call;
+  if (call.status === 200) {
+    const b = call.body;
+    if (
+      call.bodyOk &&
+      isPositiveInt(b.no) &&
+      typeof b.artifactSha256 === "string" &&
+      /^[0-9a-f]{64}$/.test(b.artifactSha256) &&
+      typeof b.current === "boolean" &&
+      typeof b.pageCount === "number" &&
+      Number.isInteger(b.pageCount) &&
+      b.pageCount >= 0 &&
+      typeof b.fixable === "string" &&
+      FIX_ESTIMATES.has(b.fixable) &&
+      typeof b.closable === "string" &&
+      FIX_ESTIMATES.has(b.closable)
+    ) {
+      return {
+        kind: "accepted",
+        resolved: {
+          no: b.no,
+          artifactSha256: b.artifactSha256,
+          current: b.current,
+          pageCount: b.pageCount,
+          fixable: b.fixable as FixEstimate,
+          closable: b.closable as FixEstimate,
+        },
+      };
+    }
+    return { kind: "unknown", reason: "invalid-success-body" };
+  }
+  return rejectionOf(call, ["FIX_DISABLED"]);
 }
