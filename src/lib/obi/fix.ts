@@ -315,3 +315,152 @@ export async function locateObiFix(input: ObiFixInput, deps: ObiFixDeps): Promis
   }
   return unknownTarget(r.kind === "unknown" ? r.reason : "unreachable");
 }
+
+/** portal の断り（resolve・fix）→ 文 */
+function rejectionMessage(
+  no: number,
+  page: number | null,
+  o: { code: string; busyJobNo?: number; pageCount?: number }
+): string {
+  switch (o.code) {
+    case "FIX_DISABLED":
+    case "INTAKE_STOPPED":
+      return OBI_MESSAGES.stopped;
+    case "NOT_FOUND":
+      return OBI_FIX_MESSAGES.notFound(no);
+    case "FIX_BAD_PAGE":
+      return page === null
+        ? OBI_FIX_MESSAGES.rejected("FIX_BAD_PAGE")
+        : OBI_FIX_MESSAGES.badPage(no, page, o.pageCount ?? 0);
+    case "FIX_STALE":
+      return OBI_FIX_MESSAGES.stale(no);
+    case "FIX_NOT_READY":
+      return OBI_FIX_MESSAGES.notReady(no);
+    case "FIX_CLOSED":
+      return OBI_FIX_MESSAGES.alreadyClosed(no);
+    case "FIX_EXPIRED":
+      return OBI_FIX_MESSAGES.expired;
+    case "FIX_UNAVAILABLE":
+      return OBI_FIX_MESSAGES.unavailable(no);
+    case "OBI_BUSY":
+      return OBI_MESSAGES.busy(o.busyJobNo);
+    default:
+      return OBI_FIX_MESSAGES.rejected(sanitizeForReply(o.code));
+  }
+}
+
+/** fix が受け付けた結果 → 文 */
+function acceptedMessage(
+  no: number,
+  body: FixBody,
+  o: Extract<FixOutcome, { kind: "accepted" }>
+): string {
+  const { code, page, turn } = body;
+  if (o.result === "closed") return OBI_FIX_MESSAGES.closed(no);
+  if (o.result === "queued" && page !== null) {
+    return code === 3 && turn === ""
+      ? OBI_FIX_MESSAGES.queuedUpsideDown(no, page)
+      : OBI_FIX_MESSAGES.queued(no, code, page);
+  }
+  if (o.reason === "limit") return OBI_FIX_MESSAGES.humanLimit(no);
+  if (o.reason === "repeat" && page !== null) return OBI_FIX_MESSAGES.humanRepeat(no, page);
+  if (o.reason === "already-standard" && page !== null) return OBI_FIX_MESSAGES.humanAlreadyStandard(no, page);
+  return OBI_FIX_MESSAGES.human(no, code, page);
+}
+
+/**
+ * 訂正と決まったイベントを最後まで扱う（イベントの予約の中で呼ぶ）。
+ * どの結果でも、呼ぶ側はイベントを済みにする（やり直さない。503 にしない）。
+ * onFixCalled：portal の fix を呼ぶ直前／onCommitted：fix の結果が確かになった（送っていないことが確か、を含む。AB1）。
+ * 例外で止まったときの扱い（replyObiFixInterrupted）を、呼ぶ側がこの2つで決める。
+ */
+export async function runObiFix(
+  input: ObiFixInput,
+  target: Extract<FixTarget, { kind: "target" }>,
+  deps: ObiFixDeps & ObiFixStageHooks
+): Promise<ObiFixResult> {
+  const { messageId } = input;
+  const groupId = input.config.groupId;
+  const no = target.no;
+  const { code, page, turn } = input.body;
+  const repliedKey = `obi-fix-replied:${messageId}`;
+  const log = (result: string, said: Said) =>
+    console.log("帯替えの訂正:", `#J${no}`, `code=${code}`, `page=${page ?? "-"}`, result, said.delivery);
+  const refuse = async (result: string, text: string): Promise<ObiFixResult> => {
+    log(result, await sayOnce(input, groupId, deps, repliedKey, text));
+    return { outcome: "refused" };
+  };
+
+  // 認可（0 も同じ）。許可されていなければ、ここから先の portal は呼ばない
+  if (!input.allowed) {
+    log("forbidden", await sayOnce(input, groupId, deps, `obi-fix-forbidden:${messageId}`, OBI_MESSAGES.fixForbidden));
+    return { outcome: "forbidden" };
+  }
+
+  // resolve（完成の知らせへの引用は、もう引いてある）
+  let resolved = target.resolved;
+  if (!resolved) {
+    const r = await postFixResolve({ groupId, no }, portalOpts(input, deps, RESOLVE_MS));
+    if (r.kind === "rejected") return refuse(r.code, rejectionMessage(no, page, r));
+    // 結果不明でも fix は呼ばない（resolve は何も書き換えないので、何も変わっていないのが確か）
+    if (r.kind !== "accepted") return refuse(`resolve-${r.kind}`, OBI_FIX_MESSAGES.unreachable);
+    resolved = r.resolved;
+  }
+
+  // fix（1回だけ）
+  deps.onFixCalled();
+  const o = await postFix(
+    no,
+    { messageId, groupId, code, page, turn, expectSha256: resolved.artifactSha256 },
+    portalOpts(input, deps, FIX_MS)
+  );
+  if (o.kind === "accepted") {
+    deps.onCommitted();
+    log(o.reason ? `${o.result}:${sanitizeForReply(o.reason)}` : o.result, await sayOnce(input, groupId, deps, repliedKey, acceptedMessage(no, input.body, o)));
+    return { outcome: o.result };
+  }
+  if (o.kind === "rejected") {
+    deps.onCommitted();
+    return refuse(sanitizeForReply(o.code), rejectionMessage(no, page, o));
+  }
+
+  // 送っていないことが確かな失敗（postFix の unreachable＝ECONNREFUSED・ENOTFOUND・EAI_AGAIN。AB1）。
+  //    つなぐ前に失敗しているので、portal には何も届いていない＝何も変わっていない。結果不明ではない。
+  //    送り直しても二重にならないので「…portal に届きません。少し待ってからもう一度送ってください」を返して済みにする
+  if (o.kind === "unreachable") {
+    deps.onCommitted();
+    return refuse("fix-unreachable", OBI_FIX_MESSAGES.unreachable);
+  }
+
+  // fix を呼んだ後、はっきりした答えが無く、届いたかどうかも分からない
+  //    （時間切れ・応答の途中の切断・5xx・形の違う応答）＝結果不明（AA1）。
+  //    受け付けられなかったとは言わない。「もう一度送ってください」とも言わない
+  //    （人が送り直すと message.id が変わり、portal の冪等では二重の訂正を防げない）。
+  //    1回だけ知らせて、済みにする（やり直さない・503 にしない）。結果は、Mac の後の知らせか portal の依頼ボックスで分かる
+  log(`unknown:${o.reason}`, await sayOnce(input, groupId, deps, `obi-fix-pending-notified:${messageId}`, OBI_FIX_MESSAGES.unknown));
+  return { outcome: "unknown" };
+}
+
+/**
+ * runObiFix が例外で止まったときの返事（webhook-event.ts が、予約を持ったまま呼ぶ。例外は外へ投げない）。
+ *   before-fix … fix をまだ呼んでいない（#J つきだけ。引用の形は呼ぶ側が今までの流れへ渡す）。
+ *                何も変わっていないのが確かなので「…portal に届きません。少し待ってからもう一度送ってください」
+ *   fix-called … fix を呼んだが、答えを受け取る前に止まった。結果不明と同じ「受付の結果を確かめられませんでした…」
+ * どちらも1通につき1回（NX）。この後、呼ぶ側はイベントを済みにする（503 にしない。AA1）
+ */
+export async function replyObiFixInterrupted(
+  input: Pick<ObiFixInput, "messageId" | "startedAt" | "config">,
+  stage: "before-fix" | "fix-called",
+  deps: ObiFixDeps
+): Promise<void> {
+  const { messageId } = input;
+  try {
+    const said =
+      stage === "before-fix"
+        ? await sayOnce(input, input.config.groupId, deps, `obi-fix-replied:${messageId}`, OBI_FIX_MESSAGES.unreachable)
+        : await sayOnce(input, input.config.groupId, deps, `obi-fix-pending-notified:${messageId}`, OBI_FIX_MESSAGES.unknown);
+    console.log("帯替えの訂正:", `interrupted:${stage}`, said.delivery);
+  } catch (err) {
+    console.error("帯替えの訂正：例外の後の返事を出せない:", stage, errName(err));
+  }
+}

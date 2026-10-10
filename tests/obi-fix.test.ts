@@ -4,7 +4,9 @@
  */
 import {
   locateObiFix,
+  runObiFix,
   replyObiFixStopped,
+  OBI_FIX_MESSAGES,
   type FixTarget,
   type ObiFixDeps,
   type ObiFixInput,
@@ -448,6 +450,630 @@ async function main() {
     );
   }
 
+  // ══ 認可 → resolve → fix → 返事（runObiFix） ══
+  // ── 認可 ──
+  for (const text of ["#J12 3ページ 2", "#J12 0"]) {
+    const w = world();
+    const r = await runObiFix(
+      input(w, text, { allowed: false }),
+      byNumber,
+      deps(w),
+    );
+    ok(
+      `許可されていない人（${text}）：portal を1回も呼ばずに断る`,
+      r.outcome === "forbidden" &&
+        w.portal.length === 0 &&
+        texts(w).join("|") === OBI_MESSAGES.fixForbidden,
+      JSON.stringify(texts(w)),
+    );
+    ok(
+      `許可されていない人（${text}）：断りの印は message.id ごと・8日`,
+      JSON.stringify(w.kv) ===
+        JSON.stringify([["setNx", `obi-fix-forbidden:${MSG}`, TTL]]),
+      JSON.stringify(w.kv),
+    );
+    await runObiFix(input(w, text, { allowed: false }), byNumber, deps(w));
+    ok(
+      `許可されていない人（${text}）：同じ発言の再送では返さない`,
+      w.replies.length === 1 && w.committed === 0,
+    );
+    await runObiFix(
+      input(w, text, { allowed: false, messageId: "600000000000000201" }),
+      byNumber,
+      deps(w),
+    );
+    ok(
+      `許可されていない人（${text}）：別の発言にはもう一度返す`,
+      w.replies.length === 2,
+    );
+  }
+  ok(
+    "断りの文に個人名を入れない",
+    !OBI_MESSAGES.fixForbidden.includes("下村") &&
+      OBI_MESSAGES.fixForbidden ===
+        "直しの依頼は、帯替えを依頼できる方からお願いします",
+  );
+  ok(
+    "既存の帯替えの依頼の断りは変えていない",
+    OBI_MESSAGES.forbidden === "帯替えの依頼は下村さんからお願いします",
+  );
+  {
+    const w = world();
+    const notice: Target = {
+      kind: "target",
+      via: "notice",
+      no: 12,
+      resolved: {
+        no: 12,
+        artifactSha256: SHA,
+        current: true,
+        pageCount: 5,
+        fixable: "ok",
+        closable: "ok",
+        kind: "completion",
+        phase: "fix",
+      },
+    };
+    const r = await runObiFix(
+      input(w, "3ページ 2", { allowed: false, quotedMessageId: QUOTED }),
+      notice,
+      deps(w),
+    );
+    ok(
+      "許可されていない人（完成の知らせへの引用）：fix は呼ばずに断る",
+      r.outcome === "forbidden" &&
+        w.portal.length === 0 &&
+        texts(w).join() === OBI_MESSAGES.fixForbidden,
+    );
+  }
+
+  // ── 受け付けた結果 → 文 ──
+  const M = OBI_FIX_MESSAGES;
+  const accepted: Array<[string, Record<string, unknown>, string]> = [
+    [
+      "#J12 0",
+      { result: "closed", code: 0, page: null, round: 0 },
+      "ありがとうございます。#J12 を完了にしました",
+    ],
+    [
+      "#J12 3ページ 1",
+      { code: 1 },
+      "#J12 の直しを受け付けました（3ページ・帯の位置）。直せたら、ここに新しいリンクを出します",
+    ],
+    [
+      "#J12 3ページ 2",
+      {},
+      "#J12 の直しを受け付けました（3ページ・他社の文字）。直せたら、ここに新しいリンクを出します",
+    ],
+    [
+      "#J12 4ページ 3",
+      { code: 3, page: 4 },
+      "#J12 の直しを受け付けました（4ページ・向き）。逆さ（180度）として直します。右に90度なら「4ページ 3右」、左に90度なら「4ページ 3左」と返信してください",
+    ],
+    [
+      "#J12 3ページ 3右",
+      { code: 3, turn: "right" },
+      "#J12 の直しを受け付けました（3ページ・向き）。直せたら、ここに新しいリンクを出します",
+    ],
+    [
+      "#J12 3ページ 3左",
+      { code: 3, turn: "left" },
+      "#J12 の直しを受け付けました（3ページ・向き）。直せたら、ここに新しいリンクを出します",
+    ],
+    [
+      "#J12 3ページ 4",
+      { result: "human", reason: "manual-code", code: 4, round: 0 },
+      "#J12 担当が確認します（3ページ・順番）",
+    ],
+    [
+      "#J12 4",
+      { result: "human", reason: "manual-code", code: 4, page: null, round: 0 },
+      "#J12 担当が確認します（順番）",
+    ],
+    [
+      "#J12 5",
+      { result: "human", reason: "manual-code", code: 5, page: null, round: 0 },
+      "#J12 担当が確認します（その他）",
+    ],
+    [
+      "#J12 3ページ 2",
+      { result: "human", reason: "limit" },
+      "#J12 は自動の直しが3回になりました。担当が確認します",
+    ],
+    [
+      "#J12 3ページ 1",
+      { result: "human", reason: "repeat", code: 1 },
+      "#J12 の3ページは帯の位置を一度直しています。担当が確認します",
+    ],
+    [
+      "#J12 3ページ 1",
+      { result: "human", reason: "already-standard", code: 1 },
+      "#J12 の3ページの帯は、すでに標準の位置にあります。担当が確認します",
+    ],
+    [
+      "#J12 3ページ 2",
+      { result: "human", reason: "not-auto" },
+      "#J12 担当が確認します（3ページ・他社の文字）",
+    ],
+    [
+      "#J12 3ページ 2",
+      { result: "human", reason: "no-room" },
+      "#J12 担当が確認します（3ページ・他社の文字）",
+    ],
+    [
+      "#J12 3ページ 2",
+      { result: "human", reason: "human-pending" },
+      "#J12 担当が確認します（3ページ・他社の文字）",
+    ],
+    [
+      "#J12 3ページ 2",
+      { result: "human", reason: "知らない理由" },
+      "#J12 担当が確認します（3ページ・他社の文字）",
+    ],
+  ];
+  for (const [text, over, want] of accepted) {
+    const w = world();
+    w.fix = () => fixed(over);
+    const r = await runObiFix(input(w, text), byNumber, deps(w));
+    ok(
+      `受け付けた（${text}／${over.reason ?? over.result ?? "queued"}）：文`,
+      texts(w).join("|") === want &&
+        r.outcome === (over.result ?? "queued") &&
+        w.committed === 1,
+      JSON.stringify(texts(w)),
+    );
+  }
+  ok(
+    "その場の返事に「直しました」は無い",
+    !Object.values(M).some((v) =>
+      (typeof v === "string" ? v : "").includes("直しました"),
+    ),
+  );
+  {
+    const w = world();
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "#J つき：resolve（番号）→ fix の順に1回ずつ",
+      paths(w) === `${RESOLVE},${FIX}` && r.outcome === "queued",
+    );
+    ok(
+      "resolve（番号）の本文：source・groupId・no だけ",
+      JSON.stringify(w.portal[0].body) ===
+        JSON.stringify({ source: "line-group", groupId: G, no: 12 }),
+      JSON.stringify(w.portal[0].body),
+    );
+    ok(
+      "fix の本文：約束の7項目（expectSha256 は resolve の値・冪等のかぎは訂正の発言の ID）",
+      JSON.stringify(w.portal[1].body) ===
+        JSON.stringify({
+          messageId: MSG,
+          source: "line-group",
+          groupId: G,
+          code: 2,
+          turn: "",
+          expectSha256: SHA,
+          page: 3,
+        }),
+      JSON.stringify(w.portal[1].body),
+    );
+    ok(
+      "返事の印は message.id ごと・8日。reply は訂正の発言へ",
+      JSON.stringify(w.kv) ===
+        JSON.stringify([["setNx", `obi-fix-replied:${MSG}`, TTL]]) &&
+        w.replies.length === 1 &&
+        w.pushes.length === 0,
+      JSON.stringify(w.kv),
+    );
+  }
+  {
+    const w = world();
+    const notice: Target = {
+      kind: "target",
+      via: "notice",
+      no: 12,
+      resolved: {
+        no: 12,
+        artifactSha256: "9".repeat(64),
+        current: false,
+        pageCount: 5,
+        fixable: "not-ready",
+        closable: "ok",
+        kind: "completion",
+        phase: "fix",
+      },
+    };
+    const r = await runObiFix(
+      input(w, "3ページ 2", { quotedMessageId: QUOTED }),
+      notice,
+      deps(w),
+    );
+    ok(
+      "完成の知らせへの引用：resolve は呼び直さず、fix を1回（expectSha256 はその知らせの完成品）",
+      paths(w) === FIX &&
+        w.portal[0].body.expectSha256 === "9".repeat(64) &&
+        r.outcome === "queued",
+    );
+    ok(
+      "ページまで揃った訂正は、見込み（fixable・current）に関わらず fix の答えで返事を決める",
+      texts(w)[0].startsWith("#J12 の直しを受け付けました"),
+    );
+  }
+  {
+    const w = world();
+    await runObiFix(input(w, "#J12 0"), byNumber, deps(w));
+    ok(
+      "0：ページを付けずに送る",
+      JSON.stringify(w.portal[1].body) ===
+        JSON.stringify({
+          messageId: MSG,
+          source: "line-group",
+          groupId: G,
+          code: 0,
+          turn: "",
+          expectSha256: SHA,
+        }),
+      JSON.stringify(w.portal[1].body),
+    );
+  }
+
+  // ── resolve の失敗（#J つき・聞き返しへの引用） ──
+  const resolveFails: Array<[string, () => Response, string]> = [
+    [
+      "NOT_FOUND",
+      () => json(404, { code: "NOT_FOUND", message: "x" }),
+      "#J12 は見つかりません。番号を確かめてもう一度送ってください",
+    ],
+    [
+      "FIX_DISABLED",
+      () => json(503, { code: "FIX_DISABLED", message: "x" }),
+      "いま帯替えの受付を止めています",
+    ],
+    [
+      "UNAUTHORIZED",
+      () => json(401, { code: "UNAUTHORIZED", message: "x" }),
+      "訂正を受け付けられませんでした（UNAUTHORIZED）。担当に声をかけてください",
+    ],
+    [
+      "時間切れ",
+      () => {
+        throw timeoutError();
+      },
+      "訂正を受け付けられませんでした（portal に届きません）。少し待ってからもう一度送ってください",
+    ],
+    [
+      "5xx",
+      () => json(500, { code: "INTERNAL" }),
+      "訂正を受け付けられませんでした（portal に届きません）。少し待ってからもう一度送ってください",
+    ],
+    [
+      "つながらない",
+      () => {
+        throw Object.assign(new TypeError("fetch failed"), {
+          cause: { code: "ENOTFOUND" },
+        });
+      },
+      "訂正を受け付けられませんでした（portal に届きません）。少し待ってからもう一度送ってください",
+    ],
+  ];
+  for (const [name, answer, want] of resolveFails) {
+    const w = world();
+    w.resolve = answer;
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      `#J つきで resolve が${name}：fix は呼ばず、文を返して済みにする`,
+      paths(w) === RESOLVE &&
+        texts(w).join("|") === want &&
+        r.outcome === "refused" &&
+        w.committed === 0,
+      JSON.stringify(texts(w)),
+    );
+  }
+
+  // ── fix の断り → 文 ──
+  const rejections: Array<[number, Record<string, unknown>, string]> = [
+    [503, { code: "FIX_DISABLED" }, "いま帯替えの受付を止めています"],
+    [503, { code: "INTAKE_STOPPED" }, "いま帯替えの受付を止めています"],
+    [
+      404,
+      { code: "NOT_FOUND" },
+      "#J12 は見つかりません。番号を確かめてもう一度送ってください",
+    ],
+    [
+      400,
+      { code: "FIX_BAD_PAGE", pageCount: 5 },
+      "#J12 に3ページはありません（全部で5ページです）。ページを確かめてもう一度送ってください",
+    ],
+    [
+      400,
+      { code: "FIX_BAD_PAGE" },
+      "#J12 に3ページはありません。ページを確かめてもう一度送ってください",
+    ],
+    [
+      409,
+      { code: "FIX_STALE" },
+      "#J12 には新しい完成の知らせがあります。いちばん新しい知らせに返信してください",
+    ],
+    [
+      409,
+      { code: "FIX_NOT_READY" },
+      "#J12 はいま処理中です。少し待ってからもう一度送ってください",
+    ],
+    [
+      409,
+      { code: "FIX_CLOSED" },
+      "#J12 は完了にしてあります。直すときは、もう一度依頼してください",
+    ],
+    [
+      410,
+      { code: "FIX_EXPIRED" },
+      "期限（7日）を過ぎたので直せません。もう一度依頼してください",
+    ],
+    [
+      409,
+      { code: "FIX_UNAVAILABLE" },
+      "#J12 は番号では直せません。担当に声をかけてください",
+    ],
+    [
+      409,
+      { code: "OBI_BUSY", busyJobNo: 11 },
+      "前の帯替え（#J11）を処理中です。終わってからもう一度送ってください",
+    ],
+    [
+      409,
+      { code: "FIX_MISMATCH" },
+      "訂正を受け付けられませんでした（FIX_MISMATCH）。担当に声をかけてください",
+    ],
+    [
+      400,
+      { code: "INVALID_REQUEST" },
+      "訂正を受け付けられませんでした（INVALID_REQUEST）。担当に声をかけてください",
+    ],
+    [
+      400,
+      { code: "改行\nつき" },
+      "訂正を受け付けられませんでした（改行 つき）。担当に声をかけてください",
+    ],
+  ];
+  for (const [status, body, want] of rejections) {
+    const w = world();
+    w.fix = () => json(status, { message: "x", ...body });
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      `fix が ${JSON.stringify(body.code)} で断った：文`,
+      texts(w).join("|") === want &&
+        r.outcome === "refused" &&
+        w.committed === 1,
+      JSON.stringify(texts(w)),
+    );
+  }
+  {
+    const w = world();
+    w.fix = () => {
+      throw Object.assign(new TypeError("fetch failed"), {
+        cause: { code: "ECONNREFUSED" },
+      });
+    };
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "fix につながらない（ECONNREFUSED）：送っていないのが確かなので結果不明にせず「届きません…もう一度送ってください」（AB1）",
+      texts(w).join("|") === M.unreachable &&
+        r.outcome === "refused" &&
+        w.fixCalled === 1 &&
+        w.committed === 1 &&
+        paths(w) === `${RESOLVE},${FIX}`,
+      JSON.stringify(texts(w)),
+    );
+    ok(
+      "fix につながらない：印は返事の印（結果不明の印は置かない）",
+      JSON.stringify(w.kv) ===
+        JSON.stringify([["setNx", `obi-fix-replied:${MSG}`, TTL]]),
+      JSON.stringify(w.kv),
+    );
+    const r2 = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "fix につながらない：同じ発言をもう一度扱っても「届きません」は1通につき1回だけ",
+      r2.outcome === "refused" && w.replies.length === 1,
+    );
+  }
+  for (const code of ["ENOTFOUND", "EAI_AGAIN"]) {
+    const w = world();
+    w.fix = () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code } });
+    };
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      `fix の ${code} も送る前の失敗が確か：「届きません…もう一度送ってください」（結果不明にしない）`,
+      texts(w).join("|") === M.unreachable &&
+        r.outcome === "refused" &&
+        w.committed === 1,
+      JSON.stringify(texts(w)),
+    );
+  }
+
+  // ── 結果不明（fix を呼んだ後、はっきりした答えが無い。AA1）──
+  {
+    const w = world();
+    w.fix = () => {
+      throw timeoutError();
+    };
+    const r1 = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "fix の結果不明：「受付の結果を確かめられませんでした…」を1回返す（やり直しを求めない）",
+      r1.outcome === "unknown" &&
+        texts(w).join("|") === M.unknown &&
+        w.fixCalled === 1 &&
+        w.committed === 0,
+      JSON.stringify(texts(w)),
+    );
+    ok(
+      "結果不明の文：「もう一度送ってください」とは書かず、「送らないでください」と確かめる先を書く",
+      !M.unknown.includes("もう一度送ってください") &&
+        M.unknown.includes("同じ番号をもう一度送らないでください") &&
+        M.unknown.includes("届く知らせか portal の依頼ボックス"),
+    );
+    ok(
+      "結果不明の印は message.id ごと・8日",
+      JSON.stringify(w.kv) ===
+        JSON.stringify([["setNx", `obi-fix-pending-notified:${MSG}`, TTL]]),
+      JSON.stringify(w.kv),
+    );
+    ok(
+      "結果不明：同じ Webhook の中では呼び直さない（resolve 1回＋fix 1回）",
+      paths(w) === `${RESOLVE},${FIX}`,
+    );
+    const r2 = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "同じ発言をもう一度扱っても、結果不明の知らせは1通につき1回だけ",
+      r2.outcome === "unknown" && w.replies.length === 1,
+    );
+  }
+  for (const [name, fixImpl] of [
+    ["5xx", () => json(500, { code: "INTERNAL" })],
+    ["形の違う 200", () => json(200, { no: 12, result: "???" })],
+    [
+      "理由の分からない通信の失敗",
+      () => {
+        throw new TypeError("fetch failed");
+      },
+    ],
+    [
+      "応答の途中の切断（ECONNRESET）",
+      () => {
+        throw Object.assign(new TypeError("fetch failed"), {
+          cause: { code: "ECONNRESET" },
+        });
+      },
+    ],
+  ] as Array<[string, () => Response]>) {
+    const w = world();
+    w.fix = fixImpl;
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      `fix の${name}も結果不明：同じ文を1回・呼ぶのは resolve 1回＋fix 1回`,
+      r.outcome === "unknown" &&
+        texts(w).join("|") === M.unknown &&
+        paths(w) === `${RESOLVE},${FIX}` &&
+        w.committed === 0,
+      JSON.stringify(texts(w)),
+    );
+  }
+  {
+    // fix を呼ぶ前に終わるもの（断り・resolve の失敗）は、onFixCalled を呼ばない
+    const w = world();
+    w.resolve = () => {
+      throw timeoutError();
+    };
+    await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    await runObiFix(
+      input(w, "#J12 0", { allowed: false, messageId: "600000000000000201" }),
+      byNumber,
+      deps(w),
+    );
+    ok(
+      "fix を呼ぶ前に終わるものは onFixCalled を呼ばない（resolve の失敗・断り）",
+      w.fixCalled === 0 && texts(w)[0] === M.unreachable,
+      JSON.stringify(texts(w)),
+    );
+  }
+
+  // ── 返事は1通につき1回 ──
+  {
+    const w = world();
+    await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "同じ発言をもう一度扱っても、返事は1回だけ",
+      w.replies.length === 1 && r.outcome === "queued",
+    );
+  }
+  {
+    const w = world();
+    w.store = {
+      ...w.store,
+      setNx: async () => {
+        throw new Error("KV down");
+      },
+    };
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "返事の印を置けない：返事をしない（受付は通っているので済みにする）",
+      w.replies.length === 0 &&
+        w.pushes.length === 0 &&
+        r.outcome === "queued" &&
+        w.committed === 1,
+    );
+    const r2 = await runObiFix(
+      input(w, "#J12 0", { allowed: false }),
+      byNumber,
+      deps(w),
+    );
+    ok(
+      "断りの印を置けない：返事をしない",
+      w.replies.length === 0 && r2.outcome === "forbidden",
+    );
+  }
+  {
+    const w = world();
+    w.replyOutcome = { kind: "rejected", status: 400 };
+    await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "reply がはっきり断られたときだけ、同じ文を push でグループへ",
+      w.pushes.length === 1 &&
+        w.pushes[0].to === G &&
+        w.pushes[0].text === w.replies[0].text,
+    );
+    const w2 = world();
+    w2.replyOutcome = { kind: "unknown" };
+    await runObiFix(input(w2, "#J12 3ページ 2"), byNumber, deps(w2));
+    ok(
+      "reply の結果不明は送り直さない",
+      w2.replies.length === 1 && w2.pushes.length === 0,
+    );
+  }
+
+  // ── 各段階の時間の上限・返事の印の時間 ──
+  {
+    const w = world();
+    signalTimeouts.length = 0;
+    w.replyOutcome = { kind: "rejected", status: 400 };
+    await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "各段階の上限：resolve 6秒・fix 8秒・reply 4秒・push 4秒",
+      signalTimeouts.join() === "6000,8000" &&
+        w.replies[0].timeoutMs === 4000 &&
+        w.pushes[0].timeoutMs === 4000,
+      `${signalTimeouts.join()} ${w.replies[0].timeoutMs} ${w.pushes[0].timeoutMs}`,
+    );
+  }
+  {
+    const w = world();
+    w.store = {
+      ...w.store,
+      setNx: () => new Promise<boolean>(() => undefined),
+    };
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, {
+      ...deps(w),
+      kvTimeoutMs: 20,
+    });
+    ok(
+      "返事の印が返ってこない：上限で打ち切り、返事をしない",
+      w.replies.length === 0 && r.outcome === "queued",
+    );
+  }
+  {
+    // 返事より前の段階の終わり（開始+17秒）を過ぎていたら、印を待たない＝返事をしない
+    const w = world();
+    w.startedAt = T - 17_000;
+    const r = await runObiFix(
+      input(w, "#J12 0", { allowed: false }),
+      byNumber,
+      deps(w),
+    );
+    ok(
+      "開始+17秒を過ぎたら、印を置かずに終わる（返事をしない）",
+      w.replies.length === 0 && w.kv.length === 0 && r.outcome === "forbidden",
+    );
+  }
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);
 }

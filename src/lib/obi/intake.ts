@@ -68,6 +68,8 @@ const REQUESTED_BY = "LINEグループ（営業部）";
 export const OBI_MESSAGES = {
   stopped: "いま帯替えの受付を止めています",
   forbidden: "帯替えの依頼は下村さんからお願いします",
+  // 番号で直す（設計 2026-10-10 の T7）。個人名は入れない。上の forbidden（帯替えの依頼の断り）は変えない
+  fixForbidden: "直しの依頼は、帯替えを依頼できる方からお願いします",
   noPdf: "直近30分に PDF がありません。PDF を貼ってからもう一度送ってください",
   tooMany: (count: number) =>
     `直近30分の PDF が${count}件あり、上限（20件・合計25MB）を超えるため受付できませんでした（1件も使っていません）。PDF を減らしてからもう一度送ってください`,
