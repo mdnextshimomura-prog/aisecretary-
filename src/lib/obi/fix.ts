@@ -318,6 +318,14 @@ export async function locateObiFix(input: ObiFixInput, deps: ObiFixDeps): Promis
   return unknownTarget(r.kind === "unknown" ? r.reason : "unreachable");
 }
 
+/** resolve の見込み（ok 以外）→ 文。fix の同じ意味の code と同じ文にする */
+function estimateMessage(no: number, e: Exclude<FixEstimate, "ok">): string {
+  if (e === "closed") return OBI_FIX_MESSAGES.alreadyClosed(no);
+  if (e === "expired") return OBI_FIX_MESSAGES.expired;
+  if (e === "not-ready") return OBI_FIX_MESSAGES.notReady(no);
+  return OBI_FIX_MESSAGES.unavailable(no);
+}
+
 /** portal の断り（resolve・fix）→ 文 */
 function rejectionMessage(
   no: number,
@@ -415,6 +423,37 @@ export async function runObiFix(
     // 結果不明でも fix は呼ばない（resolve は何も書き換えないので、何も変わっていないのが確か）
     if (r.kind !== "accepted") return refuse(`resolve-${r.kind}`, OBI_FIX_MESSAGES.unreachable);
     resolved = r.resolved;
+  }
+
+  // ページが要る番号（1・2・3）でページが無い：聞き返す（fix は呼ばない）
+  if ((code === 1 || code === 2 || code === 3) && page === null) {
+    if (!resolved.current) return refuse("stale", OBI_FIX_MESSAGES.stale(no));
+    if (resolved.fixable !== "ok") return refuse(resolved.fixable, estimateMessage(no, resolved.fixable));
+    // 依頼ごとに1回。2回目からは返事をしない
+    const said = await sayOnce(input, groupId, deps, `obi-fix-ask:${no}`, OBI_FIX_MESSAGES.askPage(no));
+    if (said.delivery === "skipped") {
+      log("ask-suppressed", said);
+      return { outcome: "ask-suppressed" };
+    }
+    // 聞き返しへの引用の返事を引けるよう、出した聞き返しの ID → 受付番号を控える
+    if (said.sentId && /^\d{1,64}$/.test(said.sentId)) {
+      try {
+        await kvBounded(deps, input.startedAt + OBI_FIX_DEADLINE_MS, () =>
+          deps.store.putText(`obi-fix-askmsg:${said.sentId}`, `J${no}`, OBI_FIX_KEY_TTL_SECONDS)
+        );
+      } catch (err) {
+        console.error("帯替えの訂正：聞き返しの控えを置けない（#J つきの返事なら通る）:", `#J${no}`, errName(err));
+      }
+    } else {
+      console.error("帯替えの訂正：聞き返しの ID が取れない（#J つきの返事なら通る）:", `#J${no}`, said.delivery);
+    }
+    log("asked", said);
+    return { outcome: "asked" };
+  }
+
+  // ページの範囲（portal が受ける 1〜120 の外）。fix に送っても形の違いで断られるだけなので、ここで返す
+  if (page !== null && (page < PAGE_MIN || page > PAGE_MAX)) {
+    return refuse("bad-page", OBI_FIX_MESSAGES.badPage(no, page, resolved.pageCount));
   }
 
   // fix（1回だけ）。返事の印の1秒を残して、開始+17秒までに終える

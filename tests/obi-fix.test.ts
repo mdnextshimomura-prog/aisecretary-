@@ -1213,6 +1213,230 @@ async function main() {
         w2.portal.length === 0,
     );
   }
+  // ══ ページの聞き返し・聞き返しへの引用・ページの範囲 ══
+  for (const text of ["#J12 1", "#J12 2", "#J12 3", "#J12 3右"]) {
+    const w = world();
+    const r = await runObiFix(input(w, text), byNumber, deps(w));
+    ok(
+      `ページが無い（${text}）：resolve までで終え、聞き返す（fix は呼ばない）`,
+      r.outcome === "asked" &&
+        paths(w) === RESOLVE &&
+        texts(w).join("|") ===
+          "何ページ目ですか？ 例：3ページ 2（#J12。この知らせに返信してください）" &&
+        w.committed === 0,
+      JSON.stringify(texts(w)),
+    );
+    ok(
+      `ページが無い（${text}）：聞き返しは依頼ごとの印・出した聞き返しの ID → 受付番号を控える（どちらも8日）`,
+      JSON.stringify(w.kv) ===
+        JSON.stringify([
+          ["setNx", "obi-fix-ask:12", TTL],
+          ["putText", "obi-fix-askmsg:700000000000000001", `J12|${TTL}`],
+        ]),
+      JSON.stringify(w.kv),
+    );
+  }
+  {
+    const w = world();
+    await runObiFix(input(w, "#J12 2"), byNumber, deps(w));
+    const r = await runObiFix(
+      input(w, "#J12 1", { messageId: "600000000000000201" }),
+      byNumber,
+      deps(w),
+    );
+    ok(
+      "聞き返しは依頼ごとに1回：2回目からは返事をしない",
+      r.outcome === "ask-suppressed" && w.replies.length === 1,
+    );
+    const other: Target = {
+      kind: "target",
+      via: "number",
+      no: 13,
+      resolved: null,
+    };
+    w.resolve = () => json(200, { ...RESOLVED, no: 13 });
+    const r2 = await runObiFix(
+      input(w, "#J13 2", { messageId: "600000000000000202" }),
+      other,
+      deps(w),
+    );
+    ok(
+      "別の依頼には聞き返す",
+      r2.outcome === "asked" &&
+        w.replies.length === 2 &&
+        texts(w)[1].includes("#J13"),
+    );
+  }
+  {
+    const w = world();
+    w.replyOutcome = { kind: "rejected", status: 400 };
+    await runObiFix(input(w, "#J12 2"), byNumber, deps(w));
+    ok(
+      "聞き返しが push に回ったら、push の ID を控える",
+      w.pushes.length === 1 &&
+        (await w.store.getText("obi-fix-askmsg:700000000000000002")) === "J12",
+    );
+  }
+  {
+    const w = world();
+    w.replyOutcome = { kind: "unknown" };
+    const r = await runObiFix(input(w, "#J12 2"), byNumber, deps(w));
+    ok(
+      "聞き返しの ID が取れない：控えない（#J つきの返事なら通る）",
+      r.outcome === "asked" && !w.kv.some((k) => k[0] === "putText"),
+    );
+    const w2 = world();
+    w2.store = {
+      ...w2.store,
+      putText: async () => {
+        throw new Error("KV down");
+      },
+    };
+    const r2 = await runObiFix(input(w2, "#J12 2"), byNumber, deps(w2));
+    ok(
+      "聞き返しの控えを置けない：聞き返しは出たまま、済みにする",
+      r2.outcome === "asked" && w2.replies.length === 1,
+    );
+  }
+  {
+    // 聞き返す前に、resolve の見込みで断るもの（聞いても直せない）
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [
+        { current: false },
+        "#J12 には新しい完成の知らせがあります。いちばん新しい知らせに返信してください",
+      ],
+      [
+        { fixable: "closed" },
+        "#J12 は完了にしてあります。直すときは、もう一度依頼してください",
+      ],
+      [
+        { fixable: "expired" },
+        "期限（7日）を過ぎたので直せません。もう一度依頼してください",
+      ],
+      [
+        { fixable: "not-ready" },
+        "#J12 はいま処理中です。少し待ってからもう一度送ってください",
+      ],
+      [
+        { fixable: "unavailable" },
+        "#J12 は番号では直せません。担当に声をかけてください",
+      ],
+    ];
+    for (const [over, want] of cases) {
+      const w = world();
+      w.resolve = () => json(200, { ...RESOLVED, ...over });
+      const r = await runObiFix(input(w, "#J12 2"), byNumber, deps(w));
+      ok(
+        `ページが無く、見込みが ${JSON.stringify(over)}：聞き返さずにその文`,
+        texts(w).join("|") === want &&
+          r.outcome === "refused" &&
+          paths(w) === RESOLVE &&
+          !w.kv.some((k) => k[1] === "obi-fix-ask:12"),
+        JSON.stringify(texts(w)),
+      );
+    }
+    const w = world();
+    w.resolve = () => json(200, { ...RESOLVED, closable: "unavailable" });
+    const r = await runObiFix(input(w, "#J12 2"), byNumber, deps(w));
+    ok(
+      "1〜3 の聞き返しは fixable を見る（closable は見ない）",
+      r.outcome === "asked",
+    );
+  }
+  for (const text of ["#J12 4", "#J12 5", "#J12 0"]) {
+    const w = world();
+    w.fix = () =>
+      fixed({
+        result: text.endsWith("0") ? "closed" : "human",
+        reason: text.endsWith("0") ? "" : "manual-code",
+      });
+    await runObiFix(input(w, text), byNumber, deps(w));
+    ok(
+      `ページが要らない番号（${text}）は聞き返さずに fix へ`,
+      paths(w) === `${RESOLVE},${FIX}` && !("page" in w.portal[1].body),
+    );
+  }
+  {
+    // 聞き返しへの引用の返事：KV で対象 → 認可 → resolve（番号）→ fix
+    const w = world();
+    await runObiFix(input(w, "#J12 2"), byNumber, deps(w));
+    w.portal.length = 0;
+    const reply = input(w, "3ページ 2", {
+      messageId: "600000000000000201",
+      quotedMessageId: "700000000000000001",
+    });
+    const t = await locateObiFix(reply, deps(w));
+    ok(
+      "聞き返しへの引用：対象は聞き返した依頼",
+      t.kind === "target" &&
+        t.via === "ask" &&
+        t.no === 12 &&
+        w.portal.length === 0,
+    );
+    const r = await runObiFix(reply, t as Target, deps(w));
+    ok(
+      "聞き返しへの引用：resolve（番号）→ fix。ページつきで送る",
+      r.outcome === "queued" &&
+        paths(w) === `${RESOLVE},${FIX}` &&
+        w.portal[0].body.no === 12 &&
+        w.portal[1].body.page === 3 &&
+        w.portal[1].body.messageId === "600000000000000201",
+    );
+    const denied = input(w, "3ページ 2", {
+      messageId: "600000000000000202",
+      quotedMessageId: "700000000000000001",
+      allowed: false,
+    });
+    w.portal.length = 0;
+    const t2 = await locateObiFix(denied, deps(w));
+    const r2 = await runObiFix(denied, t2 as Target, deps(w));
+    ok(
+      "聞き返しへの引用（許可されていない人）：portal を1回も呼ばずに断る",
+      r2.outcome === "forbidden" &&
+        w.portal.length === 0 &&
+        texts(w)[texts(w).length - 1] === OBI_MESSAGES.fixForbidden,
+    );
+  }
+  for (const [text, page, count, want] of [
+    [
+      "#J12 0ページ 2",
+      0,
+      5,
+      "#J12 に0ページはありません（全部で5ページです）。ページを確かめてもう一度送ってください",
+    ],
+    [
+      "#J12 121ページ 2",
+      121,
+      5,
+      "#J12 に121ページはありません（全部で5ページです）。ページを確かめてもう一度送ってください",
+    ],
+    [
+      "#J12 999ページ 4",
+      999,
+      0,
+      "#J12 に999ページはありません。ページを確かめてもう一度送ってください",
+    ],
+  ] as Array<[string, number, number, string]>) {
+    const w = world();
+    w.resolve = () => json(200, { ...RESOLVED, pageCount: count });
+    const r = await runObiFix(input(w, text), byNumber, deps(w));
+    ok(
+      `portal が受けないページ（${page}）：fix を呼ばずに「ありません」`,
+      texts(w).join("|") === want &&
+        paths(w) === RESOLVE &&
+        r.outcome === "refused" &&
+        w.committed === 0,
+      JSON.stringify(texts(w)),
+    );
+  }
+  {
+    const w = world();
+    await runObiFix(input(w, "#J12 120ページ 2"), byNumber, deps(w));
+    ok(
+      "120ページまでは fix に送る（あるかどうかは portal が決める）",
+      paths(w) === `${RESOLVE},${FIX}` && w.portal[1].body.page === 120,
+    );
+  }
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);
 }
