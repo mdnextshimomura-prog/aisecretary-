@@ -6,8 +6,12 @@
  * tests/fixtures/job-command-cases.json で固定している（line-secretary 側にも同じ表を置く）。
  * ここを直すときは、parse.js と表も同時に直すこと。
  */
+import { parseFixBody, FIX_TEXT_MAX, type FixCode, type FixTurn } from "./fix-parse";
+
 export type JobCommand =
   | { action: "review"; no: number; verdict: "ok" | "fix" }
+  | { action: "fix"; no: number; code: FixCode; page: number | null; turn: FixTurn }
+  | { action: "rechoose"; no: number }
   | {
       action: "request";
       workflow: "obi" | "satei";
@@ -24,6 +28,10 @@ function normalizeFullWidth(s: string): string {
 }
 
 const REVIEW_RE = /^#\s*J\s*(\d{1,6})\s*(OK|オーケー|完成|直す|直して|差し戻し)$/i;
+// 「#J12 9」＝対応の選び直し（差し戻しの選択肢の設計 2026-10-11 の E12）。**文法だけ先に入れてある**
+// （番号で直す の約束「差し戻しの選択肢のための土台」P4・P5。共通の表を後からもう一度替えずに済ませるため）。
+// 9 はページ・向きを付けない形だけ。全体で30文字まで。line-secretary の parse.js と同じ正規表現
+const RECHOOSE_RE = /^#\s*[Jj]\s*(\d{1,6})(?!\d)\s*9番?$/;
 const OBI_WORDS = ["帯替え", "帯かえ", "帯変え", "オビ替え", "おび替え"];
 // 長い語を先に試す（"してください" の前に "して" だけ剥がしてしまわないため）
 const FILLERS = ["してください", "して下さい", "お願いします", "下さい", "お願い", "して", "依頼", "を"];
@@ -70,6 +78,17 @@ export function parseJobCommand(text: string | null | undefined): JobCommand | n
   if (review) {
     return { action: "review", no: Number(review[1]), verdict: verdictOf(review[2]) };
   }
+
+  // 「#J12 2」「#J12 3ページ 2」＝番号で直す（設計 2026-10-10 の E12）。#J つきの形だけ
+  const fix = parseFixBody(normalized);
+  if (fix && fix.no !== null) {
+    return { action: "fix", no: fix.no, code: fix.code, page: fix.page, turn: fix.turn };
+  }
+
+  // 「#J12 9」＝対応の選び直し。番号の訂正に合わなかったときだけ試す。
+  // いまは、この結果を使う所は無い（classifyObiEntry は request だけを見る。Webhook の訂正の枝は parseFixBody で読むので、ここを通らない）
+  const rechoose = normalized.length <= FIX_TEXT_MAX ? normalized.match(RECHOOSE_RE) : null;
+  if (rechoose) return { action: "rechoose", no: Number(rechoose[1]) };
 
   let workflow: "obi" | "satei" | null = null;
   let rest = "";
