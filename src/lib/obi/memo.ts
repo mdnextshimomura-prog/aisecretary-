@@ -27,6 +27,9 @@ export const OBI_MAX_FILES = 20;
 export const OBI_MAX_TOTAL_BYTES = 25_000_000;
 // 「返事は1回だけ」の印の期限。LINE の再送はこれより短い間に来る
 export const OBI_NOTIFY_TTL_SECONDS = 24 * 60 * 60;
+// 「番号で直す」の印・聞き返しの控えの期限（設計 2026-10-10 の E11・R6）。
+// 訂正できる期間の7日＋余裕1日。上の24時間（帯替えの受付の印）とは別
+export const OBI_FIX_KEY_TTL_SECONDS = 8 * 24 * 60 * 60;
 
 const MESSAGE_ID_RE = /^\d{1,64}$/;
 
@@ -39,6 +42,10 @@ export interface ObiStore {
   setNx(key: string, ttlSeconds: number): Promise<boolean>;
   /** 印があるか（期限内のものだけ） */
   has(key: string): Promise<boolean>;
+  /** 値つきで置く（上書き）。聞き返しの message.id → 受付番号の控えに使う */
+  putText(key: string, value: string, ttlSeconds: number): Promise<void>;
+  /** 値を読む（無い・期限切れは null） */
+  getText(key: string): Promise<string | null>;
 }
 
 /** createKvObiStore が使う KV の操作（テストで偽物に差し替えられるよう、使う分だけ） */
@@ -52,6 +59,8 @@ export interface ObiKvClient {
   expire(key: string, seconds: number): Promise<unknown>;
   set(key: string, value: number, opts: { nx: true; ex: number }): Promise<unknown>;
   exists(key: string): Promise<number>;
+  setText(key: string, value: string, opts: { ex: number }): Promise<unknown>;
+  get(key: string): Promise<unknown>;
 }
 
 const zKey = (groupId: string) => `obi-pdf:z:${groupId}`;
@@ -122,6 +131,16 @@ export function createKvObiStore(client: ObiKvClient): ObiStore {
     async has(key) {
       return (await client.exists(key)) > 0;
     },
+    async putText(key, value, ttlSeconds) {
+      await client.setText(key, value, { ex: ttlSeconds });
+    },
+    async getText(key) {
+      const v = await client.get(key);
+      // KV は数字だけの文字列を数値に読み替えることがある。文字に戻して返す
+      if (typeof v === "string") return v;
+      if (typeof v === "number") return String(v);
+      return null;
+    },
   };
 }
 
@@ -135,6 +154,7 @@ export function createMemoryObiStore(now: () => number = Date.now): MemoryObiSto
   const sets = new Map<string, Map<string, number>>();
   const hashes = new Map<string, Map<string, string>>();
   const flags = new Map<string, number>();
+  const texts = new Map<string, { value: string; exp: number }>();
   return {
     async addPdf(groupId, rec, removeBefore) {
       const z = sets.get(groupId) ?? new Map<string, number>();
@@ -174,6 +194,13 @@ export function createMemoryObiStore(now: () => number = Date.now): MemoryObiSto
       const exp = flags.get(key);
       return exp !== undefined && exp > now();
     },
+    async putText(key, value, ttlSeconds) {
+      texts.set(key, { value, exp: now() + ttlSeconds * 1000 });
+    },
+    async getText(key) {
+      const e = texts.get(key);
+      return e && e.exp > now() ? e.value : null;
+    },
     sizes(groupId) {
       return { z: sets.get(groupId)?.size ?? 0, h: hashes.get(groupId)?.size ?? 0 };
     },
@@ -190,6 +217,8 @@ const realKv: ObiKvClient = {
   expire: (key, seconds) => kv.expire(key, seconds),
   set: (key, value, opts) => kv.set(key, value, opts),
   exists: (key) => kv.exists(key),
+  setText: (key, value, opts) => kv.set(key, value, opts),
+  get: (key) => kv.get(key),
 };
 
 let memoryFallback: MemoryObiStore | null = null;

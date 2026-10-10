@@ -7,6 +7,8 @@ import {
   recordObiPdf,
   selectObiPdfs,
   OBI_WINDOW_MS,
+  OBI_FIX_KEY_TTL_SECONDS,
+  OBI_NOTIFY_TTL_SECONDS,
   type ObiKvClient,
   type ObiPdfRecord,
 } from "../src/lib/obi/memo";
@@ -57,6 +59,16 @@ async function main() {
     ok("印の有無：期限内は true", await s.has("k"));
     now += 61_000;
     ok("印の有無：期限が切れたら false・無いものも false", !(await s.has("k")) && !(await s.has("none")));
+
+    // 番号で直す：値つきの置き場（メモリ）
+    ok("訂正のかぎの期限は8日", OBI_FIX_KEY_TTL_SECONDS === 8 * 24 * 60 * 60 && OBI_NOTIFY_TTL_SECONDS === 24 * 60 * 60);
+    ok("値つき：無ければ null", (await s.getText("t")) === null);
+    await s.putText("t", "J12", 60);
+    ok("値つき：置いた値を読める", (await s.getText("t")) === "J12");
+    await s.putText("t", "J13", 60);
+    ok("値つき：置き直すと上書き", (await s.getText("t")) === "J13");
+    now += 61_000;
+    ok("値つき：期限が切れたら null", (await s.getText("t")) === null);
   }
 
   // ── KV の控え（偽物の KV で、呼ぶ順番と引数を確かめる） ──
@@ -65,6 +77,7 @@ async function main() {
     const zrangeResults: string[][] = [];
     let hmgetResult: Record<string, unknown> | null = null;
     let setResult: unknown = "OK";
+    let getResult: unknown = null;
     const fake: ObiKvClient = {
       hset: async (k, v) => { calls.push(["hset", k, v]); return 1; },
       zadd: async (k, sm) => { calls.push(["zadd", k, sm]); return 1; },
@@ -75,6 +88,8 @@ async function main() {
       expire: async (k, sec) => { calls.push(["expire", k, sec]); return 1; },
       set: async (k, v, o) => { calls.push(["set", k, v, o]); return setResult; },
       exists: async (k) => { calls.push(["exists", k]); return 0; },
+      setText: async (k, v, o) => { calls.push(["setText", k, v, o]); return "OK"; },
+      get: async (k) => { calls.push(["get", k]); return getResult; },
     };
     const s = createKvObiStore(fake);
     const z = `obi-pdf:z:${G}`;
@@ -116,6 +131,19 @@ async function main() {
     ok("NX：置けなければ false", !(await s.setNx("obi-accepted-notified:1", 86400)));
     calls.length = 0;
     ok("印の有無：exists が0なら false", !(await s.has("obi-portal-attempted:1")) && JSON.stringify(calls[0]) === JSON.stringify(["exists", "obi-portal-attempted:1"]));
+
+    // 番号で直す：値つきの置き場（設計 2026-10-10 の E11・E12）
+    calls.length = 0;
+    await s.putText("obi-fix-askmsg:700", "J12", OBI_FIX_KEY_TTL_SECONDS);
+    ok("値つき：期限つきで置く（nx なし＝上書き）", JSON.stringify(calls[0]) === JSON.stringify(["setText", "obi-fix-askmsg:700", "J12", { ex: 691200 }]), JSON.stringify(calls));
+    getResult = "J12";
+    ok("値つき：文字で読める", (await s.getText("obi-fix-askmsg:700")) === "J12");
+    getResult = 12; // KV が数字だけの文字列を数値に読み替えた形
+    ok("値つき：数値に読み替えられていても文字で返す", (await s.getText("k")) === "12");
+    getResult = null;
+    ok("値つき：無ければ null", (await s.getText("k")) === null);
+    getResult = { a: 1 };
+    ok("値つき：文字でも数でもなければ null", (await s.getText("k")) === null);
   }
 
   // ── 依頼に使う PDF の選び方 ──
