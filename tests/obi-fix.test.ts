@@ -1074,6 +1074,145 @@ async function main() {
       w.replies.length === 0 && w.kv.length === 0 && r.outcome === "forbidden",
     );
   }
+  // ══ 時間の予算 ══
+  {
+    // 開始から6秒たって始まり、resolve に6秒かかった：fix は 17秒−12秒−返事の印の1秒＝4秒
+    const w = world();
+    signalTimeouts.length = 0;
+    w.startedAt = T - 6_000;
+    w.resolveTakesMs = 6_000;
+    await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "fix の時間は min(8秒, 開始+17秒−今−返事の印の1秒)",
+      signalTimeouts.join() === "6000,4000",
+      signalTimeouts.join(),
+    );
+  }
+  {
+    // 残りが2秒に満たない：fix を呼ばない
+    const w = world();
+    w.startedAt = T - 9_000;
+    w.resolveTakesMs = 5_500;
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "残りが2秒に満たなければ fix を呼ばず、「届きません」を返して済みにする",
+      paths(w) === RESOLVE &&
+        texts(w).join("|") === M.unreachable &&
+        r.outcome === "refused" &&
+        w.committed === 0,
+      JSON.stringify(texts(w)),
+    );
+  }
+  {
+    // 引用の resolve も、開始+17秒を越えない
+    const w = world();
+    signalTimeouts.length = 0;
+    w.startedAt = T - 12_000;
+    await locateObiFix(
+      input(w, "3ページ 2", { quotedMessageId: QUOTED }),
+      deps(w),
+    );
+    ok(
+      "引用の resolve の時間は min(6秒, 開始+17秒−今)",
+      signalTimeouts.join() === "5000",
+      signalTimeouts.join(),
+    );
+  }
+  {
+    // どの段階も上限いっぱいかかっても、開始から25秒以内に終わる
+    const w = world();
+    w.resolveTakesMs = 6_000;
+    w.fixTakesMs = 8_000;
+    w.replyTakesMs = 4_000;
+    w.pushTakesMs = 4_000;
+    w.replyOutcome = { kind: "rejected", status: 400 };
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "遅い portal・遅い LINE でも、開始から25秒以内に終わる",
+      w.clock.t - w.startedAt <= 25_000 &&
+        r.outcome === "queued" &&
+        w.pushes.length === 1,
+      String(w.clock.t - w.startedAt),
+    );
+  }
+  {
+    // 開始+7秒から始まり、resolve に6秒、fix が返ってこない：fix は3秒で切り、返事まで25秒以内に終える
+    const w = world();
+    signalTimeouts.length = 0;
+    w.startedAt = T - 7_000;
+    w.resolveTakesMs = 6_000;
+    w.fixTakesMs = 60_000;
+    w.replyTakesMs = 4_000;
+    w.pushTakesMs = 4_000;
+    w.replyOutcome = { kind: "rejected", status: 400 };
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "遅く始まり fix が返ってこなくても、開始から25秒以内に「確かめられませんでした」まで終える",
+      w.clock.t - w.startedAt <= 25_000 &&
+        signalTimeouts.join() === "6000,3000" &&
+        r.outcome === "unknown" &&
+        w.replies.length === 1 &&
+        w.replies[0].text === M.unknown &&
+        w.pushes.length === 1,
+      `${w.clock.t - w.startedAt} ${signalTimeouts.join()} ${r.outcome}`,
+    );
+  }
+  {
+    // portal が返ってこなくても、同じ Webhook の中では呼び直さない
+    const w = world();
+    w.resolveTakesMs = 60_000;
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok(
+      "resolve が時間切れ：呼ぶのは resolve の1回だけ（fix も呼び直しも無い）",
+      paths(w) === RESOLVE && r.outcome === "refused",
+    );
+    const w2 = world();
+    w2.fixTakesMs = 60_000;
+    const r2 = await runObiFix(input(w2, "#J12 3ページ 2"), byNumber, deps(w2));
+    ok(
+      "fix が時間切れ：呼ぶのは resolve 1回＋fix 1回だけ",
+      paths(w2) === `${RESOLVE},${FIX}` && r2.outcome === "unknown",
+    );
+  }
+  {
+    // 遅く始まった #J つきの訂正（webhook-event.ts が late を立てる）：認可の後、portal を呼ばずに「届きません」
+    const w = world();
+    w.startedAt = T - 7_001;
+    const late = { late: true };
+    const r = await runObiFix(
+      input(w, "#J12 3ページ 2", late),
+      byNumber,
+      deps(w),
+    );
+    ok(
+      "遅く始まった #J つきの訂正：portal を呼ばず「届きません」を返す（fix は呼んでいないので、送り直してよい）",
+      w.portal.length === 0 &&
+        texts(w).join("|") === M.unreachable &&
+        r.outcome === "refused" &&
+        w.committed === 0 &&
+        JSON.stringify(w.kv) ===
+          JSON.stringify([["setNx", `obi-fix-replied:${MSG}`, TTL]]),
+      JSON.stringify(texts(w)),
+    );
+    await runObiFix(input(w, "#J12 3ページ 2", late), byNumber, deps(w));
+    ok(
+      "遅く始まった訂正：同じ発言がもう一度届いても、返事は1通につき1回",
+      w.replies.length === 1 && w.portal.length === 0,
+    );
+    const w2 = world();
+    w2.startedAt = T - 7_001;
+    const r2 = await runObiFix(
+      input(w2, "#J12 3ページ 2", { late: true, allowed: false }),
+      byNumber,
+      deps(w2),
+    );
+    ok(
+      "遅く始まった訂正でも、許可されていない人には断りが先（portal は呼ばない）",
+      r2.outcome === "forbidden" &&
+        texts(w2).join("|") === OBI_MESSAGES.fixForbidden &&
+        w2.portal.length === 0,
+    );
+  }
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);
 }

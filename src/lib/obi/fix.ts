@@ -293,9 +293,11 @@ export async function locateObiFix(input: ObiFixInput, deps: ObiFixDeps): Promis
   if (m) return { kind: "target", via: "ask", no: Number(m[1]), resolved: null };
 
   // ② 完成の知らせへの引用か（portal に聞く。何も書き換えない）
+  const timeoutMs = Math.min(RESOLVE_MS, phaseEnd - deps.now());
+  if (timeoutMs <= 0) return unknownTarget("no-time");
   const r = await postFixResolve(
     { groupId: input.config.groupId, quotedMessageId: quoted },
-    portalOpts(input, deps, RESOLVE_MS)
+    portalOpts(input, deps, timeoutMs)
   );
   if (r.kind === "accepted") {
     // 「番号で直す」が受けるのは、完成の知らせ（kind が "completion"。項目の無い portal は ""）への引用だけ。
@@ -383,6 +385,7 @@ export async function runObiFix(
   const groupId = input.config.groupId;
   const no = target.no;
   const { code, page, turn } = input.body;
+  const phaseEnd = input.startedAt + OBI_FIX_PORTAL_PHASE_END_MS;
   const repliedKey = `obi-fix-replied:${messageId}`;
   const log = (result: string, said: Said) =>
     console.log("帯替えの訂正:", `#J${no}`, `code=${code}`, `page=${page ?? "-"}`, result, said.delivery);
@@ -397,22 +400,31 @@ export async function runObiFix(
     return { outcome: "forbidden" };
   }
 
+  // 遅く始まった訂正（#J つきだけがここに来る）：portal を呼ぶ時間が無い。fix は呼んでいないので、「届きません…もう一度送ってください」を返して済みにする（AA1）
+  if (input.late) return refuse("late-start", OBI_FIX_MESSAGES.unreachable);
+
   // resolve（完成の知らせへの引用は、もう引いてある）
   let resolved = target.resolved;
   if (!resolved) {
-    const r = await postFixResolve({ groupId, no }, portalOpts(input, deps, RESOLVE_MS));
+    const timeoutMs = Math.min(RESOLVE_MS, phaseEnd - deps.now());
+    const r: Awaited<ReturnType<typeof postFixResolve>> =
+      timeoutMs > 0
+        ? await postFixResolve({ groupId, no }, portalOpts(input, deps, timeoutMs))
+        : { kind: "unreachable" };
     if (r.kind === "rejected") return refuse(r.code, rejectionMessage(no, page, r));
     // 結果不明でも fix は呼ばない（resolve は何も書き換えないので、何も変わっていないのが確か）
     if (r.kind !== "accepted") return refuse(`resolve-${r.kind}`, OBI_FIX_MESSAGES.unreachable);
     resolved = r.resolved;
   }
 
-  // fix（1回だけ）
+  // fix（1回だけ）。返事の印の1秒を残して、開始+17秒までに終える
+  const remaining = phaseEnd - deps.now() - KV_OP_MS;
+  if (remaining < FIX_MIN_MS) return refuse("no-time", OBI_FIX_MESSAGES.unreachable); // 送る前の失敗が確か
   deps.onFixCalled();
   const o = await postFix(
     no,
     { messageId, groupId, code, page, turn, expectSha256: resolved.artifactSha256 },
-    portalOpts(input, deps, FIX_MS)
+    portalOpts(input, deps, Math.min(FIX_MS, remaining))
   );
   if (o.kind === "accepted") {
     deps.onCommitted();
