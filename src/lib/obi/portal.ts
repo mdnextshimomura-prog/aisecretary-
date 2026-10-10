@@ -286,3 +286,62 @@ export async function postFixResolve(req: FixResolveRequest, opts: PortalOpts): 
   }
   return rejectionOf(call, ["FIX_DISABLED"]);
 }
+
+// ── 番号で直す：訂正を受け付ける POST /api/jobs/{no}/fix ──
+
+export interface FixRequest {
+  /** 訂正の発言の LINE message.id */
+  messageId: string;
+  groupId: string;
+  code: number;
+  page: number | null;
+  turn: "" | "right" | "left";
+  /** resolve で受け取った artifactSha256 */
+  expectSha256: string;
+}
+
+export type FixResult = "closed" | "queued" | "human";
+const FIX_RESULTS = new Set<string>(["closed", "queued", "human"]);
+
+export type FixOutcome =
+  | { kind: "accepted"; no: number; created: boolean; result: FixResult; reason: string }
+  | { kind: "rejected"; code: string; httpStatus: number; busyJobNo?: number; pageCount?: number }
+  | { kind: "unreachable" }
+  | { kind: "unknown"; reason: string };
+
+export async function postFix(no: number, req: FixRequest, opts: PortalOpts): Promise<FixOutcome> {
+  const payload: Record<string, unknown> = {
+    messageId: req.messageId,
+    source: "line-group",
+    groupId: req.groupId,
+    code: req.code,
+    turn: req.turn,
+    expectSha256: req.expectSha256,
+  };
+  if (req.page !== null) payload.page = req.page; // 無いときは項目ごと省く（約束）
+  const call = await postJson(`/api/jobs/${no}/fix`, payload, opts);
+  if (call.kind !== "http") return call;
+  if (call.status === 200 || call.status === 201) {
+    const b = call.body;
+    if (call.bodyOk && isPositiveInt(b.no) && typeof b.result === "string" && FIX_RESULTS.has(b.result)) {
+      return {
+        kind: "accepted",
+        no: b.no,
+        created: call.status === 201,
+        result: b.result as FixResult,
+        reason: typeof b.reason === "string" ? b.reason : "",
+      };
+    }
+    // 成功の番号なのに中身が読めない＝受け付けられたかもしれない
+    return { kind: "unknown", reason: "invalid-success-body" };
+  }
+  const r = rejectionOf(call, ["FIX_DISABLED", "INTAKE_STOPPED"]);
+  if (r.kind !== "rejected") return r;
+  const busy = call.body.busyJobNo;
+  const pages = call.body.pageCount;
+  return {
+    ...r,
+    ...(isPositiveInt(busy) ? { busyJobNo: busy } : {}),
+    ...(isPositiveInt(pages) ? { pageCount: pages } : {}),
+  };
+}

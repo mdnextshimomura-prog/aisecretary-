@@ -2,7 +2,7 @@
  * 「番号で直す」の portal の呼び出し（POST /api/jobs/fix/resolve・POST /api/jobs/{no}/fix）と
  * 結果の分け方（約束 2026-10-11-obi-fix-contract.md）。portal は偽物。
  */
-import { postFixResolve } from "../src/lib/obi/portal";
+import { postFix, postFixResolve, type FixRequest } from "../src/lib/obi/portal";
 
 let fail = 0;
 const ok = (name: string, cond: boolean, d = "") => {
@@ -40,6 +40,8 @@ const RESOLVED = {
   no: 12, artifactSha256: SHA, current: true, pageCount: 5,
   fixable: "ok", closable: "ok", fixState: "", fixRound: 0,
 };
+const FIX_REQ: FixRequest = { messageId: "600000000000000200", groupId: G, code: 2, page: 3, turn: "", expectSha256: SHA };
+const FIXED = { no: 12, fixId: 7, created: true, result: "queued", code: 2, page: 3, turn: "", round: 1, reason: "" };
 async function main() {
   // ── resolve ──
   {
@@ -93,6 +95,54 @@ async function main() {
     ok("resolve：接続を拒まれたら unreachable", r.kind === "unreachable");
   }
 
+  // ── fix ──
+  {
+    let r = await postFix(12, FIX_REQ, opts(json(201, FIXED)));
+    ok("fix：201 は新しく受けた", r.kind === "accepted" && r.no === 12 && r.created && r.result === "queued" && r.reason === "", JSON.stringify(r));
+    ok("fix：宛先（受付番号つき）・POST・鍵", seenUrl === "https://portal.example.test/api/jobs/12/fix" && seenMethod === "POST" && seenHeaders.get("x-job-token") === "tok");
+    ok("fix：送る項目は約束の7つだけ（発言者の項目は無い）", keys() === "code,expectSha256,groupId,messageId,page,source,turn", keys());
+    ok("fix：値", seenBody.messageId === FIX_REQ.messageId && seenBody.source === "line-group" && seenBody.groupId === G && seenBody.code === 2 && seenBody.page === 3 && seenBody.turn === "" && seenBody.expectSha256 === SHA);
+
+    r = await postFix(12, { ...FIX_REQ, code: 0, page: null }, opts(json(201, { ...FIXED, result: "closed", code: 0, page: null, round: 0 })));
+    ok("fix：ページが無ければ項目ごと省く", keys() === "code,expectSha256,groupId,messageId,source,turn" && r.kind === "accepted" && r.result === "closed", keys());
+    r = await postFix(12, { ...FIX_REQ, code: 3, turn: "right" }, opts(json(201, { ...FIXED, code: 3, turn: "right" })));
+    ok("fix：向きを送る", seenBody.turn === "right" && seenBody.code === 3);
+
+    r = await postFix(12, FIX_REQ, opts(json(200, { ...FIXED, created: false, result: "human", reason: "repeat" })));
+    ok("fix：200 は同じ発言の2回目（最初の結果）", r.kind === "accepted" && !r.created && r.result === "human" && r.reason === "repeat", JSON.stringify(r));
+    r = await postFix(12, FIX_REQ, opts(json(201, { ...FIXED, result: "done" })));
+    ok("fix：成功の番号でも result が知らない値なら不明", r.kind === "unknown");
+    r = await postFix(12, FIX_REQ, opts(async () => new Response("<html>", { status: 201 })));
+    ok("fix：成功の番号で JSON でなければ不明", r.kind === "unknown");
+
+    r = await postFix(12, FIX_REQ, opts(json(400, { code: "FIX_BAD_PAGE", message: "x", pageCount: 5 })));
+    ok("fix：FIX_BAD_PAGE は断り（全部のページ数つき）", r.kind === "rejected" && r.code === "FIX_BAD_PAGE" && r.pageCount === 5 && r.busyJobNo === undefined, JSON.stringify(r));
+    r = await postFix(12, FIX_REQ, opts(json(409, { code: "OBI_BUSY", message: "x", busyJobNo: 11 })));
+    ok("fix：OBI_BUSY は断り（処理中の番号つき）", r.kind === "rejected" && r.code === "OBI_BUSY" && r.busyJobNo === 11);
+    for (const [status, code] of [[409, "FIX_STALE"], [409, "FIX_NOT_READY"], [409, "FIX_CLOSED"], [410, "FIX_EXPIRED"], [409, "FIX_UNAVAILABLE"], [409, "FIX_MISMATCH"], [404, "NOT_FOUND"], [400, "INVALID_REQUEST"], [401, "UNAUTHORIZED"]] as Array<[number, string]>) {
+      r = await postFix(12, FIX_REQ, opts(json(status, { code, message: "x" })));
+      ok(`fix：${code}（${status}）は断り`, r.kind === "rejected" && r.code === code && r.httpStatus === status, JSON.stringify(r));
+    }
+    r = await postFix(12, FIX_REQ, opts(json(503, { code: "FIX_DISABLED", message: "x" })));
+    ok("fix：503 FIX_DISABLED は断り", r.kind === "rejected" && r.code === "FIX_DISABLED");
+    r = await postFix(12, FIX_REQ, opts(json(503, { code: "INTAKE_STOPPED", message: "x" })));
+    ok("fix：503 INTAKE_STOPPED は断り", r.kind === "rejected" && r.code === "INTAKE_STOPPED");
+    r = await postFix(12, FIX_REQ, opts(json(503, { code: "OTHER" })));
+    ok("fix：それ以外の 503 は不明", r.kind === "unknown");
+    r = await postFix(12, FIX_REQ, opts(json(500, { code: "INTERNAL" })));
+    ok("fix：500 は不明", r.kind === "unknown");
+    r = await postFix(12, FIX_REQ, opts(async () => { throw new DOMException("timed out", "TimeoutError"); }));
+    ok("fix：時間切れは不明", r.kind === "unknown");
+    // 送る前の失敗が確かな3つ（UNREACHABLE_CODES）だけが unreachable。runObiFix は、これを結果不明にしない（AB1）
+    for (const code of ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]) {
+      r = await postFix(12, FIX_REQ, opts(async () => { throw Object.assign(new TypeError("fetch failed"), { cause: { code } }); }));
+      ok(`fix：${code}（送る前の失敗が確か）は unreachable`, r.kind === "unreachable");
+    }
+    r = await postFix(12, FIX_REQ, opts(async () => { throw new TypeError("fetch failed"); }));
+    ok("fix：理由の分からない通信の失敗は不明（unreachable にしない）", r.kind === "unknown");
+    r = await postFix(12, FIX_REQ, opts(async () => { throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } }); }));
+    ok("fix：途中で切れたのは不明", r.kind === "unknown");
+  }
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);
 }
