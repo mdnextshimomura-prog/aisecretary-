@@ -421,6 +421,10 @@ export async function runObiFix(
     return { outcome: "forbidden" };
   }
 
+  // #J0：受付番号は1以上なので、無い番号（portal は no が 0 だと形の違いで断るだけ）。portal を呼ばずに、
+  //   約束の NOT_FOUND と同じ文を返す。文法（fix-parse.ts・共有の表）は変えず、no=0 と読んだものをここで受ける
+  if (no === 0) return refuse("NOT_FOUND", OBI_FIX_MESSAGES.notFound(no));
+
   // 遅く始まった訂正（#J つきだけがここに来る）：portal を呼ぶ時間が無い。fix は呼んでいないので、「届きません…もう一度送ってください」を返して済みにする（AA1）
   if (input.late) return refuse("late-start", OBI_FIX_MESSAGES.unreachable);
 

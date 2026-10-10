@@ -1685,6 +1685,53 @@ async function main() {
       JSON.stringify(texts(w)),
     );
   }
+  // ══ #J0（受付番号は1以上）：文法の結果は変えず、portal を呼ばずに「見つかりません」（L4） ══
+  for (const text of ["#J0 2", "#J0 3ページ 2", "#J0 0", "#J000 4"]) {
+    const w = world();
+    const inp = input(w, text);
+    ok(`${text}：文法は今までどおり no=0 で読む（共有の表は変えない）`, inp.body.no === 0);
+    const t = await locateObiFix(inp, deps(w));
+    const r =
+      t.kind === "target" ? await runObiFix(inp, t, deps(w)) : null;
+    ok(
+      `${text}：portal も聞き返しも無しで「#J0 は見つかりません」（NOT_FOUND と同じ文）`,
+      texts(w).join("|") ===
+        "#J0 は見つかりません。番号を確かめてもう一度送ってください" &&
+        w.portal.length === 0 &&
+        r?.outcome === "refused" &&
+        w.fixCalled === 0 &&
+        w.committed === 0 &&
+        w.kv.filter((k) => k[0] === "setNx").map((k) => k[1]).join() ===
+          `obi-fix-replied:${MSG}`,
+      JSON.stringify([texts(w), w.portal, w.kv]),
+    );
+  }
+  {
+    // 認可が先（許可されていない人には、今までどおりの断り）
+    const w = world();
+    const inp = input(w, "#J0 2", { allowed: false });
+    const t = await locateObiFix(inp, deps(w));
+    const r = t.kind === "target" ? await runObiFix(inp, t, deps(w)) : null;
+    ok(
+      "#J0（許可されていない人）：今までどおり断る（portal は呼ばない）",
+      r?.outcome === "forbidden" &&
+        texts(w).join("|") === OBI_MESSAGES.fixForbidden &&
+        w.portal.length === 0,
+      JSON.stringify(texts(w)),
+    );
+  }
+  {
+    // 遅く始まった #J0 も「見つかりません」（送り直しても見つからないので、「もう一度送ってください（届きません）」とは言わない）
+    const w = world();
+    const inp = input(w, "#J0 2", { late: true });
+    const t = await locateObiFix(inp, deps(w));
+    if (t.kind === "target") await runObiFix(inp, t, deps(w));
+    ok(
+      "#J0（遅く始まった）：「見つかりません」",
+      texts(w).join("|") === OBI_FIX_MESSAGES.notFound(0) && w.portal.length === 0,
+      JSON.stringify(texts(w)),
+    );
+  }
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);
 }
