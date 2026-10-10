@@ -134,6 +134,10 @@ function deps(w: World, envOver: ObiEnv = env): ObiEventDeps {
       w.pushTimeouts.push(timeoutMs);
       return true;
     },
+    // 番号で直す（tests/obi-fix-webhook.test.ts で確かめる）。ここの場面では呼ばれない
+    pushWithId: async () => {
+      throw new Error("pushWithId は帯替えの依頼では呼ばれない");
+    },
   };
 }
 

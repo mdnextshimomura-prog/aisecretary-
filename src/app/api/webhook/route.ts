@@ -7,6 +7,7 @@ import {
   pushLineMessageWithMentions,
   replyLineMessageDetailed,
   pushLineMessageDetailed,
+  pushLineMessageWithId,
 } from "@/lib/line";
 import {
   parseTaskFromMessage,
@@ -576,6 +577,8 @@ function obiEventDeps(startedAt: number): ObiEventDeps {
     // 時間の上限は振り分け側が渡す（5秒。replyLineMessageDetailed の既定 8 秒は使わない）
     reply: (replyToken, text, timeoutMs) => replyLineMessageDetailed(replyToken, text, timeoutMs),
     push: (to, text, timeoutMs) => pushLineMessageDetailed(to, text, timeoutMs),
+    // 「番号で直す」の返事が push に回ったとき用（送ったメッセージの ID を返す）
+    pushWithId: (to, text, timeoutMs) => pushLineMessageWithId(to, text, timeoutMs),
   };
 }
 

@@ -6,6 +6,10 @@
  *     （控えは何度足しても同じ。予約より前に置くので、LINE の再送でも控え直せる）
  *   - 帯替えの依頼（@MD NEXT秘書 ＋ 本文の先頭が依頼語）は、ここで予約を取り、最後まで扱う。
  *     今までの流れには渡さない（メールの下書きの途中でも帯替えを先に扱う：設計 8）
+ *   - 番号で直す返事（設計 2026-10-10 の E12）は、帯替えの依頼の判定より前に見る。営業部のグループの
+ *     text で、本文の全体が訂正の形に合い、「#J つき」か「引用先が帯替えの知らせ・自分の聞き返し」と
+ *     確かめられたときだけ、ここで最後まで扱う（今までの流れには渡さない）。確かめられるまでは
+ *     今までの流れの順番・動きを変えない
  *   - それ以外は、順番を変えずに今までの流れへ（rest）
  *
  * 予約・完了・解放の扱いは route.ts の今までのイベントと同じ考え方：
@@ -17,9 +21,20 @@
  */
 import { deliverReply, type ReplyOutcome } from "../line";
 import { taskMentionState } from "../task-intake";
-import { classifyObiEntry, shouldRecordObiPdf, type ObiEnv } from "./config";
+import { classifyObiEntry, loadObiConfig, shouldRecordObiPdf, type ObiEnv } from "./config";
 import { recordObiPdf, type ObiStore } from "./memo";
 import { runObiIntake, OBI_MESSAGES } from "./intake";
+import { parseFixBody } from "./fix-parse";
+import {
+  locateObiFix,
+  replyObiFixInterrupted,
+  replyObiFixStopped,
+  runObiFix,
+  OBI_FIX_LATE_START_MS,
+  type FixTarget,
+  type ObiFixDeps,
+  type ObiFixInput,
+} from "./fix";
 
 export interface ObiLineEvent {
   type: string;
@@ -32,6 +47,8 @@ export interface ObiLineEvent {
     text?: string;
     fileName?: string;
     fileSize?: number;
+    /** 引用リプライのとき、引用元のメッセージの ID */
+    quotedMessageId?: string;
     mention?: {
       mentionees: Array<{ index: number; length: number; type: "user" | "all"; userId?: string }>;
     };
@@ -58,6 +75,15 @@ export interface ObiEventDeps {
   reply: (replyToken: string, text: string, timeoutMs: number) => Promise<ReplyOutcome>;
   /** reply がはっきり断られたときの push。timeoutMs で打ち切る。送れたら true（例外は投げない作り） */
   push: (to: string, text: string, timeoutMs: number) => Promise<boolean>;
+  /**
+   * 「番号で直す」の返事が push に回ったときに使う。送ったメッセージの ID も返す
+   * （聞き返しの ID を控えるため。例外は投げない作り）
+   */
+  pushWithId: (
+    to: string,
+    text: string,
+    timeoutMs: number
+  ) => Promise<{ ok: boolean; messageId: string | null }>;
 }
 
 /** 断り（止めています・下村さんから）の返事の時間の上限。受付の返事（intake.ts）と同じ 5 秒 */
@@ -197,6 +223,152 @@ async function handleObiText(
   return retry;
 }
 
+/** 例外はログに名前だけを出す（文には、かぎ＝message.id などが入りうる。AA4） */
+const errName = (err: unknown) => (err as { name?: string })?.name ?? "error";
+
+/** 訂正のイベントを済みにする（3回まで試す。handleObiText の「済み」と同じ扱い）。予約は外さない＝やり直さない */
+async function completeFixEvent(deps: ObiEventDeps, messageId: string): Promise<void> {
+  let recorded = false;
+  for (let i = 0; i < 3 && !recorded; i++) {
+    try {
+      await deps.events.complete(messageId);
+      recorded = true;
+    } catch (e) {
+      console.error(`帯替えの訂正：イベント完了の記録に失敗（${i + 1}/3）:`, errName(e));
+    }
+  }
+}
+
+/**
+ * 「番号で直す」の返事かを見て、そうならここで最後まで扱う（設計 2026-10-10 の E12）。
+ *   not-fix … 訂正として扱わない（呼んだ側は、今までどおり帯替えの依頼の判定 → 今までの流れへ）
+ *   handled … 扱い終えた（今までの流れには渡さない）
+ *
+ * **503（再送待ち）は返さない（AA1）。** LINE の Webhook の再送は本番で無効なので、どの場面もここで終える：
+ *   - fix の結果不明：runObiFix が「受付の結果を確かめられませんでした…」を1回返す。イベントは済みにする（やり直さない）
+ *   - fix を呼んだが送っていないことが確かな失敗（unreachable。AB1）：runObiFix が「…portal に届きません。
+ *     少し待ってからもう一度送ってください」を1回返す。イベントは済みにする
+ *   - 同じ message.id を別の処理が扱っている途中：何もしない（先の処理の予約を、済みにも解放にもしない）
+ *   - fix を呼ぶ前の例外：#J つきは「…portal に届きません。少し待ってからもう一度送ってください」を返して済みにする。
+ *     引用の形は、予約を外して今までの流れへ渡す
+ *   - fix を呼んだ後・答えの前の例外：結果不明と同じ返事をして済みにする
+ * ログに message.id・userId・groupId は出さない（段階と結果の code だけ。AA4）。
+ */
+async function tryObiFix(event: ObiLineEvent, deps: ObiEventDeps): Promise<"not-fix" | "handled"> {
+  const message = event.message!;
+  // 見るのは営業部のグループの text だけ
+  if (event.source.type !== "group" || !event.source.groupId) return "not-fix";
+  const body = parseFixBody(stripMentionText(message));
+  if (!body) return "not-fix";
+  const loaded = loadObiConfig(deps.env);
+  // LINE_GROUP_ID が無い・形が違う：営業部がどこか分からないので何もしない（帯替えの依頼と同じ）
+  const groupId = loaded.ok ? loaded.config.groupId : loaded.groupId;
+  if (!groupId || groupId !== event.source.groupId) return "not-fix";
+  const quoted = typeof message.quotedMessageId === "string" ? message.quotedMessageId : null;
+  // #J も引用も無い番号だけの発言は、訂正として扱わない
+  if (body.no === null && !quoted) return "not-fix";
+  if (!/^\d{1,64}$/.test(message.id)) return "not-fix";
+
+  const fixDeps: ObiFixDeps = {
+    store: deps.store,
+    fetchImpl: deps.fetchImpl,
+    now: deps.now,
+    reply: (t, timeoutMs) => deps.reply(event.replyToken ?? "", t, timeoutMs),
+    push: (to, t, timeoutMs) => deps.pushWithId(to, t, timeoutMs),
+  };
+
+  let input: ObiFixInput | null = null;
+  let target: Extract<FixTarget, { kind: "target" }> | null = null;
+  if (loaded.ok) {
+    // 残り時間が足りない（同じ Webhook に先の処理があった。開始+7秒より後）：portal は呼ばない（Z11・AA1）。
+    //   引用の形：確かめる時間が無い＝引用先を確かめられないのと同じ。予約せず今までの流れへ
+    //   #J つき  ：下で認可の後、「portal に届きません…」を1通につき1回返して済みにする（runObiFix の late）
+    const late = deps.now() - deps.startedAt > OBI_FIX_LATE_START_MS;
+    if (late && body.no === null) {
+      console.error("帯替えの訂正：残り時間が足りない（引用の形。今までの流れへ）");
+      return "not-fix";
+    }
+    if (late) console.error("帯替えの訂正：残り時間が足りない（#J つき。portal を呼ばずに返す）");
+    // 許可リストとの照合はここだけ。通っても通らなくても、userId はこの先へ渡さない
+    const userId = event.source.userId;
+    const allowed = Boolean(userId) && loaded.config.allowedUserIds.includes(userId as string);
+    input = {
+      messageId: message.id,
+      body,
+      quotedMessageId: quoted,
+      allowed,
+      startedAt: deps.startedAt,
+      config: loaded.config,
+      late,
+    };
+    let located: FixTarget;
+    try {
+      located = await locateObiFix(input, fixDeps);
+    } catch (err) {
+      console.error("帯替えの訂正：対象を決める途中の例外（今までの流れへ）:", errName(err));
+      return "not-fix";
+    }
+    if (located.kind === "rest") return "not-fix";
+    target = located;
+  } else {
+    // 設定が足りない：引用の形は確かめようが無いので今までの流れへ。#J つきにだけ「止めています」
+    if (body.no === null) return "not-fix";
+    console.error("帯替えの訂正を止めています（設定の不足・不正）:", loaded.problems.join(","));
+  }
+
+  // ここから先は訂正として扱う：予約を取り、最後まで扱う（今までの流れには渡さない）
+  const ev = await deps.events.reserve(message.id);
+  if (!ev.proceed) {
+    // 済み：何もしない。別の処理が扱っている途中：何もしない（先の処理の予約を、済みにも解放にもしない）。
+    // どちらも 200 で終わる（503 にしない。AA1）
+    console.log("帯替えの訂正:", ev.inProgress ? "in-progress（何もしない）" : "already-done（何もしない）");
+    return "handled";
+  }
+  let fixCalled = false;
+  let committed = false;
+  let toRest = false;
+  try {
+    if (input && target) {
+      await runObiFix(input, target, {
+        ...fixDeps,
+        onFixCalled: () => {
+          fixCalled = true;
+        },
+        // portal の fix の結果が確かになった（はっきり答えた・送っていないことが確か。AB1）
+        onCommitted: () => {
+          committed = true;
+        },
+      });
+    } else {
+      await replyObiFixStopped({ messageId: message.id, groupId, startedAt: deps.startedAt }, fixDeps);
+    }
+  } catch (err) {
+    const stage = committed ? "after-fix" : fixCalled ? "fix-called" : "before-fix";
+    console.error("帯替えの訂正の処理中の例外:", stage, errName(err));
+    if (input && target && !committed) {
+      if (fixCalled) {
+        // fix を呼んだ後・答えの前：結果不明と同じ（「もう一度送ってください」とは言わない）
+        await replyObiFixInterrupted(input, "fix-called", fixDeps);
+      } else if (target.via === "number") {
+        // fix を呼ぶ前（#J つき）：何も変わっていないので、送り直してよい
+        await replyObiFixInterrupted(input, "before-fix", fixDeps);
+      } else {
+        // fix を呼ぶ前（引用の形）：今までの流れへ渡す
+        toRest = true;
+      }
+    }
+    // fix がはっきり答えた後の例外・「止めています」の途中の例外は、そのまま済みにする
+  } finally {
+    if (toRest) {
+      // 今までの流れ（route.ts）が自分で予約を取れるよう、ここで取った予約を外す
+      await deps.events.release(message.id).catch(() => undefined);
+    } else {
+      await completeFixEvent(deps, message.id);
+    }
+  }
+  return toRest ? "not-fix" : "handled";
+}
+
 /**
  * Webhook の1回分のイベントのうち、帯替えの分を先に扱う。
  * 返す rest を route.ts の今までのループに渡す。
@@ -222,6 +394,9 @@ export async function dispatchObiEvents<E extends ObiLineEvent>(
       rest.push(event);
       continue;
     }
+    // 番号で直す返事（帯替えの依頼の判定より前）。訂正と決まったものだけ、ここで扱い終える
+    // 訂正の枝は needsRetry を立てない（503 にしない。AA1）
+    if ((await tryObiFix(event, deps)) === "handled") continue;
     const entry = classifyObiEntry(
       {
         sourceType: event.source.type,
