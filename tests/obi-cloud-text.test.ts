@@ -53,8 +53,9 @@ function main() {
   ok(
     "共通の表の sha256（Mac と同じバイト）",
     createHash("sha256").update(raw).digest("hex") ===
-      "cfe546979ba4f84a45ea8ef7c2957378f43ca6e24c5b5a8b795fa0973d26eca4",
+      "fe78ff10ff11b4b1eeb5d40ad484c64ae14b51426f6c4dd65c8bfd0f6ff01d83",
   );
+  ok("共通の表のバイト数（18,419）", raw.length === 18_419, String(raw.length));
   ok(
     "共通の表の件数（11・13・1・9）",
     doc.completion.length === 11 &&
@@ -63,7 +64,7 @@ function main() {
       doc.property.length === 9,
   );
 
-  // 完成（Mac：deliver.js 173行 groupText）。物件名は、整えた後の値を渡す（見回りと同じ使い方）
+  // 完成（Mac の feature/v1 7ff13e4：deliver.js 175行 groupText・fixtext.js 35・43行）。物件名は、整えた後の値を渡す（見回りと同じ使い方）
   for (const c of doc.completion) {
     const t = completionText({
       no: c.in.no,
@@ -75,7 +76,7 @@ function main() {
     ok(`完成：${c.name}`, t === c.text, JSON.stringify(t));
     ok(`完成：${c.name}（変な字が出ない）`, clean(t));
   }
-  // 差し戻し（Mac：rejecttext.js 50・83行／notify.js 44行）
+  // 差し戻し（Mac の 7ff13e4：rejecttext.js 50・94行／notify.js 43行）
   for (const c of doc.reject) {
     const r = rejectNoticeText(c.in.no, c.in.row);
     ok(
@@ -89,14 +90,14 @@ function main() {
     );
     ok(`差し戻し：${c.name}（変な字が出ない）`, clean(r.text));
   }
-  // 失敗（Mac：notify.js 45行）
+  // 失敗（Mac の 7ff13e4：notify.js 43行 GROUP_TEXTS）
   for (const c of doc.failure) {
     ok(
       `失敗：#J${c.in.no}`,
       failureNoticeText(c.in.no) === c.text && clean(c.text),
     );
   }
-  // 物件名（Mac：room.js 28行 sanitizeField(…, 60)）
+  // 物件名（Mac の 7ff13e4：room.js 28行 sanitizeField(…, 60)）
   for (const c of doc.property) {
     ok(
       `物件名：${JSON.stringify(c.in).slice(0, 30)}`,
@@ -184,7 +185,7 @@ function main() {
       `差し戻し：rejectKind が ${k} でも既定の理由`,
       r.kind === "choices" &&
         r.text.startsWith(
-          "#J4 自動では仕上げられませんでした（理由：自動で1冊にできません）\n",
+          "#J4 自動では仕上げられませんでした\n理由：自動で1冊にできません\n\n",
         ),
       r.text,
     );

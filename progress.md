@@ -22,3 +22,6 @@
 - Vercel の変数の有無（`CRON_SECRET` など）は見ていない。本物の KV で、目次の値・控えが文字列で返るか物で返るかは未確認（両方受ける作り）。
 - line-secretary の `test/fixtures/obi-cloud-texts.json` は、本番ツリー（feature/v1）にはまだ無い。K3 の作業ツリー（`.worktrees/obi-cloud-mac`）に置かれた物とは、バイト単位で同じ（sha256 cfe54697…eca4）ことを確かめた。
 - 閲覧ページの検証は、写し（feature/group-obi-viewer 415518b）で通る。K2 の作業中の版（`.worktrees/obi-cloud-viewer` 9d6c28e。クラウドの鍵の表 `cloudPublicKeys`）でも、固定のトークンが通り `originOf` が cloud になることを、読むだけで確かめた（写しは入れ替えていない。K2 を取り込んだ後に、写しとテストの sha256 を入れ替える）。
+
+## 最終レビューの後の直し（2026-10-11）
+- F0（文の基準の変更）：済。共通のテスト用データを新しい版（sha256 fe78ff10…1d83・18,419 バイト）にバイト単位で差し替え、`cloud-text.ts` を Mac の feature/v1 7ff13e4 の並べ方（リンクの前後に空行・案内は1行1番号・選択肢つきは理由が2行目）に合わせた。Mac の実物の関数（7ff13e4）と全行一致を確かめた。

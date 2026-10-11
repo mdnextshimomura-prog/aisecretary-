@@ -192,13 +192,15 @@ async function main() {
     const lines = w.line.texts[0].split("\n");
     ok(
       "選択肢つき：本文の形",
-      lines[0] ===
-        "#J4 自動では仕上げられませんでした（理由：スキャンで文字が読めません）" &&
-        lines[2].startsWith("1 ") &&
-        lines[3].startsWith("3 ") &&
-        lines[4].startsWith("4 ") &&
-        lines.length === 6 &&
-        lines[5].includes("「#J4 1」"),
+      lines[0] === "#J4 自動では仕上げられませんでした" &&
+        lines[1] === "理由：スキャンで文字が読めません" &&
+        lines[2] === "" &&
+        lines[3] === "▼ 対応を番号で返信してください" &&
+        lines[5].startsWith("1 ") &&
+        lines[6].startsWith("3 ") &&
+        lines[7].startsWith("4 ") &&
+        lines.length === 11 &&
+        lines[10] === "または「#J4 1」のように送ってください",
     );
     ok(
       "選択肢つき：結果の後に delivery/message を1回",

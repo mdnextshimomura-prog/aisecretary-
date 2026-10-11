@@ -159,9 +159,10 @@ async function main() {
     );
     ok(
       "ふつう：リンクの形",
-      lines[2].startsWith(`https://liff.line.me/${LIFF_ID}?t=`) &&
-        lines[3] === "（このグループの方が開けます・24時間有効）" &&
-        lines.length === 4,
+      lines[2] === "" && // リンクの前に空行
+        lines[3].startsWith(`https://liff.line.me/${LIFF_ID}?t=`) &&
+        lines[4] === "（このグループの方が開けます・24時間有効）" &&
+        lines.length === 5,
     );
     const v = viewer.verify(tokenOf(w.line.texts[0]), {
       publicKeys: { [KID]: TEST_PUBLIC_PEM },
@@ -242,14 +243,19 @@ async function main() {
     await deliverNew(await rowOf(w), w.ctx({ fixGuide: true }));
     ok(
       "番号の案内：on のとき末尾に付く",
-      w.line.texts[0].split("\n").length === 5 &&
-        w.line.texts[0].includes("問題なければ"),
+      w.line.texts[0].split("\n").length === 16 &&
+        w.line.texts[0].includes(
+          "（このグループの方が開けます・24時間有効）\n\n▼ 確認したら番号で返信してください\n（帯替えを依頼できる方から）\n0 問題なし\n",
+        ) &&
+        w.line.texts[0].endsWith(
+          "このメッセージを長押し →「リプライ」で送ってください",
+        ),
     );
     const w2 = world();
     await deliverNew(await rowOf(w2), w2.ctx({ fixGuide: false }));
     ok(
       "番号の案内：off のとき付かない",
-      !w2.line.texts[0].includes("問題なければ"),
+      !w2.line.texts[0].includes("▼") && w2.line.texts[0].split("\n").length === 4,
     );
     const w3 = world({
       fix: {

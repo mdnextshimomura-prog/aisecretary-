@@ -88,7 +88,7 @@ LINE の Webhook の再送が無効だと、portal の結果不明・一覧の�
 - 設定の不足は2種類：共通の分（portal・鍵・グループ・LINE・KV）が欠けると見回りを丸ごと飛ばす（`skipped: "config"`）。完成だけに要る3つ（署名鍵・kid・LIFF の ID）が欠けると、完成の配達だけ飛ばし、種まき・知らせは進める（`completionSkipped: "config"`）。応答・ログに出るのは変数の名前だけ。
 - 二重を防ぐ正は portal の予約。「LINE を呼んだか分からない」ときは送り直さない（完成は portal の `納品要確認`、知らせは Discord と依頼ボックスに出る）。LINE を呼ぶ直前には、新しい配達でも再開でも、必ず portal の原子的な印（`POST …/delivery/attempt`）を通す（通らなければ送らない）。KV の控え `obi-cloud:job:<no>` が「準備中」「印を頼んだ」（`prepared`・`attempt-requested`）のまま止まった分は、次の回に再開する（attempt をやり直す）。「送信中」（`attempting`＝portal の印が通った後）で止まった分は、結果不明として送り直さない。残っている控えは、KV の目次（`obi-cloud:jobs`・`obi-cloud:notice-msgs`）で見つける（`SCAN` は使わない）。控えに入れる文の材料は5項目（要確認のページ数・消した数・ページ・直しの符号・整えた物件名）だけ。
 - 差し戻し・失敗の知らせは、portal の一覧の応答の `peers.mac.noticeClaim` が `true` のときだけ出す（Mac が「予約を取ってから送る版」であること）。**Mac を前の版に戻すときは、必ず先に `OBI_CLOUD_DELIVERY` を外す**（戻したままクラウドを on にすると、知らせが二重になる）。
-- 文は Mac と一字一句同じ。共通のテスト用データ `tests/fixtures/obi-cloud-texts.json`（sha256 をテストで固定。line-secretary の `test/fixtures/` と同じバイト）。片方だけ直さない。Mac の `fixtext.js` の `FIX_GUIDE_QUOTE_OK` を `false` に変えるときは、同じ変更で `src/lib/obi/cloud-text.ts` も変える。
+- 文は Mac と一字一句同じ。共通のテスト用データ `tests/fixtures/obi-cloud-texts.json`（sha256 をテストで固定。line-secretary の `test/fixtures/` と同じバイト。今の版は Mac の feature/v1 `7ff13e4` の文＝sha256 `fe78ff10…1d83`）。片方だけ直さない。Mac の `fixtext.js` の `FIX_GUIDE_QUOTE_OK` を `false` に変えるときは、同じ変更で `src/lib/obi/cloud-text.ts` も変える。
 - リンクのトークンは Mac の `src/dtoken.js` と同じ規約（`tests/fixtures/dtoken-mac.cjs`・`dtoken-viewer.cjs` は写し。元を変えたら写し直してテストの sha256 を直す）。
 - ログ（`cloud-tick #J12 delivered` の形）に出すのは、受付番号・段の名前・結果の符号・変数の名前だけ。LINE の ID・本文・物件名・トークン・リンク・鍵・予約の番号は出さない。
 - 止め方・戻し方・鍵が漏れたときの手順は `docs/運用.md`。

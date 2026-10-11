@@ -264,7 +264,7 @@ async function main() {
     );
     ok(
       "番号の案内のスイッチが on → 末尾に付く",
-      r.value.status === 200 && w.line.texts[0].includes("問題なければ"),
+      r.value.status === 200 && w.line.texts[0].includes("▼ 確認したら番号で返信してください"),
     );
   }
   {

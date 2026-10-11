@@ -1,9 +1,11 @@
 /**
  * クラウド配達の文（設計 2026-10-11 の C7・約束の「文」）。Mac の実物と一字一句同じにする。
  * 期待値は共通のテスト用データ tests/fixtures/obi-cloud-texts.json（line-secretary にも同じバイト）。片方だけ直さない。
- *   完成の知らせ … line-secretary/src/jobs/deliver.js の groupText（173行）
- *   差し戻し …… src/jobs/notify.js の GROUP_TEXTS（43行）・rejecttext.js の choicesGroupText（83行）
- *   失敗 ……… notify.js の GROUP_TEXTS（45行）
+ * 突き合わせた Mac の版：feature/v1 の 7ff13e4（2026-10-11。知らせの文を読みやすい並べ方に直した版）
+ *   完成の知らせ … line-secretary/src/jobs/deliver.js の groupText（175行）・fixtext.js の FIX_GUIDE_TEXT・FIX_AGAIN_TEXT（35・43行）
+ *   差し戻し …… src/jobs/notify.js の GROUP_TEXTS（43行）・rejecttext.js の choicesGroupText（94行）
+ *   失敗 ……… notify.js の GROUP_TEXTS（43行）
+ * 並べ方：見出し〜帯の外の行／空行／リンクと「開けます」／（案内があるときだけ）空行／案内。末尾に改行は付けない
  *   物件名 …… src/room.js の sanitizeField(…, 60)（28行）。既存の sanitize.ts（40字・別の決まり）とは別物
  * 引用の返事を案内できないとき（Mac の fixtext.js の FIX_GUIDE_QUOTE_OK が false）の文は持たない。
  * Mac が false に変えるときは、同じ変更でこちらも受付番号つきの文に変える（約束）。
@@ -73,11 +75,19 @@ export function readCompletionFacts(claim: Record<string, unknown>): CompletionF
 }
 
 const FIX_LABELS: Record<number, string> = { 1: "帯の位置", 2: "他社の文字", 3: "向き", 4: "順番", 5: "その他" };
+// 番号の一覧（1行に1つ）。意味は FIX_LABELS と同じで、0 は「問題なし」
+const FIX_MENU = ["0 問題なし", "1 帯の位置を直す", "2 他社の文字が残っている", "3 向きを直す", "4 順番を直す", "5 その他"].join("\n");
+// 完成の知らせの末尾の案内：見出し／返せる人／番号／空行／例／送り方
 const FIX_GUIDE_TEXT =
-  "問題なければ、帯替えを依頼できる方から 0、直すところがあれば番号で返信してください（1 帯の位置／2 他社の文字／3 向き／4 順番／5 その他。例：3ページ 2）\n" +
-  "（このメッセージを長押し →「リプライ」で送ってください）";
+  "▼ 確認したら番号で返信してください\n" +
+  "（帯替えを依頼できる方から）\n" +
+  `${FIX_MENU}\n` +
+  "\n" +
+  "例）3ページ目に他社の文字 →「3ページ 2」\n" +
+  "このメッセージを長押し →「リプライ」で送ってください";
+// 直した後の知らせの末尾の案内
 const FIX_AGAIN_TEXT =
-  "まだ違えば番号で返してください（0 問題なし／1 帯の位置／2 他社の文字／3 向き／4 順番／5 その他。例：3ページ 2）";
+  "▼ まだ違えば番号で返信してください\n" + `${FIX_MENU}\n` + "\n" + "例）3ページ目に他社の文字 →「3ページ 2」";
 
 /**
  * 完成の知らせ。property には、整えた後の値（cloudProperty を通した文字列＝控えの facts.property）を渡す。
@@ -105,8 +115,9 @@ export function completionText(a: {
     const where = facts.outsidePages.length ? `（${facts.outsidePages.join("・")}ページ）` : "";
     lines.push(`帯の外の他社の文字を${facts.outsideErased}か所消しました${where}。消しすぎていないか確認してください`);
   }
-  lines.push(a.link, `（このグループの方が開けます・${hours}時間有効）`);
-  if (a.fixGuide) lines.push(facts.fix ? FIX_AGAIN_TEXT : FIX_GUIDE_TEXT);
+  // リンクの前に空行。案内があるときだけ、案内の前にも空行
+  lines.push("", a.link, `（このグループの方が開けます・${hours}時間有効）`);
+  if (a.fixGuide) lines.push("", facts.fix ? FIX_AGAIN_TEXT : FIX_GUIDE_TEXT);
   return lines.join("\n");
 }
 
@@ -150,14 +161,21 @@ export function rejectNoticeText(no: number, row: Record<string, unknown>): Reje
         : typeof row.rejectKind === "string" && Object.prototype.hasOwnProperty.call(REASON_TEXTS, row.rejectKind)
           ? REASON_TEXTS[row.rejectKind]
           : REASON_OTHER;
+    // 1行目に理由は入れない（作り直しの回は言い方が変わる）。理由は2行目
     const head = intIn(row.rejectRound, 1, Number.MAX_SAFE_INTEGER)
-      ? `#J${no} 選んだ方法では仕上げられませんでした（理由：${reason}）`
-      : `#J${no} 自動では仕上げられませんでした（理由：${reason}）`;
+      ? `#J${no} 選んだ方法では仕上げられませんでした`
+      : `#J${no} 自動では仕上げられませんでした`;
+    // 見出し・理由／空行／「▼ …」・返せる人・番号（出ている番号だけ。1行に1つ）／空行／送り方（2行）
     const text = [
       head,
-      "対応を番号で返信してください（帯替えを依頼できる方から）",
+      `理由：${reason}`,
+      "",
+      "▼ 対応を番号で返信してください",
+      "（帯替えを依頼できる方から）",
       ...offered.map((c) => `${c} ${CHOICE_LABELS[c]}`),
-      `（このメッセージを長押し →「リプライ」で番号を送ってください。または「#J${no} ${offered[0]}」）`,
+      "",
+      "このメッセージを長押し →「リプライ」で番号を送ってください",
+      `または「#J${no} ${offered[0]}」のように送ってください`,
     ].join("\n");
     return { kind: "choices", text, choiceGen: row.choiceGen };
   }
