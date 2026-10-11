@@ -305,7 +305,7 @@ async function main() {
       JSON.stringify(t),
     );
   }
-  for (const kind of ["reject", "review", "something-new"]) {
+  for (const kind of ["something-new"]) {
     const w = world();
     w.resolve = () => json(200, { ...RESOLVED, kind, phase: "choose" });
     const t = await locateObiFix(
@@ -313,7 +313,7 @@ async function main() {
       deps(w),
     );
     ok(
-      `引用先の種類が ${kind}（完成の知らせではない）：訂正として扱わない（返事をせず今までの流れへ）`,
+      `引用先の種類が ${kind}（知らない種類）：訂正として扱わない（返事をせず今までの流れへ）`,
       t.kind === "rest" &&
         t.reason === "notice-kind" &&
         w.replies.length === 0 &&
@@ -321,6 +321,85 @@ async function main() {
         paths(w) === RESOLVE &&
         !w.kv.some((k) => k[0] !== "getText"),
       JSON.stringify(t),
+    );
+  }
+  // 差し戻しの対応の選択（設計 2026-10-11 の E12）：選択肢の知らせ（reject）・確認の知らせ（review）への引用
+  const REJECT_NOTICE = { ...RESOLVED, artifactSha256: "", fixable: "unavailable", closable: "unavailable", kind: "reject", phase: "choose", rejectRound: 0, choiceGen: 41, messageGen: 40, choices: [1, 3, 4] };
+  const REVIEW_NOTICE = { ...RESOLVED, fixable: "unavailable", closable: "unavailable", kind: "review", phase: "review", rejectRound: 1, choiceGen: 41, messageGen: 41, choices: [] };
+  {
+    const w = world();
+    w.resolve = () => json(200, REJECT_NOTICE);
+    const t = await locateObiFix(input(w, "2", { quotedMessageId: QUOTED, allowed: false }), deps(w));
+    ok(
+      "選択肢の知らせへの引用の「2」：選択（choose 2。世代は引用先の知らせのもの。認可はここでは見ない）",
+      t.kind === "choice" && t.via === "notice" && t.no === 12 &&
+        JSON.stringify(t.plan) === JSON.stringify({ action: "choose", choice: 2, expectGen: 40, expectSha256: "" }),
+      JSON.stringify(t),
+    );
+    ok("選択肢の知らせへの引用：portal は resolve を1回だけ・返事はしない・KV は聞き返しの照会だけ", paths(w) === RESOLVE && w.replies.length === 0 && !w.kv.some((k) => k[0] !== "getText"));
+  }
+  for (const text of ["0", "5", "3ページ 2", "3右"]) {
+    const w = world();
+    w.resolve = () => json(200, REJECT_NOTICE);
+    const t = await locateObiFix(input(w, text, { quotedMessageId: QUOTED }), deps(w));
+    ok(
+      `選択肢の知らせへの引用の「${text}」：選択でも訂正でもない（返事をせず今までの流れへ）`,
+      t.kind === "rest" && t.reason === "reject-not-choice" && w.replies.length === 0 && w.pushes.length === 0,
+      JSON.stringify(t),
+    );
+  }
+  {
+    const w = world();
+    w.resolve = () => json(200, { ...REJECT_NOTICE, messageGen: undefined });
+    const t = await locateObiFix(input(w, "2", { quotedMessageId: QUOTED }), deps(w));
+    ok("選択肢の知らせへの引用なのに世代が無い：扱わない（今までの流れへ）", t.kind === "rest" && t.reason === "no-message-gen", JSON.stringify(t));
+  }
+  {
+    const w = world();
+    w.resolve = () => json(200, REVIEW_NOTICE);
+    const t = await locateObiFix(input(w, "0", { quotedMessageId: QUOTED }), deps(w));
+    ok(
+      "確認の知らせへの引用の「0」：完成（approve。世代・成果物は引用先の知らせのもの）",
+      t.kind === "choice" && t.via === "notice" && t.no === 12 &&
+        JSON.stringify(t.plan) === JSON.stringify({ action: "approve", choice: 0, expectGen: 41, expectSha256: SHA }),
+      JSON.stringify(t),
+    );
+  }
+  for (const text of ["2", "3ページ 2", "5"]) {
+    const w = world();
+    w.resolve = () => json(200, REVIEW_NOTICE);
+    const t = await locateObiFix(input(w, text, { quotedMessageId: QUOTED }), deps(w));
+    ok(
+      `確認の知らせへの引用の「${text}」：「番号で直す」へ回す（特別な枝を作らない。T1）`,
+      t.kind === "target" && t.via === "notice" && t.no === 12 && t.resolved?.kind === "review",
+      JSON.stringify(t),
+    );
+  }
+  {
+    // 確認の知らせへの「2」（ページなし）：fix は呼ばず、resolve の見込み（unavailable）どおり「番号では直せません」
+    const w = world();
+    w.resolve = () => json(200, REVIEW_NOTICE);
+    const i = input(w, "2", { quotedMessageId: QUOTED });
+    const t = await locateObiFix(i, deps(w));
+    const r = t.kind === "target" ? await runObiFix(i, t, deps(w)) : null;
+    ok(
+      "確認の知らせへの「2」：「#J12 は番号では直せません。担当に声をかけてください」（聞き返さない・fix を呼ばない）",
+      r?.outcome === "refused" && texts(w).join("|") === OBI_FIX_MESSAGES.unavailable(12) && paths(w) === RESOLVE,
+      JSON.stringify(texts(w)),
+    );
+  }
+  {
+    // 確認の知らせへの「3ページ 2」：fix を呼び、FIX_UNAVAILABLE の文をそのまま返す
+    const w = world();
+    w.resolve = () => json(200, REVIEW_NOTICE);
+    w.fix = () => json(409, { code: "FIX_UNAVAILABLE", message: "x" });
+    const i = input(w, "3ページ 2", { quotedMessageId: QUOTED });
+    const t = await locateObiFix(i, deps(w));
+    const r = t.kind === "target" ? await runObiFix(i, t, deps(w)) : null;
+    ok(
+      "確認の知らせへの「3ページ 2」：fix の FIX_UNAVAILABLE の文をそのまま返す",
+      r?.outcome === "refused" && texts(w).join("|") === OBI_FIX_MESSAGES.unavailable(12) && paths(w) === `${RESOLVE},${FIX}`,
+      JSON.stringify(texts(w)),
     );
   }
   {
@@ -1520,15 +1599,25 @@ async function main() {
     }
   }
   {
-    // 引用の形で空・完成の知らせではない種類：今までどおり、訂正として扱わない
+    // 引用の形で空・知らない種類の知らせ：今までどおり、訂正として扱わない
     const w = world();
     w.resolve = () =>
-      json(200, { ...RESOLVED, artifactSha256: "", fixable: "not-ready", kind: "review", phase: "review" });
+      json(200, { ...RESOLVED, artifactSha256: "", fixable: "not-ready", kind: "something-new", phase: "review" });
     const t = await locateObiFix(input(w, "2", { quotedMessageId: QUOTED }), deps(w));
     ok(
-      "引用の形で sha256 が空・完成の知らせではない：今までの流れへ（返事なし）",
+      "引用の形で sha256 が空・知らない種類の知らせ：今までの流れへ（返事なし）",
       t.kind === "rest" && t.reason === "notice-kind" && w.replies.length === 0,
       JSON.stringify(t),
+    );
+    // 確認の知らせなのに成果物の sha256 が空（本来起きない）への「0」：完成として扱わない（今までの流れへ）
+    const w2 = world();
+    w2.resolve = () =>
+      json(200, { ...RESOLVED, artifactSha256: "", fixable: "unavailable", closable: "unavailable", kind: "review", phase: "review", messageGen: 41 });
+    const t2 = await locateObiFix(input(w2, "0", { quotedMessageId: QUOTED }), deps(w2));
+    ok(
+      "確認の知らせへの「0」で sha256 が空：扱わない（今までの流れへ・返事なし）",
+      t2.kind === "rest" && t2.reason === "no-artifact" && w2.replies.length === 0,
+      JSON.stringify(t2),
     );
   }
   // ══ 聞き返しが届いていないことが確かなときだけ、依頼ごとの印を消す（L2） ══

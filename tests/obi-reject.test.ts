@@ -3,12 +3,15 @@
  * （設計 2026-10-11 の E12・E14・「うまくいかないとき」）。
  */
 import {
+  locateObiChoiceWord,
   runObiReject,
   replyObiRejectInterrupted,
   OBI_REJECT_MESSAGES,
+  type ObiChoiceWordInput,
   type ObiRejectInput,
   type ObiRejectTarget,
 } from "../src/lib/obi/reject";
+import { parseChoiceWord } from "../src/lib/obi/reject-parse";
 import type { ObiFixDeps, ObiFixStageHooks } from "../src/lib/obi/fix";
 import type { ChoicePlan } from "../src/lib/obi/reject-plan";
 import { OBI_FIX_MESSAGES } from "../src/lib/obi/fix";
@@ -67,6 +70,8 @@ interface World {
   store: ObiStore;
   kv: Array<[string, string, (string | number)?]>; // [操作, かぎ, 期限]
   portal: Array<{ path: string; body: Record<string, unknown> }>;
+  resolve: () => Response;
+  resolveTakesMs: number;
   reject: () => Response;
   rejectTakesMs: number;
   replies: Array<{ text: string; timeoutMs: number }>;
@@ -106,6 +111,8 @@ function world(): World {
     store,
     kv,
     portal: [],
+    resolve: () => json(404, { code: "NOT_FOUND", message: "x" }),
+    resolveTakesMs: 0,
     reject: () => accepted(),
     rejectTakesMs: 0,
     replies: [],
@@ -131,7 +138,12 @@ function deps(w: World): ObiFixDeps & ObiFixStageHooks {
       if (w.rejectTakesMs > cap) throw timeoutError();
       return w.reject();
     }
-    // runObiReject は resolve も fix も呼ばない（resolve は対象を決める段階で済んでいる）
+    // resolve を呼ぶのは対象を決める段階（locateObiChoiceWord）だけ。runObiReject は resolve も fix も呼ばない
+    if (path === "/api/jobs/fix/resolve") {
+      w.clock.t += Math.min(w.resolveTakesMs, cap);
+      if (w.resolveTakesMs > cap) throw timeoutError();
+      return w.resolve();
+    }
     throw new Error(`想定外の宛先: ${u}`);
   }) as typeof fetch;
   return {
@@ -166,6 +178,20 @@ const choose = (choice: 1 | 2 | 3 | 4, expectGen = 40): ChoicePlan => ({ action:
 const APPROVE: ChoicePlan = { action: "approve", choice: 0, expectGen: 41, expectSha256: SHA };
 const RECHOOSE: ChoicePlan = { action: "rechoose", choice: 0, expectGen: 41, expectSha256: SHA };
 const target = (plan: ChoicePlan | null): ObiRejectTarget => ({ no: 4, plan });
+const QUOTED = "600000000000000150";
+const wordInput = (w: World, text: string, over: Partial<ObiChoiceWordInput> = {}): ObiChoiceWordInput => ({
+  word: parseChoiceWord(text)!,
+  quotedMessageId: null,
+  startedAt: w.startedAt,
+  config,
+  ...over,
+});
+// resolve の答え（約束の形）。確認の知らせ（#J4。世代 41）と、それへの引用
+const BASE = { no: 4, artifactSha256: SHA, current: true, pageCount: 4, fixable: "unavailable", closable: "unavailable", rejectRound: 1, choiceGen: 41, choices: [] };
+const REVIEW_BY_QUOTE = { ...BASE, kind: "review", phase: "review", messageGen: 41 };
+const REVIEW_BY_NO = { ...BASE, kind: "", phase: "review", messageGen: null };
+const RESOLVE = "/api/jobs/fix/resolve";
+const silent = (w: World) => w.replies.length === 0 && w.pushes.length === 0 && w.kv.length === 0;
 const texts = (w: World) => w.replies.map((r) => r.text);
 const paths = (w: World) => w.portal.map((p) => p.path).join();
 const REJECT = "/api/jobs/4/reject";
@@ -186,6 +212,127 @@ async function main() {
     OBI_REJECT_MESSAGES.forbidden === "対応の選択は、帯替えを依頼できる方からお願いします" &&
       OBI_REJECT_MESSAGES.unavailable(4) === "#J4 はいまその操作ができない状態です",
   );
+
+  // ══ 言葉の返事の対象の特定（locateObiChoiceWord）：扱うのは、portal が確認の知らせ・確認待ちと答えたときだけ ══
+  for (const [text, action] of [["OK", "approve"], ["オーケー", "approve"], ["9", "rechoose"]] as Array<[string, string]>) {
+    const w = world();
+    w.resolve = () => json(200, REVIEW_BY_QUOTE);
+    signalTimeouts.length = 0;
+    const t = await locateObiChoiceWord(wordInput(w, text, { quotedMessageId: QUOTED }), deps(w));
+    ok(
+      `確認の知らせへの引用の「${text}」：${action}（世代・成果物は引用先の知らせのもの）`,
+      t.kind === "choice" && t.via === "notice" && t.no === 4 && JSON.stringify(t.plan) === JSON.stringify({ action, choice: 0, expectGen: 41, expectSha256: SHA }),
+      JSON.stringify(t),
+    );
+    ok(
+      `引用の「${text}」：portal は resolve を1回（引用先の id で・上限6秒）。KV は呼ばない・返事はしない`,
+      paths(w) === RESOLVE && w.portal[0].body.quotedMessageId === QUOTED && w.portal[0].body.no === undefined && signalTimeouts.join() === "6000" && silent(w),
+      JSON.stringify(w.portal),
+    );
+  }
+  for (const [name, body] of [
+    ["完成の知らせ（completion）", { ...BASE, kind: "completion", phase: "fix", fixable: "ok", closable: "ok", messageGen: 0 }],
+    ["選択肢の知らせ（reject）", { ...BASE, artifactSha256: "", kind: "reject", phase: "choose", messageGen: 41, choices: [1, 3, 4] }],
+    ["種類の項目が無い（古い portal）", { no: 4, artifactSha256: SHA, current: true, pageCount: 4, fixable: "ok", closable: "ok" }],
+    ["知らない種類", { ...BASE, kind: "something-new", phase: "review", messageGen: 41 }],
+    ["確認の知らせだが世代が無い", { ...BASE, kind: "review", phase: "review" }],
+    ["確認の知らせだが成果物の sha256 が空", { ...REVIEW_BY_QUOTE, artifactSha256: "" }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    for (const text of ["OK", "9"]) {
+      const w = world();
+      w.resolve = () => json(200, body);
+      const t = await locateObiChoiceWord(wordInput(w, text, { quotedMessageId: QUOTED }), deps(w));
+      ok(`引用先が ${name} の「${text}」：扱わない（返事をせず今までの流れへ）`, t.kind === "rest" && silent(w), JSON.stringify(t));
+    }
+  }
+  for (const [name, setup] of [
+    ["帯替えの知らせでない（NOT_FOUND）", (w: World) => { w.resolve = () => json(404, { code: "NOT_FOUND" }); }],
+    ["「番号で直す」が止まっている（FIX_DISABLED）", (w: World) => { w.resolve = () => json(503, { code: "FIX_DISABLED" }); }],
+    ["500", (w: World) => { w.resolve = () => json(500, { code: "INTERNAL" }); }],
+    ["時間切れ", (w: World) => { w.resolveTakesMs = 7_000; }],
+    ["つながらない", (w: World) => { w.resolve = () => { throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }); }; }],
+    ["形の違う 200", (w: World) => { w.resolve = () => json(200, { ...REVIEW_BY_QUOTE, choiceGen: "41" }); }],
+  ] as Array<[string, (w: World) => void]>) {
+    for (const [text, quoted] of [["OK", QUOTED], ["9", QUOTED], ["#J4 OK", null], ["#J4 9", null]] as Array<[string, string | null]>) {
+      const w = world();
+      setup(w);
+      const t = await locateObiChoiceWord(wordInput(w, text, { quotedMessageId: quoted }), deps(w));
+      ok(`引けない・確かめられない（${name}）の「${text}」：返事も印もなしで今までの流れへ`, t.kind === "rest" && silent(w) && paths(w) === RESOLVE, JSON.stringify(t));
+    }
+  }
+  {
+    const w = world();
+    const t = await locateObiChoiceWord(wordInput(w, "OK"), deps(w));
+    const t2 = await locateObiChoiceWord(wordInput(w, "OK", { quotedMessageId: "abc" }), deps(w));
+    ok("#J も引用も無い「OK」・引用先の id が数字でない：扱わない（portal を呼ばない）", t.kind === "rest" && t2.kind === "rest" && w.portal.length === 0 && silent(w));
+    const t3 = await locateObiChoiceWord(wordInput(w, "#J0 OK"), deps(w));
+    ok("「#J0 OK」：扱わない（portal を呼ばない）", t3.kind === "rest" && w.portal.length === 0);
+  }
+  {
+    // 残り時間が無い（開始+17秒より後）：resolve を呼ばずに今までの流れへ
+    const w = world();
+    w.clock.t = T + 17_000;
+    const t = await locateObiChoiceWord(wordInput(w, "OK", { quotedMessageId: QUOTED }), deps(w));
+    ok("残り時間が無い：resolve を呼ばず今までの流れへ", t.kind === "rest" && w.portal.length === 0 && silent(w));
+    const w2 = world();
+    w2.clock.t = T + 15_000;
+    w2.resolve = () => json(200, REVIEW_BY_QUOTE);
+    signalTimeouts.length = 0;
+    await locateObiChoiceWord(wordInput(w2, "OK", { quotedMessageId: QUOTED }), deps(w2));
+    ok("resolve の時間の上限は、開始+17秒までの残り（2秒）", signalTimeouts.join() === "2000", signalTimeouts.join());
+  }
+  // #J つき（「#J4 OK」「#J4 9」）：今の依頼が確認待ち（phase: review）のときだけ
+  for (const [text, action] of [["#J4 OK", "approve"], ["#J4 完成", "approve"], ["#J4 9", "rechoose"]] as Array<[string, string]>) {
+    const w = world();
+    w.resolve = () => json(200, REVIEW_BY_NO);
+    const t = await locateObiChoiceWord(wordInput(w, text), deps(w));
+    ok(
+      `確認待ちの「${text}」：${action}（世代・成果物は今のもの）`,
+      t.kind === "choice" && t.via === "number" && t.no === 4 && JSON.stringify(t.plan) === JSON.stringify({ action, choice: 0, expectGen: 41, expectSha256: SHA }),
+      JSON.stringify(t),
+    );
+    ok(`「${text}」：resolve は受付番号で1回。KV は呼ばない・返事はしない`, paths(w) === RESOLVE && w.portal[0].body.no === 4 && w.portal[0].body.quotedMessageId === undefined && silent(w));
+  }
+  {
+    // 引用つきの「#J4 OK」：#J が先（引用先は見ない）
+    const w = world();
+    w.resolve = () => json(200, REVIEW_BY_NO);
+    const t = await locateObiChoiceWord(wordInput(w, "#J4 OK", { quotedMessageId: QUOTED }), deps(w));
+    ok("引用つきの「#J4 OK」：#J の番号で引く", t.kind === "choice" && t.via === "number" && w.portal[0].body.no === 4 && w.portal[0].body.quotedMessageId === undefined);
+  }
+  for (const phase of ["fix", "choose"]) {
+    const w = world();
+    w.resolve = () => json(200, { ...REVIEW_BY_NO, phase });
+    const t = await locateObiChoiceWord(wordInput(w, "#J4 OK"), deps(w));
+    ok(`確認待ちでない（phase: ${phase}）の「#J4 OK」：扱わない（今までどおり、今までの流れへ。返事なし）`, t.kind === "rest" && t.reason === "ok-not-review" && silent(w), JSON.stringify(t));
+    const w2 = world();
+    w2.resolve = () => json(200, { ...REVIEW_BY_NO, phase });
+    const t2 = await locateObiChoiceWord(wordInput(w2, "#J4 9"), deps(w2));
+    // 「#J4 9」：phase が fix で完成品があれば、/reject（rechoose）に渡して portal に断らせる（V7）。選択待ち（choose）は断りの文だけ
+    const expectPlan = phase === "fix" ? JSON.stringify({ action: "rechoose", choice: 0, expectGen: 41, expectSha256: SHA }) : "null";
+    ok(
+      `確認待ちでない（phase: ${phase}）の「#J4 9」：${phase === "fix" ? "portal に確かめる対象（rechoose。世代・成果物は今のもの）" : "断りの文だけ返す対象（plan が null）"}`,
+      t2.kind === "choice" && t2.via === "number" && t2.no === 4 && JSON.stringify(t2.plan) === expectPlan && paths(w2) === RESOLVE && silent(w2),
+      JSON.stringify(t2),
+    );
+  }
+  {
+    // 完成品が無い依頼（sha256 が空）の「#J4 9」：/reject の本文を作れないので、断りの文だけ返す対象
+    const w = world();
+    w.resolve = () => json(200, { ...REVIEW_BY_NO, phase: "fix", artifactSha256: "" });
+    const t = await locateObiChoiceWord(wordInput(w, "#J4 9"), deps(w));
+    ok("確認待ちでない（phase: fix）・完成品が無い「#J4 9」：断りの文だけ返す対象（plan が null）", t.kind === "choice" && t.via === "number" && t.plan === null && silent(w), JSON.stringify(t));
+  }
+  {
+    const w = world();
+    w.resolve = () => json(200, { no: 4, artifactSha256: SHA, current: true, pageCount: 4, fixable: "ok", closable: "ok" });
+    const t = await locateObiChoiceWord(wordInput(w, "#J4 OK"), deps(w));
+    ok("項目の無い portal（R1a より前）の「#J4 OK」：今までどおり、今までの流れへ", t.kind === "rest" && silent(w), JSON.stringify(t));
+    const w2 = world();
+    w2.resolve = () => json(200, { ...REVIEW_BY_NO, no: 5 });
+    const t2 = await locateObiChoiceWord(wordInput(w2, "#J4 OK"), deps(w2));
+    ok("頼んだ番号と違う依頼が返った：扱わない", t2.kind === "rest" && silent(w2), JSON.stringify(t2));
+  }
 
   // ══ 認可 ══
   {

@@ -1,7 +1,14 @@
 /**
  * 帯替えの差し戻しの「対応を番号で選ぶ」（設計 2026-10-11 の E12・E14・「うまくいかないとき」）。
  *
- * 呼ぶのは webhook-event.ts。何をするか（plan）は reject-plan.ts が、portal の resolve の答えから決めてある。
+ * 呼ぶのは webhook-event.ts。何をするか（plan）は reject-plan.ts が、portal の resolve の答えから決める。
+ *   locateObiChoiceWord … 言葉の返事（「OK」「9」）が、どの依頼への何の返事かを決める（イベントの予約より前。portal は何も書き換えない）
+ *     - 引用つき（#J なし）：引用先を resolve。確認の知らせ（kind: review）への引用のときだけ扱う
+ *     - #J つき           ：その番号を resolve。確認待ち（phase: review）のときだけ扱う。「#J4 9」は、確認待ちでなければ断る：
+ *                           phase が fix で完成品があれば /reject（rechoose）に渡して portal に断らせ（受付を止めていれば
+ *                           CHOICE_DISABLED の固定の文。裁定 V7）、それ以外は portal を呼ばずに「いまその操作ができない状態です」
+ *     - 引けない・確かめられない・ほかの知らせ：返事も予約もせず、今までの流れへ
+ *     番号の返事（1〜4・0）の対象は、今までどおり fix.ts の locateObiFix が決める
  *   runObiReject … 認可 → portal の /reject（1回だけ）→ 返事
  *
  * 認可は呼ぶ側が済ませ、ここには「許可されたか」の真偽だけが来る（userId は受け取らない。
@@ -20,7 +27,7 @@
  * ログに出すのは、処理の段階・受付番号（#J）・action・番号・結果の code・返事の結果だけ。
  * message.id・userId・groupId・本文・リンク・例外の文は出さない。
  */
-import type { ObiFixDeps, ObiFixInput, ObiFixStageHooks } from "./fix";
+import type { FixTarget, ObiFixDeps, ObiFixInput, ObiFixStageHooks } from "./fix";
 import {
   errName,
   FIX_MIN_MS,
@@ -29,12 +36,15 @@ import {
   OBI_FIX_MESSAGES,
   OBI_FIX_PORTAL_PHASE_END_MS,
   portalOpts,
+  RESOLVE_MS,
   sayOnce,
+  unknownTarget,
   type Said,
 } from "./fix";
 import { OBI_MESSAGES } from "./intake";
-import { postReject, type RejectOutcome } from "./portal";
-import type { ChoicePlan } from "./reject-plan";
+import { postFixResolve, postReject, type RejectOutcome } from "./portal";
+import type { ChoiceWordBody } from "./reject-parse";
+import { planNumberedWord, planQuotedWord, type ChoicePlan } from "./reject-plan";
 import { sanitizeForReply } from "./sanitize";
 
 /** 文は設計 2026-10-11 の E14「aisecretary がその場で返す」の表のとおり（unreachable・unknown・rejected は「番号で直す」の文に合わせたもの） */
@@ -90,6 +100,59 @@ function acceptedMessage(no: number, o: Extract<RejectOutcome, { kind: "accepted
   if (o.result === "canceled") return OBI_REJECT_MESSAGES.canceled(no);
   if (o.result === "approved") return OBI_REJECT_MESSAGES.approved(no);
   return OBI_REJECT_MESSAGES.reopened(no);
+}
+
+export interface ObiChoiceWordInput {
+  word: ChoiceWordBody;
+  /** 引用リプライの引用先（無ければ null） */
+  quotedMessageId: string | null;
+  /** Webhook の開始時刻（ms） */
+  startedAt: number;
+  config: ObiFixInput["config"];
+}
+
+/**
+ * 言葉の返事（「OK」「9」「#J4 OK」「#J4 9」）が、どの依頼への何の返事かを決める（イベントの予約より前に呼ぶ）。
+ * 認可はここでは見ない（確認の知らせへの返事かどうかが分かるまで「選択」と決められないため。resolve は何も書き換えない）。
+ * KV は呼ばない（聞き返しへの引用は番号の形だけ）。portal は resolve を1回だけ。
+ *
+ * **グループで普通に飛び交う「OK」を横取りしない**：扱うのは、portal が「確認の知らせへの引用」（kind: review）か
+ * 「確認待ちの依頼」（phase: review）と答えたときだけ。引けない（NOT_FOUND・FIX_DISABLED など）・確かめられない
+ * （時間切れ・つながらない・5xx）ときは、返事も予約もせず今までの流れへ渡す。
+ */
+export async function locateObiChoiceWord(input: ObiChoiceWordInput, deps: ObiFixDeps): Promise<FixTarget> {
+  const { no } = input.word;
+  const quoted = input.quotedMessageId;
+  if (no === null && (!quoted || !/^\d{1,64}$/.test(quoted))) return { kind: "rest", reason: "no-quote" };
+  // #J0：受付番号は1以上（portal に聞くまでもない）。今までの流れへ
+  if (no === 0) return { kind: "rest", reason: "no-zero" };
+
+  const timeoutMs = Math.min(RESOLVE_MS, input.startedAt + OBI_FIX_PORTAL_PHASE_END_MS - deps.now());
+  if (timeoutMs <= 0) return unknownTarget("no-time");
+  const groupId = input.config.groupId;
+  const r = await postFixResolve(
+    no !== null ? { groupId, no } : { groupId, quotedMessageId: quoted as string },
+    portalOpts(input, deps, timeoutMs)
+  );
+  if (r.kind === "accepted") {
+    if (no !== null) {
+      // 頼んだ番号と違う依頼が返った：形の違う応答と同じ（確かめられない）
+      if (r.resolved.no !== no) return unknownTarget("no-mismatch");
+      const d = planNumberedWord(input.word.word, r.resolved);
+      if (d.kind === "choice") return { kind: "choice", via: "number", no, plan: d.plan };
+      if (d.kind === "unavailable") return { kind: "choice", via: "number", no, plan: null };
+      return { kind: "rest", reason: d.reason };
+    }
+    const d = planQuotedWord(input.word.word, r.resolved);
+    if (d.kind === "choice") return { kind: "choice", via: "notice", no: r.resolved.no, plan: d.plan };
+    return { kind: "rest", reason: d.kind === "rest" ? d.reason : "word-not-review" };
+  }
+  if (r.kind === "rejected") {
+    // NOT_FOUND＝タスクの確認など別のものへの「OK」。それ以外の断り（FIX_DISABLED など）も、帯替えの知らせ・依頼と確かめられていない
+    if (r.code !== "NOT_FOUND") console.error("帯替えの対応の選択：引けない（今までの流れへ）:", sanitizeForReply(r.code));
+    return { kind: "rest", reason: r.code };
+  }
+  return unknownTarget(r.kind === "unknown" ? r.reason : "unreachable");
 }
 
 /**

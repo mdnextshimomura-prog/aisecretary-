@@ -45,6 +45,7 @@ import type { FixBody, FixCode } from "./fix-parse";
 import { OBI_MESSAGES } from "./intake";
 import { OBI_FIX_KEY_TTL_SECONDS, type ObiStore } from "./memo";
 import { postFix, postFixResolve, type FixEstimate, type FixOutcome, type FixResolved } from "./portal";
+import { planQuotedNumber, type ChoicePlan } from "./reject-plan";
 import { sanitizeForReply } from "./sanitize";
 
 /** Webhook の開始からの締め切り */
@@ -156,7 +157,13 @@ export type FixTarget =
       no: number;
       /** notice のときだけ、もう引いてある（runObiFix は resolve を呼び直さない） */
       resolved: FixResolved | null;
-    };
+    }
+  /**
+   * 差し戻しの対応の選択（設計 2026-10-11 の E12）。扱うのは reject.ts の runObiReject（fix は呼ばない）。
+   * number＝#J つき（「#J4 OK」「#J4 9」。reject.ts の locateObiChoiceWord が作る）／
+   * notice＝選択肢の知らせ・確認の知らせへの引用。plan が null＝「#J4 9」で確認待ちでない（断りの文だけ返す）
+   */
+  | { kind: "choice"; via: "number" | "notice"; no: number; plan: ChoicePlan | null };
 
 export interface ObiFixResult {
   outcome:
@@ -314,13 +321,17 @@ export async function locateObiFix(input: ObiFixInput, deps: ObiFixDeps): Promis
     portalOpts(input, deps, timeoutMs)
   );
   if (r.kind === "accepted") {
-    // 「番号で直す」が受けるのは、完成の知らせ（kind が "completion"。項目の無い portal は ""）への引用だけ。
-    // ほかの種類の知らせ（差し戻しの選択肢の設計 2026-10-11 の "reject"・"review" など。いまの portal は返さない）への引用は、
-    // 訂正として扱わない（返事をせず今までの流れへ。その番号を訂正の番号と読み違えないため。約束の P1・P4）
-    if (r.resolved.kind !== "" && r.resolved.kind !== "completion") {
-      console.log("帯替えの訂正：引用先が完成の知らせではない（今までの流れへ）:", sanitizeForReply(r.resolved.kind));
-      return { kind: "rest", reason: "notice-kind" };
+    // 何の番号かは、引用先の知らせの種類で決める（差し戻しの選択肢の設計 2026-10-11 の E12。決め方は reject-plan.ts）：
+    //   完成の知らせ（"completion"。項目の無い portal は ""）… 今までどおり「番号で直す」
+    //   選択肢の知らせ（"reject"）… 番号1つ（1〜4）だけ選択。ほかの本文は返事をせず今までの流れへ
+    //   確認の知らせ（"review"）  … 0 は完成（approve）。1〜5 は「番号で直す」へ（fix が FIX_UNAVAILABLE を返す。T1）
+    //   それ以外                 … 訂正としても選択としても扱わない（その番号を読み違えないため）
+    const d = planQuotedNumber(input.body, r.resolved);
+    if (d.kind === "rest") {
+      console.log("帯替えの訂正：引用先の知らせへの番号として扱わない（今までの流れへ）:", sanitizeForReply(r.resolved.kind), d.reason);
+      return { kind: "rest", reason: d.reason };
     }
+    if (d.kind === "choice") return { kind: "choice", via: "notice", no: r.resolved.no, plan: d.plan };
     return { kind: "target", via: "notice", no: r.resolved.no, resolved: r.resolved };
   }
   if (r.kind === "rejected") {

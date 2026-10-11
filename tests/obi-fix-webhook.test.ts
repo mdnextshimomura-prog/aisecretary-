@@ -280,21 +280,29 @@ async function main() {
       JSON.stringify({ sent: w.sent.length, kv: w.kv }),
     );
   }
-  for (const kind of ["reject", "review"]) {
-    // 完成の知らせ以外の種類の知らせ（差し戻しの選択肢の設計 2026-10-11。いまの portal は返さない）への引用（約束の P1・P4）
+  for (const kind of ["reject", "something-new"]) {
+    // 選択肢の知らせ（reject）への番号は、対応の選択（設計 2026-10-11）。この枝で扱うようにするのは次のタスク（tests/obi-reject-webhook.test.ts）。
+    // 知らない種類の知らせへの引用は、訂正としても選択としても扱わない
     const w = world();
-    w.resolve = () => json(200, { ...RESOLVED, kind, phase: "choose" });
+    w.resolve = () => json(200, { ...RESOLVED, artifactSha256: "", fixable: "unavailable", closable: "unavailable", kind, phase: "choose", choiceGen: 41, messageGen: 40, choices: [1, 3, 4] });
     const ev = textEvent(MSG, "2", { quoted: NOTICE });
     const r = await dispatchObiEvents([ev], deps(w));
     ok(
-      `引用先が完成の知らせではない（kind: ${kind}）：訂正として扱わず、今までの流れへそのまま渡す（返事も予約もしない・fix を呼ばない）`,
-      r.rest.length === 1 &&
-        r.rest[0] === ev &&
-        !r.needsRetry &&
-        w.replies.length === 0 &&
-        w.reserved.length === 0 &&
-        urls(w) === RESOLVE,
+      `引用先が完成の知らせではない（kind: ${kind}）：訂正として扱わない（fix を呼ばない）`,
+      !r.needsRetry && !urls(w).includes(FIX) && !texts(w).some((t) => t.includes("直しを受け付けました")),
       JSON.stringify({ sent: w.sent.length, kv: w.kv }),
+    );
+  }
+  {
+    // 確認の知らせ（review）への番号（1〜5）は「番号で直す」へ回り、portal の見込みどおり「番号では直せません」（T1）
+    const w = world();
+    w.resolve = () => json(200, { ...RESOLVED, fixable: "unavailable", closable: "unavailable", kind: "review", phase: "review", choiceGen: 41, messageGen: 41, choices: [] });
+    const ev = textEvent(MSG, "2", { quoted: NOTICE });
+    const r = await dispatchObiEvents([ev], deps(w));
+    ok(
+      "確認の知らせへの引用の「2」：「#J12 は番号では直せません。担当に声をかけてください」（今までの流れには渡さない・fix を呼ばない）",
+      r.rest.length === 0 && !r.needsRetry && texts(w).join("|") === OBI_FIX_MESSAGES.unavailable(12) && urls(w) === RESOLVE && w.completed.join() === MSG,
+      JSON.stringify({ texts: texts(w), urls: urls(w) }),
     );
   }
   for (const [name, text] of [

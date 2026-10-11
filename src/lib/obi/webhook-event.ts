@@ -310,6 +310,8 @@ async function tryObiFix(event: ObiLineEvent, deps: ObiEventDeps): Promise<"not-
       return "not-fix";
     }
     if (located.kind === "rest") return "not-fix";
+    // 差し戻しの対応の選択（kind: "choice"）は、まだここでは扱わない（Task 11 で足す）。それまでは今までどおり、今までの流れへ
+    if (located.kind === "choice") return "not-fix";
     target = located;
   } else {
     // 設定が足りない：引用の形は確かめようが無いので今までの流れへ。#J つきにだけ「止めています」
