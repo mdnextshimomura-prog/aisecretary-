@@ -30,6 +30,7 @@ interface Seen {
   hasBody: boolean;
   signal: boolean;
   cache: string;
+  redirect: string;
 }
 let seen: Seen = {
   url: "",
@@ -39,6 +40,7 @@ let seen: Seen = {
   hasBody: false,
   signal: false,
   cache: "",
+  redirect: "",
 };
 let calls = 0;
 const all: unknown[] = [];
@@ -53,6 +55,7 @@ const fakeFetch = (respond: () => Promise<Response>): typeof fetch =>
       body: init?.body != null ? JSON.parse(String(init.body)) : null,
       signal: init?.signal instanceof AbortSignal,
       cache: String(init?.cache ?? ""),
+      redirect: String(init?.redirect ?? ""),
     };
     return respond();
   }) as typeof fetch;
@@ -77,7 +80,9 @@ const common = (method: string, path: string) =>
   seen.headers.get("x-job-token") === TOKEN &&
   seen.headers.get("x-job-client") === "aisecretary" &&
   seen.signal &&
-  seen.cache === "no-store";
+  seen.cache === "no-store" &&
+  // 3xx を追いかけない（鍵のヘッダを、よその宛先へ持って行かせない）
+  seen.redirect === "manual";
 const jsonPost = () =>
   (seen.headers.get("content-type") ?? "") === "application/json" &&
   seen.hasBody;
@@ -737,6 +742,20 @@ async function main() {
     "分け方：200 だが JSON でない → invalid-body",
     x.kind === "unknown" && x.reason === "invalid-body",
   );
+
+  for (const status of [301, 302, 307, 308]) {
+    x = keep(
+      await portal(async () => new Response(null, { status, headers: { location: "https://elsewhere.example.test/api/jobs" } })).listJobs({ status: "完成" }, T),
+    );
+    ok(`分け方：${status}（よそへ回された）→ 追いかけず「届かない」と同じ`, x.kind === "unknown" && x.reason === "http-5xx" && calls >= 1);
+  }
+  {
+    const before = calls;
+    const a3 = keep(
+      await portal(async () => new Response(null, { status: 302, headers: { location: "https://elsewhere.example.test/x" } })).attemptDelivery(12, CLAIM, T),
+    );
+    ok("分け方：印（1b）が 302 → unknown（送らない側）・fetch は1回だけ", a3.kind === "unknown" && calls === before + 1);
+  }
 
   // ---- 時間が無い
   calls = 0;

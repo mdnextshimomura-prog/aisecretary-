@@ -6,6 +6,7 @@
  *   既存の Webhook 側の portal.ts は変えない・ここから読み込まない）
  * - 例外は投げない。結果は ok／rejected（4xx＝答えは届いた）／unknown（分からない）の3つに分ける
  * - 成功の番号なのに形が違えば「分からない」に倒す
+ * - 3xx は追いかけない（redirect: "manual"）。「分からない」（http-5xx と同じ扱い）に倒す
  * - 鍵・例外の文・応答の本文そのものは、戻り値に入れない（入れるのは検査した項目と、形の合う code だけ）
  */
 
@@ -181,6 +182,8 @@ export function createCloudPortal(opts: CloudPortalOpts): CloudPortal {
       method,
       headers,
       cache: "no-store",
+      // 3xx は追いかけない（鍵のヘッダを、よその宛先へ持って行かせない）。3xx は下で「届かない」と同じに倒れる
+      redirect: "manual",
       signal: AbortSignal.timeout(timeoutMs),
     };
     if (payload !== null) {
