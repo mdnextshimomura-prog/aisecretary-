@@ -423,6 +423,8 @@ export interface FakePortal extends CloudPortal {
   ): void;
   /** 出した予約の番号の全部（完成・知らせ）。「ログに出ない」の確かめ用 */
   issuedClaimIds: string[];
+  /** 呼ばれたときに渡された時間の上限（呼ばれた順） */
+  timeouts: number[];
 }
 
 export function fakePortal(
@@ -440,6 +442,7 @@ export function fakePortal(
   const calls: FakePortal["calls"] = [];
   const events: string[] = [];
   const issuedClaimIds: string[] = [];
+  const timeouts: number[] = [];
   let seeded = true;
   let groupNoticeField = true;
   let legacy = false;
@@ -509,6 +512,7 @@ export function fakePortal(
     run: () => PortalCall<T>,
   ): Promise<PortalCall<T>> => {
     if (!(timeoutMs >= 1000)) return { kind: "unknown", reason: "no-time" };
+    timeouts.push(timeoutMs);
     calls.push({
       op,
       no,
@@ -544,6 +548,7 @@ export function fakePortal(
     calls,
     events,
     issuedClaimIds,
+    timeouts,
     callsOf: (op) => calls.filter((c) => c.op === op),
     add(j) {
       jobs.set(j.no, {
