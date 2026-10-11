@@ -388,6 +388,33 @@ async function main() {
       JSON.stringify(texts(w)),
     );
   }
+  for (const text of ["1", "2", "3"]) {
+    // 古い確認の知らせ（今の成果物でない）への番号（ページなし）：「新しい完成の知らせがあります」ではなく、
+    // 確認の知らせへの番号の文（FIX_UNAVAILABLE の文）をそのまま返す（設計 E14・T1）
+    const w = world();
+    w.resolve = () => json(200, { ...REVIEW_NOTICE, current: false });
+    const i = input(w, text, { quotedMessageId: QUOTED });
+    const t = await locateObiFix(i, deps(w));
+    const r = t.kind === "target" ? await runObiFix(i, t, deps(w)) : null;
+    ok(
+      `古い確認の知らせへの「${text}」：「番号では直せません」（「新しい完成の知らせがあります」にしない・聞き返さない・fix を呼ばない）`,
+      r?.outcome === "refused" && texts(w).join("|") === OBI_FIX_MESSAGES.unavailable(12) && paths(w) === RESOLVE,
+      JSON.stringify(texts(w)),
+    );
+  }
+  {
+    // 完成の知らせのときの順番は変えない：今の成果物でなければ、見込みが unavailable でも「新しい完成の知らせがあります」
+    const w = world();
+    w.resolve = () => json(200, { ...RESOLVED, kind: "completion", current: false, fixable: "unavailable" });
+    const i = input(w, "2", { quotedMessageId: QUOTED });
+    const t = await locateObiFix(i, deps(w));
+    const r = t.kind === "target" ? await runObiFix(i, t, deps(w)) : null;
+    ok(
+      "古い完成の知らせへの「2」：今までどおり「新しい完成の知らせがあります」",
+      r?.outcome === "refused" && texts(w).join("|") === OBI_FIX_MESSAGES.stale(12) && paths(w) === RESOLVE,
+      JSON.stringify(texts(w)),
+    );
+  }
   {
     // 確認の知らせへの「3ページ 2」：fix を呼び、FIX_UNAVAILABLE の文をそのまま返す
     const w = world();

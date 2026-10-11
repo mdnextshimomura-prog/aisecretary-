@@ -484,6 +484,10 @@ export async function runObiFix(
 
   // ページが要る番号（1・2・3）でページが無い：聞き返す（fix は呼ばない）
   if ((code === 1 || code === 2 || code === 3) && page === null) {
+    // 確認の知らせ（kind: review）への番号は、引用先が今の成果物でなくても、見込み（FIX_UNAVAILABLE）の文をそのまま返す
+    //   （設計 2026-10-11 の E14・T1。「新しい完成の知らせがあります」は完成の知らせの文なので、ここでは出さない）。
+    //   完成の知らせ（completion・""）の順番は今までどおり：古さを先に見る
+    if (resolved.kind === "review" && resolved.fixable !== "ok") return refuse(resolved.fixable, estimateMessage(no, resolved.fixable));
     if (!resolved.current) return refuse("stale", OBI_FIX_MESSAGES.stale(no));
     if (resolved.fixable !== "ok") return refuse(resolved.fixable, estimateMessage(no, resolved.fixable));
     // 依頼ごとに1回。2回目からは返事をしない
