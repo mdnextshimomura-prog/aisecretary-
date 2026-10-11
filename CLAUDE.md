@@ -76,6 +76,12 @@ LINE の Webhook の再送が無効だと、portal の結果不明・一覧の�
 - 引用つきの「数字だけの返信」は、訂正かどうかを確かめるために KV 1回＋portal の resolve 1回（上限6秒）を呼ぶ。portal が応答しないあいだ、そういう返信に限り、今までの流れ（タスクの判定など）へ渡るのが最大約7秒遅れる。
 - portal の `OBI_FIX_ENABLED` が off のあいだは、そういう返信のたびにログが1行出る（「引用先を引けない（今までの流れへ）: FIX_DISABLED」。返事はしない）。
 - イベントの予約・完了（KV）には時間の上限が無い。KV が落ちていると `#J` つきの発言は 500 になる（既存の帯替えの受付と同じ作り）。
+（差し戻しの対応を番号で選ぶ・2026-10-11）帯替えの差し戻しの知らせ（選択肢つき）・確認の知らせへの返事（「1」〜「4」を引用で／「OK」「9」を引用で／「#J4 1」「#J4 OK」「#J4 9」）を `src/lib/obi/reject-parse.ts`（言葉の読み取り）・`reject-plan.ts`（何をするかの決め方）・`reject.ts`（認可〜portal の `/reject`〜返事）が扱う。入口は「番号で直す」と同じ `webhook-event.ts` の `tryObiFix`。**環境変数の追加は無い**（選べる人も `JOB_ALLOWED_USER_IDS`）。止めるスイッチは portal の `OBI_REJECT_CHOICES`（aisecretary の側には無い。off のあいだ portal は選択肢の知らせ・確認の知らせを作らないので、引用の形・「#J4 1」「#J4 OK」の枝は動かない。「#J4 9」にだけ、下の箇条のとおり「いま受付を止めています…」が返る）。時間・返事の印・503 を返さないことは「番号で直す」と同じ。
+- 何の返事かは、portal の resolve の答えで決める：引用つきは引用先の知らせの種類 `kind`（`reject`＝選択肢の知らせ／`review`＝確認の知らせ／`completion`＝完成の知らせ）、`#J` つきは依頼の状態 `phase`（`choose`／`review`／`fix`）。選択肢の知らせ・確認の知らせ・確認待ちの依頼と確かめられたときだけ扱い、それ以外は返事をせず今までの流れへ渡す（グループのふつうの「OK」「1」を横取りしない）。
+- 営業部のグループの**引用つきの「OK」「ok」「オーケー」「9」だけの返信**は、確認の知らせへの返事かを確かめるために portal の resolve を1回呼ぶ（上限6秒。KV は呼ばない）。portal が応答しないあいだ、そういう返信に限り、今までの流れへ渡るのが最大約6秒遅れる。`OBI_FIX_ENABLED` が off のあいだは、そのたびにログが1行出る（「引けない（今までの流れへ）: FIX_DISABLED」。返事はしない）。
+- 「#J12 OK」は、依頼が確認待ち（`phase: review`）のときだけ完成（approve）にする。それ以外は今までどおり今までの流れへ渡す（グループには「#J12 OK」の既存の扱いが無い。既存の「#J12 OK／直す」は Mac の秘書室だけ）。そのために resolve を1回呼ぶ。
+- 「#J12 9」は、依頼が確認待ち（`phase: review`）なら選び直し（rechoose）。確認待ちでないとき、`phase` が `fix` で完成品があれば、同じ rechoose を portal の `/reject` に渡して portal に断らせる：選択肢のスイッチ（`OBI_REJECT_CHOICES`）が off なら `CHOICE_DISABLED`＝「いま受付を止めています。portal の依頼ボックスを確認してください」、on なら `CHOICE_UNAVAILABLE`＝「#J12 はいまその操作ができない状態です」（off のあいだ `phase` は常に `fix` で、resolve の答えだけでは見分けられないため）。選択待ち・完成品の無い依頼は、portal を呼ばずに「いまその操作ができない状態です」。依頼を引けない・確かめられないときは、返事をせず今までの流れへ渡す。
+- 共通の表 `tests/fixtures/job-command-cases.json` は変えていない（88件）。引用つきの「OK」「9」は aisecretary だけの読み（`parseChoiceWord`）で、表に足さない。
 文法は `src/lib/obi/fix-parse.ts` が正で、line-secretary の `src/jobs/parse.js` と共通の表 `tests/fixtures/job-command-cases.json`（sha256 をテストで固定）の全行で同じ結果にしてある。片方だけ直さない。
 
 ## よく使うコマンド
