@@ -17,7 +17,15 @@ import {
   completionText,
   readCompletionFacts,
 } from "./cloud-text";
-import type { TickCtx } from "./cloud-tick";
+import {
+  CAPPED_RETRY_MS,
+  LEASE_MARGIN_MS,
+  MAX_COMPLETIONS,
+  MAX_NOT_SENT,
+  MEMO_SETTLE_MS,
+  RETRY_COOLDOWN_MS,
+  type TickCtx,
+} from "./cloud-tick";
 
 const MESSAGE_ID_RE = /^\d{1,64}$/;
 /** 知らせの id の報告をあきらめる回数 */
@@ -410,4 +418,165 @@ export async function deliverNew(
   }
   deps.checkpoint("completion-prepared");
   await sendPrepared(no, memo, ctx);
+}
+
+// ---------------------------------------------------------------- 残っている控えの片付け・再開・予約し直さない時間
+
+const SHA256_RE = /^[0-9a-f]{64}$/;
+/** 1回に見る控えの数（目次から、番号の小さい順） */
+const MEMO_SCAN_LIMIT = 20;
+
+/** 最後に書いてから MEMO_SETTLE_MS たったか（書いた回がまだ動いているかもしれない控えには触らない） */
+const settled = (ctx: TickCtx, memo: { at: string }): boolean => ctx.deps.now() - Date.parse(memo.at) >= MEMO_SETTLE_MS;
+
+/**
+ * 目次の番号ごとに、控えを片付ける。
+ *   無い → 目次から外す／形が違う → 消す／sent → 報告の続き／attempting → 結果不明として報告（送り直さない）
+ * prepared・attempt-requested の控えは、番号と一緒に返す（resumeOrReturnPrepared が扱う）。
+ */
+export async function sweepMemos(
+  nos: number[],
+  ctx: TickCtx
+): Promise<Array<{ no: number; memo: CloudJobMemoRead }>> {
+  const { deps, clock } = ctx;
+  const pending: Array<{ no: number; memo: CloudJobMemoRead }> = [];
+  for (const no of nos) {
+    let memo: CloudJobMemoRead | null | "invalid";
+    try {
+      memo = await deps.store.getJob(no);
+    } catch {
+      say(ctx, no, "memo-read-failed"); // この回は触らない
+      continue;
+    }
+    if (memo === null) {
+      await deps.store.unindexJob(no); // 期限で消えた・消し済み。目次の掃除
+      continue;
+    }
+    if (memo === "invalid") {
+      // 予約の番号が分からないので、報告しない（予約は期限で納品要確認になる＝分からない側）
+      if (await dropMemo(ctx, no)) say(ctx, no, "memo-invalid");
+      continue;
+    }
+    if (memo.stage === "prepared" || memo.stage === "attempt-requested") {
+      pending.push({ no, memo });
+      continue;
+    }
+    if (ctx.state.portalStopped) continue;
+    if (memo.stage === "sent") {
+      await finishSent(no, memo, true, ctx); // 古さは見ない（報告は冪等）
+      continue;
+    }
+    // attempting：portal の attempt が通った後に止まった＝LINE を呼んだかもしれない。送り直さない
+    if (!settled(ctx, memo)) continue;
+    const r = noteAuth(
+      ctx,
+      await deps.portal.reportDeliveryResult(
+        no,
+        { claimId: memo.claimId, outcome: "unknown", reason: "interrupted" },
+        clock.portalTimeout()
+      )
+    );
+    if (r.kind === "ok") {
+      await dropMemo(ctx, no);
+      await resetRetry(ctx, no, memo.sha256);
+      ctx.counts.unknown += 1;
+      say(ctx, no, "unknown interrupted");
+    } else if (r.kind === "rejected" && !isAuth(r)) {
+      // 古い控え（その予約は、もう今のものではない）。今の予約には触らず、消すだけ
+      if (await dropMemo(ctx, no)) say(ctx, no, `memo-stale ${r.code}`);
+    } else {
+      say(ctx, no, `interrupted-report-unknown ${signOf(r)}`); // 残す。次の回にやり直す
+    }
+  }
+  return pending;
+}
+
+/**
+ * prepared・attempt-requested の控え（どちらも、LINE を呼んでいないことが確か）を、再開するか完成へ返す。
+ * 完成の一覧は見ない（納品中の依頼は一覧に出ない。物件名も控えの facts.property を使う）。
+ * 「その予約が今も自分のものか」は、sendPrepared の中の portal の attempt（1b）が1つの更新で確かめる。
+ */
+export async function resumeOrReturnPrepared(
+  pending: Array<{ no: number; memo: CloudJobMemoRead }>,
+  ctx: TickCtx
+): Promise<void> {
+  for (const { no, memo } of pending) {
+    if (!settled(ctx, memo)) continue;
+    if (ctx.state.portalStopped) continue; // portal に届かない回は、返すことも再開もしない
+    const { leaseUntil, facts } = memo;
+    if (
+      !ctx.completion || // 完成の設定が無い
+      facts === null || // 文を作り直せない
+      leaseUntil === null || // 期限が分からない
+      Date.parse(leaseUntil) - ctx.deps.now() < LEASE_MARGIN_MS // 予約の期限まで5分を切っている
+    ) {
+      await giveBack(no, memo.claimId, memo.sha256, "config", ctx);
+      continue;
+    }
+    if (ctx.state.completionsUsed >= MAX_COMPLETIONS || !ctx.clock.canStartNew()) continue; // 次の回
+    await sendPrepared(no, { ...memo, leaseUntil, facts }, ctx);
+  }
+}
+
+/** 予約し直さない時間のあいだか（Mac の heldBack と同じ）。待ち時間が読めない回は、予約を取らない側（true） */
+export async function heldBack(no: number, sha256: string, ctx: TickCtx): Promise<boolean> {
+  let r: { count: number; lastAt: string } | null;
+  try {
+    r = await ctx.deps.store.getRetry(no, sha256);
+  } catch {
+    say(ctx, no, "retry-read-failed");
+    return true;
+  }
+  if (!r) return false;
+  const wait = r.count >= MAX_NOT_SENT ? CAPPED_RETRY_MS : RETRY_COOLDOWN_MS;
+  return ctx.deps.now() - Date.parse(r.lastAt) < wait;
+}
+
+/**
+ * 完成の配達の1回ぶん：控えの片付け → 再開 →（完成の設定があれば）完成の一覧 → 新しい予約。
+ * 完成の設定が無い回も、片付けは行う。
+ */
+export async function runCompletion(ctx: TickCtx): Promise<void> {
+  const { deps, clock, shared } = ctx;
+  let nos: number[];
+  try {
+    nos = await deps.store.listJobNos(MEMO_SCAN_LIMIT);
+  } catch {
+    // 控えの有無が分からないまま、新しい予約を取らない
+    deps.log("memo-list-failed");
+    return;
+  }
+  const pending = await sweepMemos(nos, ctx);
+  await resumeOrReturnPrepared(pending, ctx);
+
+  if (!ctx.completion) return; // 完成の設定が無い。新しい予約は取らない
+  if (!clock.canStartNew() || ctx.state.portalStopped) return;
+  const list = noteAuth(ctx, await deps.portal.listJobs({ status: "完成" }, clock.portalTimeout()));
+  if (list.kind !== "ok") {
+    deps.log(`list-failed completion ${signOf(list)}`);
+    return;
+  }
+  const rows = list.value.jobs
+    // 完成の行の deliveryVia は見ない。クラウドの納品かは、自分の予約の応答の via だけで決める
+    .filter((row) => row.workflow === "obi" && row.replyKind === "line-group" && row.replyGroupId === shared.groupId)
+    .sort((a, b) => a.no - b.no);
+  for (const row of rows) {
+    if (ctx.state.completionsUsed >= MAX_COMPLETIONS || !clock.canStartNew() || ctx.state.portalStopped) break;
+    const sha256 = row.artifactSha256;
+    if (typeof sha256 !== "string" || !SHA256_RE.test(sha256)) {
+      say(ctx, row.no, "list-row-invalid"); // 待ち時間の鍵を作れない
+      continue;
+    }
+    // 控えが残っている依頼は取らない
+    let left: CloudJobMemoRead | null | "invalid";
+    try {
+      left = await deps.store.getJob(row.no);
+    } catch {
+      say(ctx, row.no, "memo-read-failed");
+      continue;
+    }
+    if (left !== null) continue;
+    if (await heldBack(row.no, sha256, ctx)) continue;
+    await deliverNew(row, ctx);
+  }
 }
