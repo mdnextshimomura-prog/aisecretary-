@@ -13,3 +13,4 @@
 - Task 8（控えの片付け・再開・予約し直さない時間）：済。portal が 401・403 で打ち切られた回は、prepared の控えを完成へ返すこともしない（次の回へ）。interrupted の報告が 401・403 のときは控えを残す。新しい予約の前に、その番号の控えが無いことを KV で読み直す。
 - Task 9（種まきと知らせ）：済。notice-held のログは、その一覧に行があるときだけ出す（毎分2行のログを避ける）。id の報告のやり直しが 401・403 のときは控えを残す。
 - Task 10（見回りの本体）：済。わざと壊して落ちることを確かめた（attempt の前の push・attempt が通らないのに push・attempting の再開・peers の判定なし・ログに claimId・70秒の待ちなし・not_sent の報告の順・種まきの回の知らせ・notice/attempt が通らないのに push）。cloud-tick.ts と cloud-deliver.ts／cloud-notice.ts は互いに読み込む（計画のファイルの分け方のため。値を使うのは関数が呼ばれたときだけ）。
+- Task 11（入口と cron）：済。line.ts は相対パスで読み込む（計画は @/lib/line。tsx のテストから読めるように）。KV の包みは cloud-store.ts の getCloudStore を使う。例外のログの名前は英字だけに絞る。ビルドの一覧に ƒ /api/obi/cloud-tick。ミドルウェアの matcher に /api/obi は入っていない（遮られない）。

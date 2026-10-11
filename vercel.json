@@ -7,6 +7,10 @@
     {
       "path": "/api/report",
       "schedule": "0 1 * * *"
+    },
+    {
+      "path": "/api/obi/cloud-tick",
+      "schedule": "* * * * *"
     }
   ]
 }
