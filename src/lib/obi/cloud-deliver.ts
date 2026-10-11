@@ -349,7 +349,7 @@ export async function sendPrepared(
 }
 
 /**
- * 新しい予約から配る（一覧の行1つ）。呼ぶ前に、絞り込み・待ち時間・canStartNew() は済んでいる。
+ * 新しい予約から配る（一覧の行1つ）。呼ぶ前に、絞り込み・待ち時間・時間の線（canSendCompletion()）は済んでいる。
  */
 export async function deliverNew(
   row: CloudJobRow,
@@ -513,7 +513,8 @@ export async function resumeOrReturnPrepared(
       await giveBack(no, memo.claimId, memo.sha256, "config", ctx);
       continue;
     }
-    if (ctx.state.completionsUsed >= MAX_COMPLETIONS || !ctx.clock.canStartNew()) continue; // 次の回
+    // 送る線（40秒）を過ぎていたら、再開に手を付けない（attempt へ進めないので、枠も使わない）
+    if (ctx.state.completionsUsed >= MAX_COMPLETIONS || !ctx.clock.canSendCompletion()) continue; // 次の回
     await sendPrepared(no, { ...memo, leaseUntil, facts }, ctx);
   }
 }
@@ -550,7 +551,8 @@ export async function runCompletion(ctx: TickCtx): Promise<void> {
   await resumeOrReturnPrepared(pending, ctx);
 
   if (!ctx.completion) return; // 完成の設定が無い。新しい予約は取らない
-  if (!clock.canStartNew() || ctx.state.portalStopped) return;
+  // 新しい予約の入口の線は、送る線（40秒）にそろえる：取ってから送れずに終わる予約を作らない
+  if (!clock.canSendCompletion() || ctx.state.portalStopped) return;
   const list = noteAuth(ctx, await deps.portal.listJobs({ status: "完成" }, clock.portalTimeout()));
   if (list.kind !== "ok") {
     deps.log(`list-failed completion ${signOf(list)}`);
@@ -561,7 +563,7 @@ export async function runCompletion(ctx: TickCtx): Promise<void> {
     .filter((row) => row.workflow === "obi" && row.replyKind === "line-group" && row.replyGroupId === shared.groupId)
     .sort((a, b) => a.no - b.no);
   for (const row of rows) {
-    if (ctx.state.completionsUsed >= MAX_COMPLETIONS || !clock.canStartNew() || ctx.state.portalStopped) break;
+    if (ctx.state.completionsUsed >= MAX_COMPLETIONS || !clock.canSendCompletion() || ctx.state.portalStopped) break;
     const sha256 = row.artifactSha256;
     if (typeof sha256 !== "string" || !SHA256_RE.test(sha256)) {
       say(ctx, row.no, "list-row-invalid"); // 待ち時間の鍵を作れない

@@ -716,11 +716,11 @@ async function main() {
     w.portal.onCall = () => w.clock.advance(8_000);
     await tick(w);
     ok(
-      "時間：知らせの attempt は30秒の線を過ぎたら呼ばない（予約は取る）",
-      count(w, "noticeClaim") === 1 &&
+      "時間：知らせは30秒の線を過ぎたら、予約（notice/claim）を1回も呼ばない",
+      count(w, "noticeClaim") === 0 &&
         count(w, "noticeAttempt") === 0 &&
         w.line.texts.length === 0 &&
-        hasLog(w, "#J4 notice-deferred"),
+        count(w, "listJobs") === 3,
     );
   }
   {

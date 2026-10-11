@@ -193,12 +193,9 @@ export async function runNotices(ctx: TickCtx): Promise<void> {
 
   let pushes = 0; // 3通の枠は「LINE を呼んだ回数」（結果によらない）
   for (const { no, key, row } of candidates) {
-    if (
-      pushes >= MAX_NOTICES ||
-      !clock.canStartNew() ||
-      ctx.state.portalStopped
-    )
-      break;
+    // 30秒の線（notice/attempt へ進める線）は、予約を取る前に見る。
+    // 過ぎていれば予約を取らずに終える（取ってから送れないと、行が prepared のまま10分残る）
+    if (pushes >= MAX_NOTICES || !clock.canAttemptNotice() || ctx.state.portalStopped) break;
 
     const claim = noteAuth(
       ctx,

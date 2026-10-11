@@ -718,6 +718,28 @@ async function main() {
     );
   }
 
+  {
+    // 30秒の線は、予約を取る前に見る（取ってから送れずに終わると、行が prepared のまま10分残る）
+    const w = world(fixedJob(4), fixedJob(5), failedJob(7));
+    const ctx = w.ctx();
+    w.clock.advance(30_001);
+    await runNotices(ctx);
+    ok(
+      "30秒を過ぎてから知らせの段に入った → 予約（notice/claim）を1回も呼ばない・push 0回・行を作らない",
+      count(w, "noticeClaim") === 0 && count(w, "noticeAttempt") === 0 && w.line.texts.length === 0 && rowState(w, 4) === null,
+    );
+    const w2 = world(fixedJob(4), fixedJob(5));
+    const ctx2 = w2.ctx();
+    w2.portal.onCall = (op) => {
+      if (op === "noticeResult") w2.clock.advance(30_001); // 1通目のあいだに線を過ぎた
+    };
+    await runNotices(ctx2);
+    ok(
+      "1通目の後に30秒の線を過ぎた → 2通目の予約は取らない",
+      w2.line.texts.length === 1 && count(w2, "noticeClaim") === 1 && rowState(w2, 5) === null,
+    );
+  }
+
   // ---- 差し込み口
   const halts: Array<[CloudCheckpoint, string, number]> = [
     ["notice-claimed", "prepared", 0],

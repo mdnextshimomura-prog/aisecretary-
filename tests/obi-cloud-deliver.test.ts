@@ -1007,6 +1007,37 @@ async function main() {
     await runCompletion(ctx);
     ok("45秒を過ぎている → 再開しない（attempt を呼ばない・触らない）", count(w, "attemptDelivery") === 0 && stage(w) === "prepared" && w.line.texts.length === 0);
   }
+  {
+    // 40秒の線（送る線）は、新しい予約を取る前・再開の前に見る
+    const w = world();
+    const ctx = w.ctx();
+    w.clock.advance(40_001);
+    await runCompletion(ctx);
+    ok(
+      "40秒を過ぎている → 新しい予約（delivery/claim）を1回も呼ばない・依頼は完成のまま",
+      count(w, "claimDelivery") === 0 && w.portal.job(NO).status === "完成" && w.store.rawJob(NO) === null && w.line.texts.length === 0,
+    );
+    const w2 = fakeWorld();
+    for (const no of [1, 2]) w2.portal.add({ no, status: "完成" });
+    const ctx2 = w2.ctx();
+    w2.portal.onCall = (op) => {
+      if (op === "reportDeliveryResult") w2.clock.advance(40_001); // 1件目のあいだに線を過ぎた
+    };
+    await runCompletion(ctx2);
+    ok(
+      "1件目の後に40秒の線を過ぎた → 2件目の予約は取らない",
+      count(w2, "claimDelivery") === 1 && w2.portal.job(1).status === "納品済み" && w2.portal.job(2).status === "完成",
+    );
+    const r = await haltedWorld("completion-prepared");
+    r.clock.advance(2 * MIN);
+    const rctx = r.ctx();
+    r.clock.advance(40_001);
+    await runCompletion(rctx);
+    ok(
+      "40秒を過ぎている → 再開もしない（attempt を呼ばない・控えは prepared のまま・枠を使わない）",
+      count(r, "attemptDelivery") === 0 && stage(r) === "prepared" && rctx.state.completionsUsed === 0 && !hasLog(r, "#J12 deferred"),
+    );
+  }
   // ---- 約束どおりの形でない控え
   for (const missing of ["facts", "leaseUntil"] as const) {
     const w = world();
