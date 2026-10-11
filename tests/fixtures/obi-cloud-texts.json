@@ -1,0 +1,484 @@
+{
+  "version": 1,
+  "link": "https://liff.line.me/1234567890-AbCdEfGh?t=TOKEN",
+  "completion": [
+    {
+      "name": "ふつうの完成・物件名あり",
+      "in": {
+        "no": 12,
+        "property": "グランメゾン北浜 302",
+        "claim": {},
+        "fixGuide": false
+      },
+      "text": "#J12 帯替えが完成しました（グランメゾン北浜 302）\nhttps://liff.line.me/1234567890-AbCdEfGh?t=TOKEN\n（このグループの方が開けます・24時間有効）"
+    },
+    {
+      "name": "物件名なし",
+      "in": {
+        "no": 12,
+        "property": "",
+        "claim": {
+          "reviewPages": 0,
+          "outsideErased": 0,
+          "outsidePages": [],
+          "fix": null
+        },
+        "fixGuide": false
+      },
+      "text": "#J12 帯替えが完成しました\nhttps://liff.line.me/1234567890-AbCdEfGh?t=TOKEN\n（このグループの方が開けます・24時間有効）"
+    },
+    {
+      "name": "要確認のページ",
+      "in": {
+        "no": 3,
+        "property": "A",
+        "claim": {
+          "reviewPages": 2
+        },
+        "fixGuide": false
+      },
+      "text": "#J3 帯替えが完成しました（A）\n⚠ 要確認 2ページ（使う前に中身を確認してください）\nhttps://liff.line.me/1234567890-AbCdEfGh?t=TOKEN\n（このグループの方が開けます・24時間有効）"
+    },
+    {
+      "name": "帯の外を消した・ページあり",
+      "in": {
+        "no": 3,
+        "property": "A",
+        "claim": {
+          "outsideErased": 4,
+          "outsidePages": [
+            1,
+            3
+          ]
+        },
+        "fixGuide": false
+      },
+      "text": "#J3 帯替えが完成しました（A）\n帯の外の他社の文字を4か所消しました（1・3ページ）。消しすぎていないか確認してください\nhttps://liff.line.me/1234567890-AbCdEfGh?t=TOKEN\n（このグループの方が開けます・24時間有効）"
+    },
+    {
+      "name": "帯の外を消した・ページの形が違えばページなし",
+      "in": {
+        "no": 3,
+        "property": "A",
+        "claim": {
+          "outsideErased": 4,
+          "outsidePages": [
+            1,
+            0
+          ]
+        },
+        "fixGuide": false
+      },
+      "text": "#J3 帯替えが完成しました（A）\n帯の外の他社の文字を4か所消しました。消しすぎていないか確認してください\nhttps://liff.line.me/1234567890-AbCdEfGh?t=TOKEN\n（このグループの方が開けます・24時間有効）"
+    },
+    {
+      "name": "要確認＋帯の外＋番号の案内",
+      "in": {
+        "no": 3,
+        "property": "A",
+        "claim": {
+          "reviewPages": 1,
+          "outsideErased": 1,
+          "outsidePages": [
+            2
+          ]
+        },
+        "fixGuide": true
+      },
+      "text": "#J3 帯替えが完成しました（A）\n⚠ 要確認 1ページ（使う前に中身を確認してください）\n帯の外の他社の文字を1か所消しました（2ページ）。消しすぎていないか確認してください\nhttps://liff.line.me/1234567890-AbCdEfGh?t=TOKEN\n（このグループの方が開けます・24時間有効）\n問題なければ、帯替えを依頼できる方から 0、直すところがあれば番号で返信してください（1 帯の位置／2 他社の文字／3 向き／4 順番／5 その他。例：3ページ 2）\n（このメッセージを長押し →「リプライ」で送ってください）"
+    },
+    {
+      "name": "形の違う数は、出さない側へ",
+      "in": {
+        "no": 3,
+        "property": "A",
+        "claim": {
+          "reviewPages": "2",
+          "outsideErased": 1.5,
+          "outsidePages": [
+            1
+          ]
+        },
+        "fixGuide": false
+      },
+      "text": "#J3 帯替えが完成しました（A）\nhttps://liff.line.me/1234567890-AbCdEfGh?t=TOKEN\n（このグループの方が開けます・24時間有効）"
+    },
+    {
+      "name": "直しの回・ページあり",
+      "in": {
+        "no": 12,
+        "property": "出ない",
+        "claim": {
+          "fix": {
+            "round": 1,
+            "code": 1,
+            "page": 3,
+            "turn": "",
+            "by": "auto",
+            "source": "line-group"
+          }
+        },
+        "fixGuide": false
+      },
+      "text": "#J12 を直しました（3ページ・帯の位置）\nhttps://liff.line.me/1234567890-AbCdEfGh?t=TOKEN\n（このグループの方が開けます・24時間有効）"
+    },
+    {
+      "name": "直しの回・ページなし・案内つき",
+      "in": {
+        "no": 12,
+        "property": "出ない",
+        "claim": {
+          "fix": {
+            "round": 1,
+            "code": 4,
+            "page": null,
+            "turn": "",
+            "by": "auto",
+            "source": "line-group"
+          }
+        },
+        "fixGuide": true
+      },
+      "text": "#J12 を直しました（順番）\nhttps://liff.line.me/1234567890-AbCdEfGh?t=TOKEN\n（このグループの方が開けます・24時間有効）\nまだ違えば番号で返してください（0 問題なし／1 帯の位置／2 他社の文字／3 向き／4 順番／5 その他。例：3ページ 2）"
+    },
+    {
+      "name": "直しの回・担当が直した",
+      "in": {
+        "no": 12,
+        "property": "出ない",
+        "claim": {
+          "fix": {
+            "round": 0,
+            "code": 5,
+            "page": null,
+            "turn": "",
+            "by": "human",
+            "source": "line-group"
+          },
+          "reviewPages": 1
+        },
+        "fixGuide": false
+      },
+      "text": "#J12 を担当が直しました\n⚠ 要確認 1ページ（使う前に中身を確認してください）\nhttps://liff.line.me/1234567890-AbCdEfGh?t=TOKEN\n（このグループの方が開けます・24時間有効）"
+    },
+    {
+      "name": "fix の形が違えば、ふつうの完成の文",
+      "in": {
+        "no": 12,
+        "property": "B",
+        "claim": {
+          "fix": {
+            "round": 1,
+            "code": 6,
+            "page": 3,
+            "turn": "",
+            "by": "auto",
+            "source": "line-group"
+          }
+        },
+        "fixGuide": true
+      },
+      "text": "#J12 帯替えが完成しました（B）\nhttps://liff.line.me/1234567890-AbCdEfGh?t=TOKEN\n（このグループの方が開けます・24時間有効）\n問題なければ、帯替えを依頼できる方から 0、直すところがあれば番号で返信してください（1 帯の位置／2 他社の文字／3 向き／4 順番／5 その他。例：3ページ 2）\n（このメッセージを長押し →「リプライ」で送ってください）"
+    }
+  ],
+  "reject": [
+    {
+      "name": "選択肢つき・初回",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "offered",
+          "choiceGen": 41,
+          "choices": [
+            1,
+            3,
+            4
+          ],
+          "rejectRound": 0,
+          "rejectKind": "scan",
+          "rejectReason": ""
+        }
+      },
+      "kind": "choices",
+      "text": "#J4 自動では仕上げられませんでした（理由：スキャンで文字が読めません）\n対応を番号で返信してください（帯替えを依頼できる方から）\n1 帯だけ替えて仕上げる（所在地・価格の確認なし）\n3 担当が手で仕上げる\n4 取り消す\n（このメッセージを長押し →「リプライ」で番号を送ってください。または「#J4 1」）"
+    },
+    {
+      "name": "選択肢つき・作り直しの後・AI の理由",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "offered",
+          "choiceGen": 41,
+          "choices": [
+            3,
+            4
+          ],
+          "rejectRound": 1,
+          "rejectKind": "scan",
+          "rejectReason": "ai-timeout"
+        }
+      },
+      "kind": "choices",
+      "text": "#J4 選んだ方法では仕上げられませんでした（理由：AI で読めませんでした）\n対応を番号で返信してください（帯替えを依頼できる方から）\n3 担当が手で仕上げる\n4 取り消す\n（このメッセージを長押し →「リプライ」で番号を送ってください。または「#J4 3」）"
+    },
+    {
+      "name": "選択肢つき・番号は重複を除いて小さい順・範囲外は捨てる",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "offered",
+          "choiceGen": 41,
+          "choices": [
+            4,
+            2,
+            2,
+            9,
+            1
+          ],
+          "rejectRound": 0,
+          "rejectKind": "unreadable",
+          "rejectReason": ""
+        }
+      },
+      "kind": "choices",
+      "text": "#J4 自動では仕上げられませんでした（理由：所在地・価格が読めません）\n対応を番号で返信してください（帯替えを依頼できる方から）\n1 帯だけ替えて仕上げる（所在地・価格の確認なし）\n2 AI に読ませて、他社の表記も消して仕上げる（図面の画像を AI に送ります）\n4 取り消す\n（このメッセージを長押し →「リプライ」で番号を送ってください。または「#J4 1」）"
+    },
+    {
+      "name": "理由 boundary",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "offered",
+          "choiceGen": 41,
+          "choices": [
+            3
+          ],
+          "rejectRound": 0,
+          "rejectKind": "boundary",
+          "rejectReason": ""
+        }
+      },
+      "kind": "choices",
+      "text": "#J4 自動では仕上げられませんでした（理由：物件の切れ目が決められません）\n対応を番号で返信してください（帯替えを依頼できる方から）\n3 担当が手で仕上げる\n（このメッセージを長押し →「リプライ」で番号を送ってください。または「#J4 3」）"
+    },
+    {
+      "name": "理由 no-figure",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "offered",
+          "choiceGen": 41,
+          "choices": [
+            3
+          ],
+          "rejectRound": 0,
+          "rejectKind": "no-figure",
+          "rejectReason": ""
+        }
+      },
+      "kind": "choices",
+      "text": "#J4 自動では仕上げられませんでした（理由：販売図面が見つかりません）\n対応を番号で返信してください（帯替えを依頼できる方から）\n3 担当が手で仕上げる\n（このメッセージを長押し →「リプライ」で番号を送ってください。または「#J4 3」）"
+    },
+    {
+      "name": "理由 too-big",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "offered",
+          "choiceGen": 41,
+          "choices": [
+            3
+          ],
+          "rejectRound": 0,
+          "rejectKind": "too-big",
+          "rejectReason": ""
+        }
+      },
+      "kind": "choices",
+      "text": "#J4 自動では仕上げられませんでした（理由：大きすぎます（分けて送り直してください））\n対応を番号で返信してください（帯替えを依頼できる方から）\n3 担当が手で仕上げる\n（このメッセージを長押し →「リプライ」で番号を送ってください。または「#J4 3」）"
+    },
+    {
+      "name": "理由 other",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "offered",
+          "choiceGen": 41,
+          "choices": [
+            3
+          ],
+          "rejectRound": 0,
+          "rejectKind": "other",
+          "rejectReason": ""
+        }
+      },
+      "kind": "choices",
+      "text": "#J4 自動では仕上げられませんでした（理由：自動で1冊にできません）\n対応を番号で返信してください（帯替えを依頼できる方から）\n3 担当が手で仕上げる\n（このメッセージを長押し →「リプライ」で番号を送ってください。または「#J4 3」）"
+    },
+    {
+      "name": "理由 (空)",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "offered",
+          "choiceGen": 41,
+          "choices": [
+            3
+          ],
+          "rejectRound": 0,
+          "rejectKind": "",
+          "rejectReason": ""
+        }
+      },
+      "kind": "choices",
+      "text": "#J4 自動では仕上げられませんでした（理由：自動で1冊にできません）\n対応を番号で返信してください（帯替えを依頼できる方から）\n3 担当が手で仕上げる\n（このメッセージを長押し →「リプライ」で番号を送ってください。または「#J4 3」）"
+    },
+    {
+      "name": "理由 unheard-of",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "offered",
+          "choiceGen": 41,
+          "choices": [
+            3
+          ],
+          "rejectRound": 0,
+          "rejectKind": "unheard-of",
+          "rejectReason": ""
+        }
+      },
+      "kind": "choices",
+      "text": "#J4 自動では仕上げられませんでした（理由：自動で1冊にできません）\n対応を番号で返信してください（帯替えを依頼できる方から）\n3 担当が手で仕上げる\n（このメッセージを長押し →「リプライ」で番号を送ってください。または「#J4 3」）"
+    },
+    {
+      "name": "offered だが出せる番号が無い → 固定の一言",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "offered",
+          "choiceGen": 41,
+          "choices": [],
+          "rejectRound": 0,
+          "rejectKind": "scan",
+          "rejectReason": ""
+        }
+      },
+      "kind": "fixed",
+      "text": "#J4 自動では帯替えできませんでした。担当が確認します"
+    },
+    {
+      "name": "human → 固定の一言",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "human",
+          "choiceGen": 41,
+          "choices": [
+            1,
+            3,
+            4
+          ],
+          "rejectRound": 0,
+          "rejectKind": "scan",
+          "rejectReason": ""
+        }
+      },
+      "kind": "fixed",
+      "text": "#J4 自動では帯替えできませんでした。担当が確認します"
+    },
+    {
+      "name": "rejectState が空（prepNote の差し戻し）→ 固定の一言",
+      "in": {
+        "no": 5,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "",
+          "choiceGen": 0,
+          "choices": [],
+          "prepNote": "x"
+        }
+      },
+      "kind": "fixed",
+      "text": "#J5 自動では帯替えできませんでした。担当が確認します"
+    },
+    {
+      "name": "世代が読めない → 固定の一言",
+      "in": {
+        "no": 4,
+        "row": {
+          "workflow": "obi",
+          "rejectState": "offered",
+          "choiceGen": -1,
+          "choices": [
+            1,
+            3,
+            4
+          ],
+          "rejectRound": 0,
+          "rejectKind": "scan",
+          "rejectReason": ""
+        }
+      },
+      "kind": "fixed",
+      "text": "#J4 自動では帯替えできませんでした。担当が確認します"
+    }
+  ],
+  "failure": [
+    {
+      "in": {
+        "no": 7
+      },
+      "text": "#J7 帯替えに失敗しました。担当が確認します"
+    }
+  ],
+  "property": [
+    {
+      "in": "グランメゾン北浜 302",
+      "out": "グランメゾン北浜 302"
+    },
+    {
+      "in": "  A\u200b棟\r\nB\u2028C\tD  ",
+      "out": "A棟 B C D"
+    },
+    {
+      "in": "全角　スペース　は畳まない",
+      "out": "全角　スペース　は畳まない"
+    },
+    {
+      "in": "見て https://evil.example.com/x?y=1 ね",
+      "out": "見て ね"
+    },
+    {
+      "in": "www.example.jp と example.co.jp/abc",
+      "out": "と"
+    },
+    {
+      "in": "\u202eabc\u2066def\ufeff",
+      "out": "abcdef"
+    },
+    {
+      "in": "ああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ",
+      "out": "ああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ"
+    },
+    {
+      "in": "あああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ",
+      "out": "ああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ…"
+    },
+    {
+      "in": "𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷",
+      "out": "𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷𠮷…"
+    }
+  ]
+}
