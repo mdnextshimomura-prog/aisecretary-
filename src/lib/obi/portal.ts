@@ -381,3 +381,90 @@ export async function postFix(no: number, req: FixRequest, opts: PortalOpts): Pr
     ...(isPositiveInt(pages) ? { pageCount: pages } : {}),
   };
 }
+
+// ── 差し戻しの対応の選択：POST /api/jobs/{no}/reject（設計 2026-10-11 の E12・約束 2026-10-11-obi-reject-contract.md） ──
+//
+// 選択（choose）・完成（approve）・選び直し（rechoose）を受け付ける。冪等のかぎは、その発言の message.id。
+// **発言者を表す項目は送らない**（userId・表示名。誰が選べるかは呼ぶ前に確かめてある）。
+// 結果は、ほかの入口と同じ4つに分ける（accepted／rejected／unreachable／unknown）。
+
+export type RejectAction = "choose" | "approve" | "rechoose";
+
+export interface RejectRequest {
+  /** 選択の発言の LINE message.id */
+  messageId: string;
+  groupId: string;
+  action: RejectAction;
+  /** choose のときだけ 1〜4。approve・rechoose は 0（本文には入れない） */
+  choice: number;
+  /** 引用の返信なら引用先の知らせの世代（resolve の messageGen）、#J つきなら今の世代（resolve の choiceGen） */
+  expectGen: number;
+  /** approve・rechoose のときだけ、resolve の artifactSha256（64桁）。choose は ""（本文には入れない） */
+  expectSha256: string;
+}
+
+export type RejectResult = "queued" | "human" | "canceled" | "approved" | "reopened";
+const REJECT_RESULTS = new Set<string>(["queued", "human", "canceled", "approved", "reopened"]);
+
+export type RejectOutcome =
+  | { kind: "accepted"; no: number; created: boolean; result: RejectResult; choice: number }
+  | {
+      kind: "rejected";
+      code: string;
+      httpStatus: number;
+      busyJobNo?: number;
+      /** CHOICE_NOT_OFFERED のとき、今出している番号 */
+      choices?: number[];
+      /** GATE_FAILED のとき、通らなかった理由の符号 */
+      reason?: string;
+    }
+  | { kind: "unreachable" }
+  | { kind: "unknown"; reason: string };
+
+export async function postReject(no: number, req: RejectRequest, opts: PortalOpts): Promise<RejectOutcome> {
+  const payload: Record<string, unknown> = {
+    messageId: req.messageId,
+    source: "line-group",
+    groupId: req.groupId,
+    action: req.action,
+    expectGen: req.expectGen,
+  };
+  // 約束：choice は choose のときだけ、expectSha256 は approve・rechoose のときだけ（余分に付けると INVALID_REQUEST）
+  if (req.action === "choose") payload.choice = req.choice;
+  else payload.expectSha256 = req.expectSha256;
+  const call = await postJson(`/api/jobs/${no}/reject`, payload, opts);
+  if (call.kind !== "http") return call;
+  if (call.status === 200 || call.status === 201) {
+    const b = call.body;
+    if (
+      call.bodyOk &&
+      isPositiveInt(b.no) &&
+      typeof b.result === "string" &&
+      REJECT_RESULTS.has(b.result) &&
+      isCount(b.choice) &&
+      b.choice <= 4
+    ) {
+      return {
+        kind: "accepted",
+        no: b.no,
+        created: call.status === 201,
+        result: b.result as RejectResult,
+        choice: b.choice,
+      };
+    }
+    // 成功の番号なのに中身が読めない＝受け付けられたかもしれない
+    return { kind: "unknown", reason: "invalid-success-body" };
+  }
+  // 503 は、portal がはっきり止めていると答えた2つだけ断り（CHOICE_DISABLED はスイッチ off・切った後の再送。結果不明にしない。T3・U2）
+  const r = rejectionOf(call, ["CHOICE_DISABLED", "INTAKE_STOPPED"]);
+  if (r.kind !== "rejected") return r;
+  const busy = call.body.busyJobNo;
+  const choices = parseChoices(call.body.choices);
+  const reason = call.body.reason;
+  return {
+    ...r,
+    ...(isPositiveInt(busy) ? { busyJobNo: busy } : {}),
+    ...(choices ? { choices } : {}),
+    ...(typeof reason === "string" ? { reason } : {}),
+  };
+}
