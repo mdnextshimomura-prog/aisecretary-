@@ -2,7 +2,13 @@
  * 差し戻しの対応の選択の中身（認可〜/reject〜返事 runObiReject）を、偽物の KV・portal・LINE で確かめる
  * （設計 2026-10-11 の E12・E14・「うまくいかないとき」）。
  */
-import { runObiReject, OBI_REJECT_MESSAGES, type ObiRejectInput, type ObiRejectTarget } from "../src/lib/obi/reject";
+import {
+  runObiReject,
+  replyObiRejectInterrupted,
+  OBI_REJECT_MESSAGES,
+  type ObiRejectInput,
+  type ObiRejectTarget,
+} from "../src/lib/obi/reject";
 import type { ObiFixDeps, ObiFixStageHooks } from "../src/lib/obi/fix";
 import type { ChoicePlan } from "../src/lib/obi/reject-plan";
 import { OBI_FIX_MESSAGES } from "../src/lib/obi/fix";
@@ -339,6 +345,125 @@ async function main() {
     const from = logged.length;
     await runObiReject(input(w), target(APPROVE), deps(w));
     ok("GATE_FAILED：理由の符号はログにだけ出る（文には出さない）", logged.slice(from).some((l) => l.includes("GATE_FAILED:residue")) && !texts(w)[0].includes("residue"), JSON.stringify(logged.slice(from)));
+  }
+
+  // ══ 時間の予算（「番号で直す」と同じ：開始+17秒までに /reject と返事の印。/reject は最大8秒・最小2秒） ══
+  ok(
+    "文：届かない・結果不明（「もう一度送ってください」と書くのは、送っていないことが確かなときだけ）",
+    OBI_REJECT_MESSAGES.unreachable === "対応を受け付けられませんでした（portal に届きません）。少し待ってからもう一度送ってください" &&
+      OBI_REJECT_MESSAGES.unknown ===
+        "受付の結果を確かめられませんでした。届く知らせか portal の依頼ボックスで確かめてください。同じ返信をもう一度送らないでください" &&
+      !OBI_REJECT_MESSAGES.unknown.includes("もう一度送ってください"),
+  );
+  for (const [elapsed, expected] of [[0, 8000], [6_000, 8000], [10_000, 6000], [14_000, 2000]] as Array<[number, number]>) {
+    const w = world();
+    w.clock.t = T + elapsed;
+    signalTimeouts.length = 0;
+    await runObiReject(input(w), target(choose(1)), deps(w));
+    ok(`開始から${elapsed}ms：/reject の時間の上限は${expected}ms`, signalTimeouts.join() === String(expected) && paths(w) === REJECT, signalTimeouts.join());
+  }
+  {
+    const w = world();
+    w.clock.t = T + 14_001; // 残り 1999ms（2秒に満たない）
+    const r = await runObiReject(input(w), target(choose(1)), deps(w));
+    ok(
+      "残りが2秒に満たない：/reject を呼ばず「…portal に届きません。少し待ってからもう一度送ってください」",
+      r.outcome === "refused" && w.portal.length === 0 && w.fixCalled === 0 && texts(w).join("|") === OBI_REJECT_MESSAGES.unreachable,
+      JSON.stringify(texts(w)),
+    );
+  }
+  {
+    const w = world();
+    await runObiReject(input(w), target(choose(1)), deps(w));
+    ok("reply の時間の上限は4秒", w.replies[0].timeoutMs === 4000);
+    const w2 = world();
+    w2.replyOutcome = { kind: "rejected", status: 400 };
+    await runObiReject(input(w2), target(choose(1)), deps(w2));
+    ok("push の時間の上限は4秒", w2.pushes[0].timeoutMs === 4000);
+  }
+
+  // ══ 結果不明（/reject を呼んだ後、はっきりした答えが無い） ══
+  for (const [name, setup] of [
+    ["時間切れ", (w: World) => { w.rejectTakesMs = 9_000; }],
+    ["500", (w: World) => { w.reject = () => json(500, { code: "INTERNAL" }); }],
+    ["知らない 503", (w: World) => { w.reject = () => json(503, { code: "OTHER" }); }],
+    ["成功の番号で JSON でない", (w: World) => { w.reject = () => new Response("<html>", { status: 201 }); }],
+    ["成功の番号で result が知らない値", (w: World) => { w.reject = () => accepted({ result: "done" }); }],
+    ["途中で切れた（ECONNRESET）", (w: World) => { w.reject = () => { throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } }); }; }],
+    ["送った番号と違う番号の答え", (w: World) => { w.reject = () => accepted({ choice: 2 }); }],
+    ["選択（1）なのに approved の答え", (w: World) => { w.reject = () => accepted({ result: "approved" }); }],
+    ["選択（1）なのに human の答え", (w: World) => { w.reject = () => accepted({ result: "human" }); }],
+    ["違う受付番号の答え", (w: World) => { w.reject = () => accepted({ no: 5 }); }],
+  ] as Array<[string, (w: World) => void]>) {
+    const w = world();
+    setup(w);
+    const r = await runObiReject(input(w), target(choose(1)), deps(w));
+    ok(
+      `結果不明（${name}）：「受付の結果を確かめられませんでした…」を1回。受け付けたとも断ったとも言わない`,
+      r.outcome === "unknown" && texts(w).join("|") === OBI_REJECT_MESSAGES.unknown && w.fixCalled === 1 && w.committed === 0,
+      JSON.stringify(texts(w)),
+    );
+    ok(
+      `結果不明（${name}）：印は obi-fix-pending-notified（NX・8日）。/reject は呼び直さない`,
+      w.kv.length === 1 && w.kv[0].join() === `setNx,obi-fix-pending-notified:${MSG},${TTL}` && paths(w) === REJECT,
+      JSON.stringify(w.kv),
+    );
+    const again = await runObiReject(input(w), target(choose(1)), deps(w));
+    ok(`結果不明（${name}）：同じ発言をもう一度扱っても、知らせは1回だけ`, again.outcome === "unknown" && w.replies.length === 1);
+  }
+  for (const [plan, body] of [
+    [APPROVE, { result: "queued", choice: 0 }],
+    [RECHOOSE, { result: "approved", choice: 0 }],
+    [choose(3), { result: "queued", choice: 3 }],
+    [choose(4), { result: "human", choice: 4 }],
+  ] as Array<[ChoicePlan, Record<string, unknown>]>) {
+    const w = world();
+    w.reject = () => accepted(body);
+    const r = await runObiReject(input(w), target(plan), deps(w));
+    ok(`送った中身（${plan.action} ${plan.choice}）と合わない答え（${body.result}）：結果不明`, r.outcome === "unknown" && texts(w).join("|") === OBI_REJECT_MESSAGES.unknown);
+  }
+
+  // ══ 送っていないことが確か（つなぐ前の失敗）：結果不明にしない ══
+  for (const code of ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]) {
+    const w = world();
+    w.reject = () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code } });
+    };
+    const r = await runObiReject(input(w), target(APPROVE), deps(w));
+    ok(
+      `${code}：「…portal に届きません。少し待ってからもう一度送ってください」（結果不明の文にしない）`,
+      r.outcome === "refused" && texts(w).join("|") === OBI_REJECT_MESSAGES.unreachable && w.committed === 1 &&
+        w.kv.length === 1 && w.kv[0][1] === `obi-fix-replied:${MSG}`,
+      JSON.stringify(texts(w)),
+    );
+  }
+
+  // ══ 例外で止まったときの返事（呼ぶのは webhook-event.ts） ══
+  {
+    const w = world();
+    await replyObiRejectInterrupted(input(w), "before-call", deps(w));
+    ok(
+      "例外（/reject を呼ぶ前）：「…portal に届きません…」を1回（obi-fix-replied）",
+      texts(w).join("|") === OBI_REJECT_MESSAGES.unreachable && w.kv[0].join() === `setNx,obi-fix-replied:${MSG},${TTL}`,
+    );
+    const w2 = world();
+    await replyObiRejectInterrupted(input(w2), "called", deps(w2));
+    ok(
+      "例外（/reject を呼んだ後）：結果不明と同じ文を1回（obi-fix-pending-notified）",
+      texts(w2).join("|") === OBI_REJECT_MESSAGES.unknown && w2.kv[0].join() === `setNx,obi-fix-pending-notified:${MSG},${TTL}`,
+    );
+    const w3 = world();
+    const d3 = deps(w3);
+    d3.reply = async () => {
+      throw new Error(`crash ${MSG}`);
+    };
+    let threw = false;
+    try {
+      await replyObiRejectInterrupted(input(w3), "called", d3);
+    } catch {
+      threw = true;
+    }
+    ok("例外の後の返事が出せなくても、外へ投げない", !threw);
   }
 
   // ══ ログ ══

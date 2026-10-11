@@ -21,7 +21,17 @@
  * message.id・userId・groupId・本文・リンク・例外の文は出さない。
  */
 import type { ObiFixDeps, ObiFixInput, ObiFixStageHooks } from "./fix";
-import { FIX_MS, KV_OP_MS, OBI_FIX_MESSAGES, OBI_FIX_PORTAL_PHASE_END_MS, portalOpts, sayOnce, type Said } from "./fix";
+import {
+  errName,
+  FIX_MIN_MS,
+  FIX_MS,
+  KV_OP_MS,
+  OBI_FIX_MESSAGES,
+  OBI_FIX_PORTAL_PHASE_END_MS,
+  portalOpts,
+  sayOnce,
+  type Said,
+} from "./fix";
 import { OBI_MESSAGES } from "./intake";
 import { postReject, type RejectOutcome } from "./portal";
 import type { ChoicePlan } from "./reject-plan";
@@ -45,6 +55,8 @@ export const OBI_REJECT_MESSAGES = {
   /** 受付を止めている（CHOICE_DISABLED。スイッチ off・スイッチを切った後の再送。裁定 U2 の固定の文。受付番号は付けない） */
   disabled: "いま受付を止めています。portal の依頼ボックスを確認してください",
   rejected: (code: string) => `対応を受け付けられませんでした（${code}）。担当に声をかけてください`,
+  /** 送っていないことが確か（/reject を呼ぶ前の失敗・つなぐ前の失敗）。何も変わっていないので、送り直してよい */
+  unreachable: "対応を受け付けられませんでした（portal に届きません）。少し待ってからもう一度送ってください",
   /** /reject の結果が分からない。「もう一度送ってください」とは書かない（送り直すと別の発言になり、二重の選択になりうる） */
   unknown:
     "受付の結果を確かめられませんでした。届く知らせか portal の依頼ボックスで確かめてください。同じ返信をもう一度送らないでください",
@@ -78,6 +90,20 @@ function acceptedMessage(no: number, o: Extract<RejectOutcome, { kind: "accepted
   if (o.result === "canceled") return OBI_REJECT_MESSAGES.canceled(no);
   if (o.result === "approved") return OBI_REJECT_MESSAGES.approved(no);
   return OBI_REJECT_MESSAGES.reopened(no);
+}
+
+/**
+ * 受け付けた答えが、送った中身と合っているか（約束：choose の 1・2 は queued、3 は human、4 は canceled。
+ * approve は approved、rechoose は reopened。choice は choose のときの番号、ほかは 0）。
+ * 合わない答えは「形の違う応答」と同じ＝結果不明として扱う（違う文を返さない）
+ */
+function consistent(no: number, plan: ChoicePlan, o: Extract<RejectOutcome, { kind: "accepted" }>): boolean {
+  if (o.no !== no || o.choice !== plan.choice) return false;
+  if (plan.action === "approve") return o.result === "approved";
+  if (plan.action === "rechoose") return o.result === "reopened";
+  if (plan.choice === 3) return o.result === "human";
+  if (plan.choice === 4) return o.result === "canceled";
+  return o.result === "queued";
 }
 
 /** portal の断り（/reject）→ 文（設計 E14 の表） */
@@ -141,13 +167,14 @@ export async function runObiReject(
 
   // reject（1回だけ）。返事の印の1秒を残して、開始+17秒までに終える
   const remaining = phaseEnd - deps.now() - KV_OP_MS;
+  if (remaining < FIX_MIN_MS) return refuse("no-time", OBI_REJECT_MESSAGES.unreachable); // 送る前の失敗が確か
   deps.onFixCalled();
   const o = await postReject(
     no,
     { messageId, groupId, action: plan.action, choice: plan.choice, expectGen: plan.expectGen, expectSha256: plan.expectSha256 },
     portalOpts(input, deps, Math.min(FIX_MS, remaining))
   );
-  if (o.kind === "accepted") {
+  if (o.kind === "accepted" && consistent(no, plan, o)) {
     deps.onCommitted();
     log(o.result, await sayOnce(input, groupId, deps, repliedKey, acceptedMessage(no, o)));
     return { outcome: o.result };
@@ -158,6 +185,43 @@ export async function runObiReject(
     const why = o.code === "GATE_FAILED" && o.reason ? `:${sanitizeForReply(o.reason)}` : "";
     return refuse(`${sanitizeForReply(o.code)}${why}`, rejectionMessage(no, o));
   }
-  log(`unknown:${o.kind}`, await sayOnce(input, groupId, deps, `obi-fix-pending-notified:${messageId}`, OBI_REJECT_MESSAGES.unknown));
+
+  // 送っていないことが確かな失敗（postReject の unreachable＝ECONNREFUSED・ENOTFOUND・EAI_AGAIN。「番号で直す」の AB1 と同じ）。
+  //    つなぐ前に失敗しているので、portal には何も届いていない＝何も変わっていない。結果不明ではない
+  if (o.kind === "unreachable") {
+    deps.onCommitted();
+    return refuse("reject-unreachable", OBI_REJECT_MESSAGES.unreachable);
+  }
+
+  // /reject を呼んだ後、はっきりした答えが無く、届いたかどうかも分からない
+  //    （時間切れ・応答の途中の切断・5xx・形の違う応答・送った中身と合わない答え）＝結果不明。
+  //    「もう一度送ってください」とは言わない（人が送り直すと message.id が変わり、portal の冪等では二重の選択を防げない）。
+  //    1回だけ知らせて、済みにする（やり直さない・503 にしない）。結果は、Mac の後の知らせか portal の依頼ボックスで分かる
+  const why = o.kind === "accepted" ? "inconsistent" : o.reason;
+  log(`unknown:${why}`, await sayOnce(input, groupId, deps, `obi-fix-pending-notified:${messageId}`, OBI_REJECT_MESSAGES.unknown));
   return { outcome: "unknown" };
+}
+
+/**
+ * runObiReject が例外で止まったときの返事（webhook-event.ts が、予約を持ったまま呼ぶ。例外は外へ投げない）。
+ *   before-call … /reject をまだ呼んでいない（#J つきだけ。引用の形は呼ぶ側が今までの流れへ渡す）。
+ *                 何も変わっていないのが確かなので「…portal に届きません。少し待ってからもう一度送ってください」
+ *   called      … /reject を呼んだが、答えを受け取る前に止まった。結果不明と同じ「受付の結果を確かめられませんでした…」
+ * どちらも1通につき1回（NX）。この後、呼ぶ側はイベントを済みにする（503 にしない）
+ */
+export async function replyObiRejectInterrupted(
+  input: Pick<ObiRejectInput, "messageId" | "startedAt" | "config">,
+  stage: "before-call" | "called",
+  deps: ObiFixDeps
+): Promise<void> {
+  const { messageId } = input;
+  try {
+    const said =
+      stage === "before-call"
+        ? await sayOnce(input, input.config.groupId, deps, `obi-fix-replied:${messageId}`, OBI_REJECT_MESSAGES.unreachable)
+        : await sayOnce(input, input.config.groupId, deps, `obi-fix-pending-notified:${messageId}`, OBI_REJECT_MESSAGES.unknown);
+    console.log("帯替えの対応の選択:", `interrupted:${stage}`, said.delivery);
+  } catch (err) {
+    console.error("帯替えの対応の選択：例外の後の返事を出せない:", stage, errName(err));
+  }
 }
