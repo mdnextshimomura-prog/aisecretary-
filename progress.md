@@ -14,3 +14,10 @@
 - Task 9（種まきと知らせ）：済。notice-held のログは、その一覧に行があるときだけ出す（毎分2行のログを避ける）。id の報告のやり直しが 401・403 のときは控えを残す。
 - Task 10（見回りの本体）：済。わざと壊して落ちることを確かめた（attempt の前の push・attempt が通らないのに push・attempting の再開・peers の判定なし・ログに claimId・70秒の待ちなし・not_sent の報告の順・種まきの回の知らせ・notice/attempt が通らないのに push）。cloud-tick.ts と cloud-deliver.ts／cloud-notice.ts は互いに読み込む（計画のファイルの分け方のため。値を使うのは関数が呼ばれたときだけ）。
 - Task 11（入口と cron）：済。line.ts は相対パスで読み込む（計画は @/lib/line。tsx のテストから読めるように）。KV の包みは cloud-store.ts の getCloudStore を使う。例外のログの名前は英字だけに絞る。ビルドの一覧に ƒ /api/obi/cloud-tick。ミドルウェアの matcher に /api/obi は入っていない（遮られない）。
+- Task 12（記載・テストの登録・全体の確認）：済。`npm test` 32本とも通過（✅ 2,258件。うち新しい9本で 822件）・`npx tsc --noEmit --incremental false -p .` 0・`npm run build` 0（一覧に ƒ /api/obi/cloud-tick）。既存のファイルの差分は `vercel.json`・`package.json`（test の行）・`CLAUDE.md` だけ。
+- Task 13（本番へ出す・鍵・変数・スイッチ）：実行していない（下村さんの承認の後に、別に行う）。push・デプロイ・Vercel の操作はしていない。
+
+## 残っている確認（決定ではないもの）
+- 本物の portal（K1）・閲覧ページ（K2）・Mac（K3）との通しは未実施（portal は、約束の応答の形どおりに作った偽物）。
+- Vercel の変数の有無（`CRON_SECRET` など）は見ていない。本物の KV で、目次の値・控えが文字列で返るか物で返るかは未確認（両方受ける作り）。
+- line-secretary の `test/fixtures/obi-cloud-texts.json` は、この時点でまだ無い（K3 が置いたら sha256 を突き合わせる）。
