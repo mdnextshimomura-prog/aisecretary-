@@ -21,7 +21,7 @@ import {
   rejectNoticeText,
   type RejectNotice,
 } from "./cloud-text";
-import { MAX_NOTICES, type TickCtx } from "./cloud-tick";
+import { MAX_NOTICES, type TickCtx } from "./cloud-const";
 
 const GEN_RE = /^(|g\d{1,15}|p[0-9a-f]{8})$/;
 const MESSAGE_ID_RE = /^\d{1,64}$/;

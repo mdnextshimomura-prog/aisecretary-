@@ -25,7 +25,7 @@ import {
   MEMO_SETTLE_MS,
   RETRY_COOLDOWN_MS,
   type TickCtx,
-} from "./cloud-tick";
+} from "./cloud-const";
 
 const MESSAGE_ID_RE = /^\d{1,64}$/;
 /** 知らせの id の報告をあきらめる回数 */

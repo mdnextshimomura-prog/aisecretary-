@@ -3,6 +3,8 @@
  * 回が抜ける・同じ回が2回呼ばれる・前の回と重なる場面と、ログ・応答・控えに出してはいけない値が出ないこと。
  * portal・KV・LINE は偽物（tests/helpers/obi-cloud-fakes.ts）。
  */
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import type { CloudCompletionResult } from "../src/lib/obi/cloud-config";
 import {
   CloudHalt,
@@ -176,6 +178,15 @@ async function main() {
     );
     now += 6_000;
     ok("時計：1秒に満たなければ 0（呼ばない）", c.portalTimeout() === 0);
+  }
+
+  // ---- モジュールの読み込みの向き（互いに読み込まない）
+  {
+    const src = (name: string) => readFileSync(path.join(__dirname, "..", "src", "lib", "obi", name), "utf8");
+    const imports = (name: string) => Array.from(src(name).matchAll(/from "\.\/(cloud-[a-z]+)"/g)).map((m) => m[1]);
+    ok("共有の定数・型（cloud-const.ts）は、値としては何も読み込まない", !/^import (?!type )/m.test(src("cloud-const.ts")), imports("cloud-const.ts").join());
+    ok("cloud-deliver.ts は cloud-tick.ts・cloud-notice.ts を読み込まない", !imports("cloud-deliver.ts").some((m) => m === "cloud-tick" || m === "cloud-notice"), imports("cloud-deliver.ts").join());
+    ok("cloud-notice.ts は cloud-tick.ts を読み込まない", !imports("cloud-notice.ts").includes("cloud-tick"), imports("cloud-notice.ts").join());
   }
 
   // ---- 通し
