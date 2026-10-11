@@ -32,3 +32,6 @@
 - F5（互いに読み込む構造）：済。共有の定数・型・時間の部品を cloud-const.ts に出した（動きは変えていない。cloud-tick.ts からも同じ名前で使える）。
 - F6（文書と写し）：済。`docs/運用.md` に、スイッチを入れる前の確認・もう一度 on にするときの注意・「資料を止めて」はクラウドに効かないこと・`OBI_CLOUD_FIX_GUIDE` は段5で `1`・写しの入れ替えを足した。閲覧ページの写し `tests/fixtures/dtoken-viewer.cjs` を K2 の枝（feature/obi-cloud-viewer 9d6c28e。sha256 b1fe57a7…9389）の版に入れ替え、クラウドの鍵の表でだけ通ることをテストで固定した。
 - 残っている作業：K2 を本番の枝へ取り込んだ後に、写しが取り込んだ後の版と同じバイトかを確かめる（違えば写しと sha256 を入れ替える）。
+
+## 見回りの起こし方の変更（2026-10-11。Vercel の Hobby プランは毎分の cron を受けない）
+- 済。`vercel.json` から見回りの cron を外した（既存の2本だけ＝起点の 3d0d35a と同じ中身）。入口は `POST /api/obi/cloud-tick`・ヘッダ `x-obi-tick-token`（JOB_API_TOKEN から HMAC-SHA256 で導いた小文字16進64桁）。`GET` は 405。`CRON_SECRET` の道は外した。起こすのは portal の worker（毎分）。

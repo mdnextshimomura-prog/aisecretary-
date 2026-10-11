@@ -3,7 +3,7 @@
  * 順番：合言葉 → スイッチ → 共通の設定 →（ここで初めて KV・portal・LINE の実物を組む）→ 見回り。
  * スイッチが off・設定が足りない回は、外への呼び出しを1回もしない。
  */
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { pushLineMessageWithId } from "../line";
 import type { ObiEnv } from "./config";
 import {
@@ -17,16 +17,31 @@ import { createCloudPortal } from "./cloud-portal";
 import { getCloudStore } from "./cloud-store";
 import { CloudHalt, runCloudTick, type CloudCheckpoint, type CloudDeps } from "./cloud-tick";
 
+/** 見回りの入口の合言葉を入れるヘッダ */
+export const TICK_TOKEN_HEADER = "x-obi-tick-token";
+/** 合言葉を導くときの文（版つき。変えるときは、呼ぶ側＝portal と同じ変更で） */
+export const TICK_TOKEN_CONTEXT = "obi-cloud-tick.v1";
+/** これより短い JOB_API_TOKEN からは導かない（誰も通さない） */
+export const TICK_KEY_MIN_LENGTH = 32;
+
 /**
- * Vercel cron の合言葉。CRON_SECRET が空・未設定なら誰も通さない
- * （既存の /api/remind は、未設定だと "Bearer undefined" で通る書き方。ここでは真似しない）。
+ * 見回りの入口の合言葉：HMAC-SHA256(鍵 = JOB_API_TOKEN の UTF-8, 文 = "obi-cloud-tick.v1") の小文字16進64桁。
+ * 呼ぶのは portal（worker が毎分、web を経由してたたく）。portal と aisecretary が既に持っている JOB_API_TOKEN から
+ * 両方が同じ値を導く（新しい環境変数は足さない。JOB_API_TOKEN そのものは、この入口へは送らない）。
+ */
+export function tickTokenFor(jobApiToken: string): string {
+  return createHmac("sha256", Buffer.from(jobApiToken, "utf8")).update(TICK_TOKEN_CONTEXT, "utf8").digest("hex");
+}
+
+/**
+ * 合言葉の確認。JOB_API_TOKEN が無い・32字未満なら誰も通さない。
  * 長さの違いで例外にならないよう、両方の sha256 を取ってから時間の一定な比べ方で比べる。
  */
-export function cronAuthorized(header: string | null, secret: string | undefined): boolean {
-  if (!secret) return false;
+export function tickAuthorized(header: string | null, jobApiToken: string | undefined): boolean {
+  if (typeof jobApiToken !== "string" || jobApiToken.length < TICK_KEY_MIN_LENGTH) return false;
   if (typeof header !== "string") return false;
   const a = createHash("sha256").update(header, "utf8").digest();
-  const b = createHash("sha256").update(`Bearer ${secret}`, "utf8").digest();
+  const b = createHash("sha256").update(tickTokenFor(jobApiToken), "utf8").digest();
   return timingSafeEqual(a, b);
 }
 
@@ -77,13 +92,14 @@ export interface CloudTickResponse {
 }
 
 export async function handleCloudTick(
-  authorization: string | null,
+  /** ヘッダ x-obi-tick-token の値（無ければ null） */
+  tickToken: string | null,
   env: ObiEnv = process.env,
   makeDeps: (shared: CloudSharedConfig, env: ObiEnv) => CloudDeps = realCloudDeps,
   now: () => number = Date.now
 ): Promise<CloudTickResponse> {
   const startedAt = now();
-  if (!cronAuthorized(authorization, env.CRON_SECRET)) return { status: 401, body: { error: "Unauthorized" } };
+  if (!tickAuthorized(tickToken, env.JOB_API_TOKEN)) return { status: 401, body: { error: "Unauthorized" } };
   if (!cloudSwitchOn(env)) return { status: 200, body: { skipped: "off" } };
   const shared = loadCloudSharedConfig(env);
   if (!shared.ok) {

@@ -3,12 +3,14 @@
  * 合言葉 → スイッチ → 共通の設定 →（ここで初めて部品を組む）→ 見回り。
  * 値はどれもテスト用（本物の合言葉・鍵ではない）。
  */
+import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { ObiEnv } from "../src/lib/obi/config";
 import {
   buildCheckpoint,
-  cronAuthorized,
+  tickAuthorized,
+  tickTokenFor,
   handleCloudTick,
 } from "../src/lib/obi/cloud-entry";
 import { CloudHalt, type CloudCheckpoint } from "../src/lib/obi/cloud-tick";
@@ -29,10 +31,13 @@ const ok = (name: string, cond: boolean, d = "") => {
   } else console.log(`✅ ${name}`);
 };
 
-const SECRET = "cron-secret-for-test-0001";
-const GOOD = `Bearer ${SECRET}`;
+// 合言葉は、portal と共有している JOB_API_TOKEN から導く（新しい変数は足さない）。
+// 期待値は、実装を通さずにここで計算する：HMAC-SHA256(鍵 = JOB_API_TOKEN の UTF-8, 文 = "obi-cloud-tick.v1") の小文字16進64桁
+const SECRET = PORTAL_TOKEN;
+const derive = (token: string) =>
+  createHmac("sha256", Buffer.from(token, "utf8")).update("obi-cloud-tick.v1", "utf8").digest("hex");
+const GOOD = derive(SECRET);
 const ENV: ObiEnv = {
-  CRON_SECRET: SECRET,
   OBI_CLOUD_DELIVERY: "1",
   PORTAL_BASE_URL: "https://portal.example.test",
   JOB_API_TOKEN: PORTAL_TOKEN,
@@ -68,40 +73,36 @@ async function captured<T>(
 const root = path.join(__dirname, "..");
 
 async function main() {
-  // ---- 合言葉
-  for (const secret of [undefined, ""]) {
-    for (const header of [
-      "Bearer undefined",
-      "Bearer ",
-      "Bearer",
-      GOOD,
-      "",
-      null,
-    ]) {
-      ok(
-        `合言葉：CRON_SECRET が ${JSON.stringify(secret)}・ヘッダ ${JSON.stringify(header)} → 通さない`,
-        cronAuthorized(header, secret) === false,
-      );
-    }
-  }
-  ok("合言葉：ヘッダが無い → 通さない", cronAuthorized(null, SECRET) === false);
+  // ---- 合言葉（x-obi-tick-token）
+  ok("導き方：HMAC-SHA256(JOB_API_TOKEN, \"obi-cloud-tick.v1\") の小文字16進64桁", tickTokenFor(SECRET) === GOOD && /^[0-9a-f]{64}$/.test(GOOD));
+  ok("導き方：固定の値（鍵 32字の a）", tickTokenFor("a".repeat(32)) === derive("a".repeat(32)) && tickTokenFor("a".repeat(32)) !== GOOD);
+  ok("合言葉：正しい鍵 → 通る", tickAuthorized(GOOD, SECRET) === true);
   for (const header of [
-    `Bearer ${SECRET}x`,
-    "Bearer x",
-    `bearer ${SECRET}`,
-    SECRET,
+    null,
+    "",
+    GOOD.toUpperCase(),
+    GOOD.slice(0, 63),
+    `${GOOD}0`,
     ` ${GOOD}`,
     `${GOOD} `,
-    `Bearer  ${SECRET}`,
-    "",
-    "Bearer ".repeat(5000),
+    `Bearer ${GOOD}`,
+    SECRET, // JOB_API_TOKEN そのもの
+    `Bearer ${SECRET}`,
+    derive(`${SECRET}x`), // 違う鍵から導いた値
+    createHmac("sha256", SECRET).update("obi-cloud-tick.v2").digest("hex"), // 違う文
+    "0".repeat(64),
+    "undefined",
+    "x".repeat(100_000),
   ]) {
-    ok(
-      `合言葉：${JSON.stringify(header).slice(0, 30)} → 通さない（長さが違っても例外にならない）`,
-      cronAuthorized(header, SECRET) === false,
-    );
+    ok(`合言葉：${JSON.stringify(header).slice(0, 24)} → 通さない（長さが違っても例外にならない）`, tickAuthorized(header, SECRET) === false);
   }
-  ok("合言葉：Bearer <正しい値> → 通る", cronAuthorized(GOOD, SECRET) === true);
+  for (const token of [undefined, "", "short", "a".repeat(31)]) {
+    const forged = typeof token === "string" ? derive(token) : derive("");
+    for (const header of [forged, GOOD, "", null]) {
+      ok(`合言葉：JOB_API_TOKEN が ${token === undefined ? "無い" : `${token.length}字`}・ヘッダ ${header === null ? "なし" : header === forged ? "その値から導いた鍵" : header === "" ? "空" : "ほかの鍵"} → 通さない`, tickAuthorized(header, token) === false);
+    }
+  }
+  ok("合言葉：JOB_API_TOKEN が32字ちょうどなら、導いた鍵で通る", tickAuthorized(derive("a".repeat(32)), "a".repeat(32)) === true);
 
   let made = 0;
   const never = () => {
@@ -110,23 +111,18 @@ async function main() {
   };
 
   {
-    const r = await handleCloudTick("Bearer nope", ENV, never);
+    const r = await handleCloudTick(derive(`${SECRET}x`), ENV, never);
     ok(
-      "401：本文は Unauthorized だけ・合言葉の値を含まない",
-      r.status === 401 &&
-        same(r.body, { error: "Unauthorized" }) &&
-        !JSON.stringify(r).includes(SECRET),
+      "401：本文は Unauthorized だけ・鍵も導いた値も含まない",
+      r.status === 401 && same(r.body, { error: "Unauthorized" }) && !JSON.stringify(r).includes(SECRET) && !JSON.stringify(r).includes(GOOD),
     );
-    const r2 = await handleCloudTick(
-      "Bearer undefined",
-      { ...ENV, CRON_SECRET: undefined },
-      never,
-    );
+    const r2 = await handleCloudTick(derive(""), { ...ENV, JOB_API_TOKEN: undefined }, never);
     const r3 = await handleCloudTick(null, ENV, never);
-    ok(
-      "401：CRON_SECRET が無いと Bearer undefined でも通さない・ヘッダなしも通さない",
-      r2.status === 401 && r3.status === 401 && made === 0,
-    );
+    const r4 = await handleCloudTick(derive("a".repeat(31)), { ...ENV, JOB_API_TOKEN: "a".repeat(31) }, never);
+    ok("401：JOB_API_TOKEN が無い・32字未満なら必ず通さない・ヘッダなしも通さない", r2.status === 401 && r3.status === 401 && r4.status === 401 && made === 0);
+    // 前の道（Vercel の cron の Authorization: Bearer <CRON_SECRET>）は外した
+    const r5 = await handleCloudTick("Bearer cron-secret-for-test-0001", { ...ENV, CRON_SECRET: "cron-secret-for-test-0001" }, never);
+    ok("401：CRON_SECRET の Bearer では通らない（その道は外した）", r5.status === 401 && made === 0);
   }
 
   // ---- スイッチ off
@@ -146,7 +142,7 @@ async function main() {
     const r = await handleCloudTick(
       GOOD,
       {
-        CRON_SECRET: SECRET,
+        JOB_API_TOKEN: SECRET,
         PORTAL_BASE_URL: "めちゃくちゃ",
         LINE_GROUP_ID: "x",
       },
@@ -157,7 +153,7 @@ async function main() {
       r.status === 200 && same(r.body, { skipped: "off" }) && made === 0,
     );
     const r2 = await handleCloudTick(
-      "Bearer nope",
+      "0".repeat(64),
       { ...ENV, OBI_CLOUD_DELIVERY: undefined },
       never,
     );
@@ -173,7 +169,6 @@ async function main() {
     "KV_REST_API_URL",
     "KV_REST_API_TOKEN",
     "LINE_CHANNEL_ACCESS_TOKEN",
-    "JOB_API_TOKEN",
     "LINE_GROUP_ID",
   ]) {
     const r = await captured(() =>
@@ -192,23 +187,16 @@ async function main() {
     );
   }
   {
+    // JOB_API_TOKEN の形の違い（空白入り）は、合言葉が通った後の設定の確認で止まる
+    const spaced = `${"a".repeat(20)} ${"b".repeat(20)}`;
     const r = await captured(() =>
-      handleCloudTick(
-        GOOD,
-        {
-          ...ENV,
-          PORTAL_BASE_URL: "http://portal.example.test",
-          JOB_API_TOKEN: "a b",
-        },
-        never,
-      ),
+      handleCloudTick(derive(spaced), { ...ENV, PORTAL_BASE_URL: "http://portal.example.test", JOB_API_TOKEN: spaced }, never),
     );
     ok(
       "共通の設定：形が違う → 値を出さない",
-      same(r.value.body, {
-        skipped: "config",
-        problems: ["PORTAL_BASE_URL", "JOB_API_TOKEN"],
-      }) && !JSON.stringify([r.value, r.out]).includes("portal.example.test"),
+      same(r.value.body, { skipped: "config", problems: ["PORTAL_BASE_URL", "JOB_API_TOKEN"] }) &&
+        !JSON.stringify([r.value, r.out]).includes("portal.example.test") &&
+        !JSON.stringify([r.value, r.out]).includes(spaced),
     );
   }
 
@@ -429,14 +417,8 @@ async function main() {
     const find = (p: string) =>
       vercel.crons.find((c) => c.path === p)?.schedule;
     ok(
-      "vercel.json：cron は3本・既存の2本はそのまま",
-      vercel.crons.length === 3 &&
-        find("/api/remind") === "0 23 * * *" &&
-        find("/api/report") === "0 1 * * *",
-    );
-    ok(
-      "vercel.json：見回りは毎分",
-      find("/api/obi/cloud-tick") === "* * * * *",
+      "vercel.json：cron は既存の2本だけ（見回りは Vercel の cron を使わない。portal の worker が毎分たたく）",
+      vercel.crons.length === 2 && find("/api/remind") === "0 23 * * *" && find("/api/report") === "0 1 * * *" && find("/api/obi/cloud-tick") === undefined,
     );
     const route = readFileSync(
       path.join(root, "src", "app", "api", "obi", "cloud-tick", "route.ts"),
@@ -449,17 +431,20 @@ async function main() {
         /^export const dynamic = "force-dynamic";$/m.test(route),
     );
     ok(
-      "route.ts：GET だけを公開している",
-      /export async function GET\(/.test(route) &&
-        !/export (async )?function (POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b/.test(
-          route,
-        ),
+      "route.ts：見回りを動かすのは POST だけ（ヘッダ x-obi-tick-token を渡す）",
+      /export async function POST\(/.test(route) &&
+        (route.match(/handleCloudTick\(/g) ?? []).length === 1 &&
+        route.includes('req.headers.get("x-obi-tick-token")') &&
+        !/export (async )?function (PUT|PATCH|DELETE|HEAD|OPTIONS)\b/.test(route),
     );
+    const get = /export (?:async )?function GET\([^)]*\)[^{]*\{([\s\S]*?)\n\}/.exec(route);
+    ok("route.ts：GET は 405（見回りを動かさない・Allow: POST）", get !== null && get[1].includes("status: 405") && !get[1].includes("handleCloudTick") && /allow: "POST"/.test(get[1]));
     ok(
-      "route.ts：合言葉を比べない（cloud-entry.ts だけ）・本文もクエリも読まない",
-      !route.includes("CRON_SECRET") &&
-        !/req\.(json|text|formData)\(|searchParams|nextUrl/.test(route),
+      "route.ts：合言葉を比べない（cloud-entry.ts だけ）・本文もクエリも Authorization も読まない",
+      !route.includes("CRON_SECRET") && !route.includes("JOB_API_TOKEN") && !route.includes("authorization") && !/req\.(json|text|formData)\(|searchParams|nextUrl/.test(route),
     );
+    const entry = readFileSync(path.join(root, "src", "lib", "obi", "cloud-entry.ts"), "utf8");
+    ok("cloud-entry.ts：CRON_SECRET を読まない", !/env\.CRON_SECRET|process\.env\.CRON_SECRET/.test(entry));
   }
 
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
