@@ -20,4 +20,5 @@
 ## 残っている確認（決定ではないもの）
 - 本物の portal（K1）・閲覧ページ（K2）・Mac（K3）との通しは未実施（portal は、約束の応答の形どおりに作った偽物）。
 - Vercel の変数の有無（`CRON_SECRET` など）は見ていない。本物の KV で、目次の値・控えが文字列で返るか物で返るかは未確認（両方受ける作り）。
-- line-secretary の `test/fixtures/obi-cloud-texts.json` は、この時点でまだ無い（K3 が置いたら sha256 を突き合わせる）。
+- line-secretary の `test/fixtures/obi-cloud-texts.json` は、本番ツリー（feature/v1）にはまだ無い。K3 の作業ツリー（`.worktrees/obi-cloud-mac`）に置かれた物とは、バイト単位で同じ（sha256 cfe54697…eca4）ことを確かめた。
+- 閲覧ページの検証は、写し（feature/group-obi-viewer 415518b）で通る。K2 の作業中の版（`.worktrees/obi-cloud-viewer` 9d6c28e。クラウドの鍵の表 `cloudPublicKeys`）でも、固定のトークンが通り `originOf` が cloud になることを、読むだけで確かめた（写しは入れ替えていない。K2 を取り込んだ後に、写しとテストの sha256 を入れ替える）。
