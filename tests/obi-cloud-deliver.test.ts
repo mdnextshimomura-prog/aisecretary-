@@ -1214,6 +1214,41 @@ async function main() {
     await run(w);
     ok("目次が読めない → 一覧も予約も attempt も呼ばない", w.portal.calls.length === 0 && hasLog(w, "memo-list-failed"));
   }
+  {
+    // 予約（delivery/claim）が 4xx で断られ続ける依頼にも、not_sent と同じ待ち時間を掛ける
+    const w = world();
+    const refuse = () => w.portal.failNext("claimDelivery", { kind: "rejected", status: 409, code: "CLOUD_NOT_ALLOWED" });
+    refuse();
+    await run(w);
+    ok("予約が 4xx で断られた → 待ち時間を1回数える", retry(w)?.count === 1 && count(w, "claimDelivery") === 1 && hasLog(w, "#J12 claim-skip CLOUD_NOT_ALLOWED"));
+    w.clock.advance(59 * MIN);
+    await run(w);
+    ok("予約が 4xx で断られた後、59分は予約を呼ばない（毎分は呼ばない）", count(w, "claimDelivery") === 1);
+    w.clock.advance(2 * MIN);
+    refuse();
+    await run(w);
+    w.clock.advance(61 * MIN);
+    refuse();
+    await run(w);
+    ok("61分ごとに呼び、3回続いた", count(w, "claimDelivery") === 3 && retry(w)?.count === 3);
+    w.clock.advance(23 * 60 * MIN);
+    await run(w);
+    ok("予約が3回続けて断られた後は、最後から23時間は呼ばない", count(w, "claimDelivery") === 3);
+    w.clock.advance(2 * 60 * MIN);
+    await run(w);
+    ok("25時間で呼び、配れたら数え直す", count(w, "claimDelivery") === 4 && w.portal.job(NO).status === "納品済み" && retry(w) === undefined);
+  }
+  for (const [label, canned] of [
+    ["401", { kind: "rejected", status: 401, code: "UNAUTHORIZED" }],
+    ["403", { kind: "rejected", status: 403, code: "HTTP_403" }],
+    ["届かない", { kind: "unknown", reason: "timeout" }],
+    ["5xx", { kind: "unknown", reason: "http-5xx" }],
+  ] as Array<[string, Parameters<FakeWorld["portal"]["failNext"]>[1]]>) {
+    const w = world();
+    w.portal.failNext("claimDelivery", canned);
+    await run(w);
+    ok(`予約が ${label} → 待ち時間は数えない（依頼のせいではない）`, retry(w) === undefined && count(w, "claimDelivery") === 1);
+  }
   // ---- 絞り込み
   {
     const w = fakeWorld();

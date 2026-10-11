@@ -365,6 +365,12 @@ export async function deliverNew(
     await deps.portal.claimDelivery(no, clock.portalTimeout()),
   );
   if (claim.kind === "rejected") {
+    // その依頼の予約が断られた（4xx）。断られ続ける依頼を毎分呼ばないよう、not_sent と同じ待ち時間を数える
+    // （60分・3回続いたら24時間）。401・403 は依頼のせいではない（鍵・手前の断り）ので数えない
+    const sha256 = row.artifactSha256;
+    if (!isAuth(claim) && typeof sha256 === "string" && /^[0-9a-f]{64}$/.test(sha256)) {
+      await countRetry(ctx, no, sha256);
+    }
     say(ctx, no, `claim-skip ${claim.code}`);
     return;
   }

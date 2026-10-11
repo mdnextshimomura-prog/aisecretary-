@@ -28,3 +28,4 @@
 - F1（時間の線）：済。知らせは notice/claim を取る前に30秒の線を見る。完成は、新しい予約の入口・再開・完成の一覧を、送る線（40秒）にそろえた。
 - F2（portal の fetch）：済。redirect: "manual"。3xx は「届かない」と同じ（unknown）。
 - F3（delivery/attempt の 403）：済。401 と同じ（控えを残す・その回の portal の仕事を打ち切る）。期限5分前に not_sent で完成へ戻る。
+- F4（予約が断られ続ける依頼）：済。delivery/claim が 4xx（401・403 を除く）で断られたら、not_sent と同じ待ち時間を数える。
