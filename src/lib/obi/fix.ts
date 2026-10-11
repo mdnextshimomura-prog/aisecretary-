@@ -58,10 +58,11 @@ export const OBI_FIX_PORTAL_PHASE_END_MS = 17_000;
  * 17秒 −（KV 1秒＋resolve 6秒＋fix の最小 2秒＋返事の印 1秒）
  */
 export const OBI_FIX_LATE_START_MS = 7_000;
-const KV_OP_MS = 1_000;
-const RESOLVE_MS = 6_000;
-const FIX_MS = 8_000;
-const FIX_MIN_MS = 2_000;
+// 下の4つと kvBounded・sayOnce・portalOpts・errName・Said・unknownTarget は、差し戻しの対応の選択（reject.ts）も使う（同じ時間の予算・同じ返事の印）
+export const KV_OP_MS = 1_000;
+export const RESOLVE_MS = 6_000;
+export const FIX_MS = 8_000;
+export const FIX_MIN_MS = 2_000;
 const REPLY_TIMEOUT_MS = 4_000;
 const PUSH_TIMEOUT_MS = 4_000;
 const PAGE_MIN = 1;
@@ -181,7 +182,7 @@ export interface ObiFixStageHooks {
 }
 
 /** KV の操作を時間の上限つきで待つ（上限を過ぎたら例外）。until（時刻）を越えては待たない */
-async function kvBounded<T>(deps: ObiFixDeps, until: number, op: () => Promise<T>): Promise<T> {
+export async function kvBounded<T>(deps: ObiFixDeps, until: number, op: () => Promise<T>): Promise<T> {
   const ms = Math.min(deps.kvTimeoutMs ?? KV_OP_MS, until - deps.now());
   if (ms <= 0) throw new Error("KV を待つ時間が残っていない");
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -198,9 +199,9 @@ async function kvBounded<T>(deps: ObiFixDeps, until: number, op: () => Promise<T
 }
 
 /** 例外はログに名前だけを出す（文には、かぎ＝message.id などが入りうる） */
-const errName = (err: unknown) => (err as { name?: string })?.name ?? "error";
+export const errName = (err: unknown) => (err as { name?: string })?.name ?? "error";
 
-function portalOpts(input: Pick<ObiFixInput, "config">, deps: ObiFixDeps, timeoutMs: number) {
+export function portalOpts(input: Pick<ObiFixInput, "config">, deps: ObiFixDeps, timeoutMs: number) {
   return {
     fetchImpl: deps.fetchImpl,
     baseUrl: input.config.portalBaseUrl,
@@ -233,13 +234,13 @@ async function send(groupId: string, deps: ObiFixDeps, text: string): Promise<Sa
   return { delivery, sentId, undelivered: delivery === "push-failed" && pushRejected };
 }
 
-type Said = { delivery: ReplyDelivery | "skipped"; sentId: string | null; undelivered: boolean };
+export type Said = { delivery: ReplyDelivery | "skipped"; sentId: string | null; undelivered: boolean };
 
 /**
  * 印（NX・8日）を置けたときだけ送る。既にある・置けない（KV の障害・時間切れ）ときは送らない
  * （二重の返事を避ける。例外は外へ投げない）。
  */
-async function sayOnce(
+export async function sayOnce(
   input: { messageId: string; startedAt: number },
   groupId: string,
   deps: ObiFixDeps,
@@ -276,7 +277,7 @@ export async function replyObiFixStopped(
  * LINE の Webhook の再送は本番で無効なので、503 で待たず、初回から今までの流れへ渡す（返事も予約もしない。Z3）。
  * 帯替えの知らせへの引用だったとしても、ここでは訂正として扱われない（「#J12 3ページ 2」の形なら通る）
  */
-function unknownTarget(why: string): FixTarget {
+export function unknownTarget(why: string): FixTarget {
   console.error("帯替えの訂正：引用先を確かめられない（今までの流れへ）:", why);
   return { kind: "rest", reason: "resolve-unknown" };
 }
