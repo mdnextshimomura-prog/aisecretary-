@@ -149,7 +149,9 @@ export async function locateObiChoiceWord(input: ObiChoiceWordInput, deps: ObiFi
   }
   if (r.kind === "rejected") {
     // NOT_FOUND＝タスクの確認など別のものへの「OK」。それ以外の断り（FIX_DISABLED など）も、帯替えの知らせ・依頼と確かめられていない
-    if (r.code !== "NOT_FOUND") console.error("帯替えの対応の選択：引けない（今までの流れへ）:", sanitizeForReply(r.code));
+    //   FIX_DISABLED（「番号で直す」を止めているあいだ）は、ふつうの「OK」の引用のたびに出る＝異常ではないので log。ほかの code は error
+    if (r.code === "FIX_DISABLED") console.log("帯替えの対応の選択：引けない（今までの流れへ）:", r.code);
+    else if (r.code !== "NOT_FOUND") console.error("帯替えの対応の選択：引けない（今までの流れへ）:", sanitizeForReply(r.code));
     return { kind: "rest", reason: r.code };
   }
   return unknownTarget(r.kind === "unknown" ? r.reason : "unreachable");

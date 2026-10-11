@@ -53,10 +53,13 @@ AbortSignal.timeout = (ms: number) => {
 
 // コンソールに出たものを控える（message.id・groupId が出ていないことを確かめる）
 const logged: string[] = [];
+// logged と同じ並びで、出した段階（log／error）
+const loggedLevels: Array<"log" | "error"> = [];
 for (const level of ["log", "error"] as const) {
   const real = console[level].bind(console);
   console[level] = (...args: unknown[]) => {
     logged.push(args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    loggedLevels.push(level);
     real(...args);
   };
 }
@@ -259,6 +262,24 @@ async function main() {
       const t = await locateObiChoiceWord(wordInput(w, text, { quotedMessageId: quoted }), deps(w));
       ok(`引けない・確かめられない（${name}）の「${text}」：返事も印もなしで今までの流れへ`, t.kind === "rest" && silent(w) && paths(w) === RESOLVE, JSON.stringify(t));
     }
+  }
+  for (const [code, status, level] of [
+    // 「番号で直す」を止めているあいだ（スイッチ off）は、ふつうの「OK」の引用のたびに出る＝異常ではないので log
+    ["FIX_DISABLED", 503, "log"],
+    // ほかの断りは error のまま
+    ["INVALID_REQUEST", 400, "error"],
+    ["UNAUTHORIZED", 401, "error"],
+  ] as Array<[string, number, "log" | "error"]>) {
+    const w = world();
+    w.resolve = () => json(status, { code });
+    const from = logged.length;
+    const t = await locateObiChoiceWord(wordInput(w, "OK", { quotedMessageId: QUOTED }), deps(w));
+    const lines = logged.slice(from).map((l, k) => [loggedLevels[from + k], l] as const).filter(([, l]) => l.includes("引けない（今までの流れへ）"));
+    ok(
+      `引けない（${code}）：ログは1行・段階は ${level}`,
+      t.kind === "rest" && lines.length === 1 && lines[0][0] === level && lines[0][1].includes(code),
+      JSON.stringify(lines),
+    );
   }
   {
     const w = world();
