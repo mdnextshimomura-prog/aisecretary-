@@ -268,7 +268,7 @@ async function main() {
       "形に合わない言葉（引用つき）",
       textEvent(MSG, "2番直して", { quoted: NOTICE }),
     ],
-    ["既存の承認の形（#J12 OK）", textEvent(MSG, "#J12 OK")],
+    ["既存の差し戻しの形（#J12 直す）", textEvent(MSG, "#J12 直す")],
     ["6 以上", textEvent(MSG, "#J12 6")],
     ["1通に複数", textEvent(MSG, "#J12 3ページ 1 2")],
   ] as Array<[string, ObiLineEvent]>) {
@@ -280,16 +280,34 @@ async function main() {
       JSON.stringify({ sent: w.sent.length, kv: w.kv }),
     );
   }
-  for (const kind of ["reject", "something-new"]) {
-    // 選択肢の知らせ（reject）への番号は、対応の選択（設計 2026-10-11）。この枝で扱うようにするのは次のタスク（tests/obi-reject-webhook.test.ts）。
-    // 知らない種類の知らせへの引用は、訂正としても選択としても扱わない
+  {
+    // 既存の承認の形「#J12 OK」：グループでは今までどおり、今までの流れへ（返事も予約もしない）。
+    // 変わったのは、依頼が確認待ち（差し戻しの選択肢の設計 2026-10-11）かを確かめるために resolve を1回呼ぶことだけ
+    //（確認待ちのときの動きは tests/obi-reject-webhook.test.ts）
     const w = world();
-    w.resolve = () => json(200, { ...RESOLVED, artifactSha256: "", fixable: "unavailable", closable: "unavailable", kind, phase: "choose", choiceGen: 41, messageGen: 40, choices: [1, 3, 4] });
+    const ev = textEvent(MSG, "#J12 OK");
+    const r = await dispatchObiEvents([ev], deps(w));
+    ok(
+      "今までの流れへ：既存の承認の形（#J12 OK。確認待ちでない依頼）。返事も予約も KV もなし・resolve を1回だけ",
+      r.rest.length === 1 && r.rest[0] === ev && !r.needsRetry && urls(w) === RESOLVE &&
+        w.kv.length === 0 && w.replies.length === 0 && w.pushes.length === 0 && w.reserved.length === 0,
+      JSON.stringify({ urls: urls(w), kv: w.kv }),
+    );
+  }
+  {
+    // 知らない種類の知らせへの引用は、訂正としても選択としても扱わない（選択肢の知らせ・確認の知らせは tests/obi-reject-webhook.test.ts）
+    const w = world();
+    w.resolve = () => json(200, { ...RESOLVED, kind: "something-new", phase: "choose" });
     const ev = textEvent(MSG, "2", { quoted: NOTICE });
     const r = await dispatchObiEvents([ev], deps(w));
     ok(
-      `引用先が完成の知らせではない（kind: ${kind}）：訂正として扱わない（fix を呼ばない）`,
-      !r.needsRetry && !urls(w).includes(FIX) && !texts(w).some((t) => t.includes("直しを受け付けました")),
+      "引用先が知らない種類の知らせ：訂正として扱わず、今までの流れへそのまま渡す（返事も予約もしない・fix を呼ばない）",
+      r.rest.length === 1 &&
+        r.rest[0] === ev &&
+        !r.needsRetry &&
+        w.replies.length === 0 &&
+        w.reserved.length === 0 &&
+        urls(w) === RESOLVE,
       JSON.stringify({ sent: w.sent.length, kv: w.kv }),
     );
   }

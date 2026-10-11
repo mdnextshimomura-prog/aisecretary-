@@ -10,6 +10,10 @@
  *     text で、本文の全体が訂正の形に合い、「#J つき」か「引用先が帯替えの知らせ・自分の聞き返し」と
  *     確かめられたときだけ、ここで最後まで扱う（今までの流れには渡さない）。確かめられるまでは
  *     今までの流れの順番・動きを変えない
+ *   - 差し戻しの対応の選択（設計 2026-10-11 の E12）も、同じ枝（tryObiFix）で見る。番号（1〜4・0）に加えて、
+ *     言葉の返事（「OK」「9」「#J4 OK」「#J4 9」）を読む。何の返事かは portal の resolve の答え（引用先の知らせの種類 kind・
+ *     依頼の状態 phase）で決め、選択肢の知らせ・確認の知らせ・確認待ちの依頼と確かめられたときだけ、ここで最後まで扱う。
+ *     グループで普通に飛び交う「OK」「1」を横取りしない：確かめられない・帯替えの知らせでないものは、返事をせず今までの流れへ
  *   - それ以外は、順番を変えずに今までの流れへ（rest）
  *
  * 予約・完了・解放の扱いは route.ts の今までのイベントと同じ考え方：
@@ -25,6 +29,8 @@ import { classifyObiEntry, loadObiConfig, shouldRecordObiPdf, type ObiEnv } from
 import { recordObiPdf, type ObiStore } from "./memo";
 import { runObiIntake, OBI_MESSAGES } from "./intake";
 import { parseFixBody } from "./fix-parse";
+import { parseChoiceWord } from "./reject-parse";
+import { locateObiChoiceWord, replyObiRejectInterrupted, runObiReject, type ObiRejectInput } from "./reject";
 import {
   locateObiFix,
   replyObiFixInterrupted,
@@ -254,20 +260,33 @@ async function completeFixEvent(deps: ObiEventDeps, messageId: string): Promise<
  *     引用の形は、予約を外して今までの流れへ渡す
  *   - fix を呼んだ後・答えの前の例外：結果不明と同じ返事をして済みにする
  * ログに message.id・userId・groupId は出さない（段階と結果の code だけ。AA4）。
+ *
+ * 差し戻しの対応の選択（設計 2026-10-11 の E12）も、ここで同じ決まりで扱う（503 を返さない・認可は /reject の前・
+ * portal は1通につき resolve 1回＋fix か reject のどちらか1回まで）：
+ *   - 引用つきの番号：locateObiFix が引用先の種類で分ける（選択肢の知らせの 1〜4 → 選択／確認の知らせの 0 → 完成／ほか → 今までどおり）
+ *   - 引用つきの「OK」「9」、「#J4 OK」「#J4 9」：locateObiChoiceWord が resolve で確かめる（確認の知らせ・確認待ちのときだけ）
+ *   - 「#J4 2」：runObiFix が認可 → resolve の後、依頼が選択待ちなら to-choice を返す → 同じ予約の中で runObiReject
+ * **引用つきの「OK」「9」は、営業部のグループで resolve を1回呼ぶ**（引用先が帯替えの知らせでなければ NOT_FOUND → 今までの流れへ。
+ * portal が応答しないあいだ、そういう返信が今までの流れへ渡るのが最大約6秒遅れる。「OK」の引用リプライは数字より多いので、
+ * 呼ぶ条件を絞ってある：営業部のグループ・引用あり・本文の全体が「OK／ok／オーケー／9／9番」・開始+7秒より前・設定が揃っている）。
  */
 async function tryObiFix(event: ObiLineEvent, deps: ObiEventDeps): Promise<"not-fix" | "handled"> {
   const message = event.message!;
   // 見るのは営業部のグループの text だけ
   if (event.source.type !== "group" || !event.source.groupId) return "not-fix";
-  const body = parseFixBody(stripMentionText(message));
-  if (!body) return "not-fix";
+  const text = stripMentionText(message);
+  const body = parseFixBody(text);
+  // 言葉の返事（「OK」「9」「#J4 OK」「#J4 9」）。番号の形に合わなかったときだけ読む（差し戻しの対応の選択。設計 2026-10-11 の E12）
+  const word = body ? null : parseChoiceWord(text);
+  if (!body && !word) return "not-fix";
+  const formNo = body ? body.no : word ? word.no : null;
   const loaded = loadObiConfig(deps.env);
   // LINE_GROUP_ID が無い・形が違う：営業部がどこか分からないので何もしない（帯替えの依頼と同じ）
   const groupId = loaded.ok ? loaded.config.groupId : loaded.groupId;
   if (!groupId || groupId !== event.source.groupId) return "not-fix";
   const quoted = typeof message.quotedMessageId === "string" ? message.quotedMessageId : null;
-  // #J も引用も無い番号だけの発言は、訂正として扱わない
-  if (body.no === null && !quoted) return "not-fix";
+  // #J も引用も無い番号だけ・言葉だけの発言は、訂正・選択として扱わない（portal も KV も呼ばない）
+  if (formNo === null && !quoted) return "not-fix";
   if (!/^\d{1,64}$/.test(message.id)) return "not-fix";
 
   const fixDeps: ObiFixDeps = {
@@ -279,43 +298,47 @@ async function tryObiFix(event: ObiLineEvent, deps: ObiEventDeps): Promise<"not-
   };
 
   let input: ObiFixInput | null = null;
-  let target: Extract<FixTarget, { kind: "target" }> | null = null;
+  let rejectInput: ObiRejectInput | null = null;
+  let target: Exclude<FixTarget, { kind: "rest" }> | null = null;
   if (loaded.ok) {
     // 残り時間が足りない（同じ Webhook に先の処理があった。開始+7秒より後）：portal は呼ばない（Z11・AA1）。
     //   引用の形：確かめる時間が無い＝引用先を確かめられないのと同じ。予約せず今までの流れへ
     //   #J つき  ：下で認可の後、「portal に届きません…」を1通につき1回返して済みにする（runObiFix の late）
+    //   言葉の返事：#J つきでも、依頼の状態を resolve で確かめるまで扱いを決められない＝引用の形と同じ。予約せず今までの流れへ
     const late = deps.now() - deps.startedAt > OBI_FIX_LATE_START_MS;
-    if (late && body.no === null) {
-      console.error("帯替えの訂正：残り時間が足りない（引用の形。今までの流れへ）");
+    if (late && (formNo === null || word)) {
+      console.error("帯替えの訂正：残り時間が足りない（引用の形・言葉の返事。今までの流れへ）");
       return "not-fix";
     }
     if (late) console.error("帯替えの訂正：残り時間が足りない（#J つき。portal を呼ばずに返す）");
     // 許可リストとの照合はここだけ。通っても通らなくても、userId はこの先へ渡さない
     const userId = event.source.userId;
     const allowed = Boolean(userId) && loaded.config.allowedUserIds.includes(userId as string);
-    input = {
-      messageId: message.id,
-      body,
-      quotedMessageId: quoted,
-      allowed,
-      startedAt: deps.startedAt,
-      config: loaded.config,
-      late,
-    };
+    rejectInput = { messageId: message.id, allowed, startedAt: deps.startedAt, config: loaded.config };
     let located: FixTarget;
     try {
-      located = await locateObiFix(input, fixDeps);
+      if (body) {
+        input = { ...rejectInput, body, quotedMessageId: quoted, late };
+        located = await locateObiFix(input, fixDeps);
+      } else if (word) {
+        // 言葉の返事：resolve を1回（KV は呼ばない）。確認の知らせ・確認待ちの依頼と分かったときだけ対象になる
+        located = await locateObiChoiceWord(
+          { word, quotedMessageId: quoted, startedAt: deps.startedAt, config: loaded.config },
+          fixDeps
+        );
+      } else {
+        return "not-fix";
+      }
     } catch (err) {
       console.error("帯替えの訂正：対象を決める途中の例外（今までの流れへ）:", errName(err));
       return "not-fix";
     }
     if (located.kind === "rest") return "not-fix";
-    // 差し戻しの対応の選択（kind: "choice"）は、まだここでは扱わない（Task 11 で足す）。それまでは今までどおり、今までの流れへ
-    if (located.kind === "choice") return "not-fix";
     target = located;
   } else {
-    // 設定が足りない：引用の形は確かめようが無いので今までの流れへ。#J つきにだけ「止めています」
-    if (body.no === null) return "not-fix";
+    // 設定が足りない：引用の形は確かめようが無いので今までの流れへ。#J つきの番号にだけ「止めています」。
+    //   言葉の返事（「#J4 OK」「#J4 9」）は、今までどおり今までの流れへ（確認待ちかどうかを確かめようが無い）
+    if (formNo === null || word) return "not-fix";
     console.error("帯替えの訂正を止めています（設定の不足・不正）:", loaded.problems.join(","));
   }
 
@@ -330,31 +353,45 @@ async function tryObiFix(event: ObiLineEvent, deps: ObiEventDeps): Promise<"not-
   let fixCalled = false;
   let committed = false;
   let toRest = false;
+  // いま扱っているのが対応の選択か（例外で止まったときの返事の文を選ぶため）
+  let choosing = target?.kind === "choice";
+  const staged = {
+    ...fixDeps,
+    // portal の fix・reject を呼ぶ直前
+    onFixCalled: () => {
+      fixCalled = true;
+    },
+    // portal の fix・reject の結果が確かになった（はっきり答えた・送っていないことが確か。AB1）
+    onCommitted: () => {
+      committed = true;
+    },
+  };
   try {
-    if (input && target) {
-      await runObiFix(input, target, {
-        ...fixDeps,
-        onFixCalled: () => {
-          fixCalled = true;
-        },
-        // portal の fix の結果が確かになった（はっきり答えた・送っていないことが確か。AB1）
-        onCommitted: () => {
-          committed = true;
-        },
-      });
+    if (rejectInput && target?.kind === "choice") {
+      // 選択肢の知らせ・確認の知らせへの引用、「#J4 OK」「#J4 9」：認可 → /reject → 返事
+      await runObiReject(rejectInput, target, staged);
+    } else if (input && rejectInput && target?.kind === "target") {
+      const r = await runObiFix(input, target, staged);
+      // 「#J4 2」で、依頼が対応の選択待ちだった（認可と resolve は済んでいる）：同じ予約の中で /reject → 返事
+      if (r.outcome === "to-choice" && r.plan) {
+        choosing = true;
+        await runObiReject(rejectInput, { no: target.no, plan: r.plan }, staged);
+      }
     } else {
       await replyObiFixStopped({ messageId: message.id, groupId, startedAt: deps.startedAt }, fixDeps);
     }
   } catch (err) {
     const stage = committed ? "after-fix" : fixCalled ? "fix-called" : "before-fix";
     console.error("帯替えの訂正の処理中の例外:", stage, errName(err));
-    if (input && target && !committed) {
+    if (rejectInput && target && !committed) {
       if (fixCalled) {
-        // fix を呼んだ後・答えの前：結果不明と同じ（「もう一度送ってください」とは言わない）
-        await replyObiFixInterrupted(input, "fix-called", fixDeps);
+        // fix・reject を呼んだ後・答えの前：結果不明と同じ（「もう一度送ってください」とは言わない）
+        if (choosing) await replyObiRejectInterrupted(rejectInput, "called", fixDeps);
+        else await replyObiFixInterrupted(rejectInput, "fix-called", fixDeps);
       } else if (target.via === "number") {
-        // fix を呼ぶ前（#J つき）：何も変わっていないので、送り直してよい
-        await replyObiFixInterrupted(input, "before-fix", fixDeps);
+        // fix・reject を呼ぶ前（#J つき）：何も変わっていないので、送り直してよい
+        if (choosing) await replyObiRejectInterrupted(rejectInput, "before-call", fixDeps);
+        else await replyObiFixInterrupted(rejectInput, "before-fix", fixDeps);
       } else {
         // fix を呼ぶ前（引用の形）：今までの流れへ渡す
         toRest = true;
