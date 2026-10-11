@@ -5,6 +5,8 @@
 import { runObiReject, OBI_REJECT_MESSAGES, type ObiRejectInput, type ObiRejectTarget } from "../src/lib/obi/reject";
 import type { ObiFixDeps, ObiFixStageHooks } from "../src/lib/obi/fix";
 import type { ChoicePlan } from "../src/lib/obi/reject-plan";
+import { OBI_FIX_MESSAGES } from "../src/lib/obi/fix";
+import { OBI_MESSAGES } from "../src/lib/obi/intake";
 import { createMemoryObiStore, type ObiStore } from "../src/lib/obi/memo";
 import type { ObiConfig } from "../src/lib/obi/config";
 import type { ReplyOutcome } from "../src/lib/line";
@@ -286,6 +288,57 @@ async function main() {
     };
     const r = await runObiReject(input(w), target(choose(1)), deps(w));
     ok("返事の印を置けない：返事は出さない（例外にしない）", r.outcome === "queued" && w.replies.length === 0 && w.pushes.length === 0 && w.committed === 1);
+  }
+
+  // ══ portal がはっきり断った（設計 E14 の表） ══
+  ok(
+    "文：断り（古い知らせ・受付を止めている・出していない番号・OK が通らない）",
+    OBI_REJECT_MESSAGES.stale === "その知らせは古くなっています。新しい知らせに返信してください" &&
+      OBI_REJECT_MESSAGES.disabled === "いま受付を止めています。portal の依頼ボックスを確認してください" &&
+      OBI_REJECT_MESSAGES.notOffered(4, [1, 3, 4]) === "#J4 で選べるのは 1・3・4 です" &&
+      OBI_REJECT_MESSAGES.gateFailed(4) === "#J4 は LINE では完成にできません。担当が確認します",
+  );
+  for (const [name, plan, status, body, text] of [
+    ["CHOICE_DISABLED（スイッチ off・切った後の再送。U2）", choose(1), 503, { code: "CHOICE_DISABLED" }, OBI_REJECT_MESSAGES.disabled],
+    ["CHOICE_STALE", choose(1), 409, { code: "CHOICE_STALE" }, OBI_REJECT_MESSAGES.stale],
+    ["CHOICE_UNAVAILABLE", APPROVE, 409, { code: "CHOICE_UNAVAILABLE" }, OBI_REJECT_MESSAGES.unavailable(4)],
+    // 確認待ちでない「#J4 9」を portal に確かめたとき（V7）：受付を止めていれば固定の文、そうでなければ「いまその操作ができない状態です」
+    ["CHOICE_DISABLED（「9」。選択肢のスイッチが off）", RECHOOSE, 503, { code: "CHOICE_DISABLED" }, OBI_REJECT_MESSAGES.disabled],
+    ["CHOICE_UNAVAILABLE（「9」。確認待ちでない）", RECHOOSE, 409, { code: "CHOICE_UNAVAILABLE" }, OBI_REJECT_MESSAGES.unavailable(4)],
+    ["CHOICE_NOT_OFFERED", choose(2), 409, { code: "CHOICE_NOT_OFFERED", choices: [1, 3, 4] }, "#J4 で選べるのは 1・3・4 です"],
+    ["CHOICE_NOT_OFFERED（番号が1つ）", choose(2), 409, { code: "CHOICE_NOT_OFFERED", choices: [3] }, "#J4 で選べるのは 3 です"],
+    ["CHOICE_NOT_OFFERED（番号が付いていない）", choose(2), 409, { code: "CHOICE_NOT_OFFERED" }, OBI_REJECT_MESSAGES.unavailable(4)],
+    ["CHOICE_NOT_OFFERED（番号が空）", choose(2), 409, { code: "CHOICE_NOT_OFFERED", choices: [] }, OBI_REJECT_MESSAGES.unavailable(4)],
+    ["GATE_FAILED（residue）", APPROVE, 409, { code: "GATE_FAILED", reason: "residue" }, OBI_REJECT_MESSAGES.gateFailed(4)],
+    ["GATE_FAILED（needs_review）", APPROVE, 409, { code: "GATE_FAILED", reason: "needs_review" }, OBI_REJECT_MESSAGES.gateFailed(4)],
+    ["GATE_FAILED（理由なし）", APPROVE, 409, { code: "GATE_FAILED" }, OBI_REJECT_MESSAGES.gateFailed(4)],
+    ["OBI_BUSY（番号つき）", choose(1), 409, { code: "OBI_BUSY", busyJobNo: 11 }, OBI_MESSAGES.busy(11)],
+    ["OBI_BUSY（番号なし）", choose(1), 409, { code: "OBI_BUSY" }, OBI_MESSAGES.busy()],
+    ["INTAKE_STOPPED", choose(1), 503, { code: "INTAKE_STOPPED" }, OBI_MESSAGES.stopped],
+    ["NOT_FOUND", choose(1), 404, { code: "NOT_FOUND" }, OBI_FIX_MESSAGES.notFound(4)],
+    ["CHOICE_MISMATCH", choose(1), 409, { code: "CHOICE_MISMATCH" }, OBI_REJECT_MESSAGES.rejected("CHOICE_MISMATCH")],
+    ["INVALID_REQUEST", choose(1), 400, { code: "INVALID_REQUEST" }, OBI_REJECT_MESSAGES.rejected("INVALID_REQUEST")],
+    ["UNAUTHORIZED", choose(1), 401, { code: "UNAUTHORIZED" }, OBI_REJECT_MESSAGES.rejected("UNAUTHORIZED")],
+  ] as Array<[string, ChoicePlan, number, Record<string, unknown>, string]>) {
+    const w = world();
+    w.reject = () => json(status, { message: "x", ...body });
+    const r = await runObiReject(input(w), target(plan), deps(w));
+    ok(`断り ${name}：決まった文を1回`, r.outcome === "refused" && texts(w).join("|") === text, JSON.stringify(texts(w)));
+    ok(`断り ${name}：/reject は1回だけ・はっきりした答えなので済み（結果不明にしない）`, paths(w) === REJECT && w.committed === 1 && !w.kv.some((k) => k[1].startsWith("obi-fix-pending-notified:")));
+  }
+  {
+    // code は portal の本文から来る：返事にもログにも、整えてから出す（改行・見えない文字を除く）
+    const w = world();
+    w.reject = () => json(409, { code: "BAD\nCODE\u200b" + "X".repeat(80) });
+    await runObiReject(input(w), target(choose(1)), deps(w));
+    ok("知らない code：改行を除き、長さを切った形で返す", texts(w).length === 1 && !texts(w)[0].includes("\n") && texts(w)[0].length < 90, JSON.stringify(texts(w)));
+  }
+  {
+    const w = world();
+    w.reject = () => json(409, { code: "GATE_FAILED", reason: "residue" });
+    const from = logged.length;
+    await runObiReject(input(w), target(APPROVE), deps(w));
+    ok("GATE_FAILED：理由の符号はログにだけ出る（文には出さない）", logged.slice(from).some((l) => l.includes("GATE_FAILED:residue")) && !texts(w)[0].includes("residue"), JSON.stringify(logged.slice(from)));
   }
 
   // ══ ログ ══

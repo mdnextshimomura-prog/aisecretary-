@@ -21,9 +21,11 @@
  * message.id・userId・groupId・本文・リンク・例外の文は出さない。
  */
 import type { ObiFixDeps, ObiFixInput, ObiFixStageHooks } from "./fix";
-import { FIX_MS, KV_OP_MS, OBI_FIX_PORTAL_PHASE_END_MS, portalOpts, sayOnce, type Said } from "./fix";
+import { FIX_MS, KV_OP_MS, OBI_FIX_MESSAGES, OBI_FIX_PORTAL_PHASE_END_MS, portalOpts, sayOnce, type Said } from "./fix";
+import { OBI_MESSAGES } from "./intake";
 import { postReject, type RejectOutcome } from "./portal";
 import type { ChoicePlan } from "./reject-plan";
+import { sanitizeForReply } from "./sanitize";
 
 /** 文は設計 2026-10-11 の E14「aisecretary がその場で返す」の表のとおり（unreachable・unknown・rejected は「番号で直す」の文に合わせたもの） */
 export const OBI_REJECT_MESSAGES = {
@@ -33,8 +35,15 @@ export const OBI_REJECT_MESSAGES = {
   canceled: (no: number) => `#J${no} を取り消しました`,
   approved: (no: number) => `#J${no} を完成にしました。納品の準備ができしだい、ここにリンクを送ります`,
   reopened: (no: number) => `#J${no} 対応を選び直せます。次の知らせに番号で返信してください`,
+  /** 出していない番号（CHOICE_NOT_OFFERED）。choices は portal の断りに付いてきた「今出している番号」 */
+  notOffered: (no: number, choices: number[]) => `#J${no} で選べるのは ${choices.join("・")} です`,
+  /** OK が関門を通らない（GATE_FAILED）。理由の符号（residue など）は文に出さない */
+  gateFailed: (no: number) => `#J${no} は LINE では完成にできません。担当が確認します`,
   forbidden: "対応の選択は、帯替えを依頼できる方からお願いします",
+  stale: "その知らせは古くなっています。新しい知らせに返信してください",
   unavailable: (no: number) => `#J${no} はいまその操作ができない状態です`,
+  /** 受付を止めている（CHOICE_DISABLED。スイッチ off・スイッチを切った後の再送。裁定 U2 の固定の文。受付番号は付けない） */
+  disabled: "いま受付を止めています。portal の依頼ボックスを確認してください",
   rejected: (code: string) => `対応を受け付けられませんでした（${code}）。担当に声をかけてください`,
   /** /reject の結果が分からない。「もう一度送ってください」とは書かない（送り直すと別の発言になり、二重の選択になりうる） */
   unknown:
@@ -69,6 +78,34 @@ function acceptedMessage(no: number, o: Extract<RejectOutcome, { kind: "accepted
   if (o.result === "canceled") return OBI_REJECT_MESSAGES.canceled(no);
   if (o.result === "approved") return OBI_REJECT_MESSAGES.approved(no);
   return OBI_REJECT_MESSAGES.reopened(no);
+}
+
+/** portal の断り（/reject）→ 文（設計 E14 の表） */
+function rejectionMessage(no: number, o: Extract<RejectOutcome, { kind: "rejected" }>): string {
+  switch (o.code) {
+    case "CHOICE_DISABLED":
+      return OBI_REJECT_MESSAGES.disabled;
+    case "CHOICE_STALE":
+      return OBI_REJECT_MESSAGES.stale;
+    case "CHOICE_UNAVAILABLE":
+      return OBI_REJECT_MESSAGES.unavailable(no);
+    case "CHOICE_NOT_OFFERED":
+      // 今出している番号が付いていない・1つも無い：並べる番号が無いので「いまその操作ができない状態です」
+      return o.choices && o.choices.length > 0
+        ? OBI_REJECT_MESSAGES.notOffered(no, o.choices)
+        : OBI_REJECT_MESSAGES.unavailable(no);
+    case "GATE_FAILED":
+      return OBI_REJECT_MESSAGES.gateFailed(no);
+    case "OBI_BUSY":
+      return OBI_MESSAGES.busy(o.busyJobNo);
+    case "INTAKE_STOPPED":
+      return OBI_MESSAGES.stopped;
+    case "NOT_FOUND":
+      return OBI_FIX_MESSAGES.notFound(no);
+    default:
+      // CHOICE_MISMATCH・INVALID_REQUEST・UNAUTHORIZED など（本来起きない）。code は portal の本文から来るので整えてから出す
+      return OBI_REJECT_MESSAGES.rejected(sanitizeForReply(o.code));
+  }
 }
 
 /**
@@ -117,7 +154,9 @@ export async function runObiReject(
   }
   if (o.kind === "rejected") {
     deps.onCommitted();
-    return refuse(o.code, OBI_REJECT_MESSAGES.rejected(o.code));
+    // GATE_FAILED の理由の符号はログにだけ出す（整えてから。改行・見えない文字を除き、40文字まで）
+    const why = o.code === "GATE_FAILED" && o.reason ? `:${sanitizeForReply(o.reason)}` : "";
+    return refuse(`${sanitizeForReply(o.code)}${why}`, rejectionMessage(no, o));
   }
   log(`unknown:${o.kind}`, await sayOnce(input, groupId, deps, `obi-fix-pending-notified:${messageId}`, OBI_REJECT_MESSAGES.unknown));
   return { outcome: "unknown" };
