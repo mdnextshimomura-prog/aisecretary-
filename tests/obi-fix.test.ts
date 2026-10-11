@@ -516,6 +516,10 @@ async function main() {
         closable: "ok",
         kind: "completion",
         phase: "fix",
+        rejectRound: 0,
+        choiceGen: 0,
+        messageGen: 0,
+        choices: [],
       },
     };
     const r = await runObiFix(
@@ -684,6 +688,10 @@ async function main() {
         closable: "ok",
         kind: "completion",
         phase: "fix",
+        rejectRound: 0,
+        choiceGen: 0,
+        messageGen: 0,
+        choices: [],
       },
     };
     const r = await runObiFix(

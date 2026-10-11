@@ -65,6 +65,28 @@ async function main() {
     r = await postFixResolve({ groupId: G, no: 12 }, opts(json(200, { ...RESOLVED, phase: null })));
     ok("resolve：phase が文字列でなければ不明（形の違う応答）", r.kind === "unknown");
 
+    // 差し戻しの選択肢の4項目（設計 2026-10-11 の E12・約束の resolve）。無い portal は 0・0・null・[] とみなす
+    r = await postFixResolve({ groupId: G, no: 12 }, opts(json(200, RESOLVED)));
+    ok("resolve：rejectRound・choiceGen・messageGen・choices が無ければ 0・0・null・[]", r.kind === "accepted" && r.resolved.rejectRound === 0 && r.resolved.choiceGen === 0 && r.resolved.messageGen === null && r.resolved.choices.length === 0, JSON.stringify(r));
+    r = await postFixResolve({ groupId: G, quotedMessageId: "600000000000000150" }, opts(json(200, { ...RESOLVED, artifactSha256: "", kind: "reject", phase: "choose", rejectRound: 1, choiceGen: 41, messageGen: 40, choices: [1, 3, 4] })));
+    ok("resolve：4項目をそのまま返す（差し戻しの知らせへの引用）", r.kind === "accepted" && r.resolved.kind === "reject" && r.resolved.phase === "choose" && r.resolved.rejectRound === 1 && r.resolved.choiceGen === 41 && r.resolved.messageGen === 40 && r.resolved.choices.join() === "1,3,4", JSON.stringify(r));
+    r = await postFixResolve({ groupId: G, no: 12 }, opts(json(200, { ...RESOLVED, phase: "review", choiceGen: 41, messageGen: null, choices: [] })));
+    ok("resolve：番号で引いたときの messageGen は null のまま", r.kind === "accepted" && r.resolved.choiceGen === 41 && r.resolved.messageGen === null && r.resolved.choices.length === 0, JSON.stringify(r));
+    r = await postFixResolve({ groupId: G, no: 12 }, opts(json(200, { ...RESOLVED, choiceGen: 0, messageGen: 0, rejectRound: 0 })));
+    ok("resolve：世代 0 は正しい値（null と取り違えない）", r.kind === "accepted" && r.resolved.choiceGen === 0 && r.resolved.messageGen === 0, JSON.stringify(r));
+    for (const [name, body] of [
+      ["rejectRound が負", { ...RESOLVED, rejectRound: -1 }],
+      ["choiceGen が文字列", { ...RESOLVED, choiceGen: "41" }],
+      ["choiceGen が小数", { ...RESOLVED, choiceGen: 1.5 }],
+      ["messageGen が文字列", { ...RESOLVED, messageGen: "40" }],
+      ["choices が配列でない", { ...RESOLVED, choices: "1,3,4" }],
+      ["choices に 1〜4 でない数", { ...RESOLVED, choices: [1, 5] }],
+      ["choices に文字列", { ...RESOLVED, choices: ["1"] }],
+    ] as Array<[string, unknown]>) {
+      r = await postFixResolve({ groupId: G, no: 12 }, opts(json(200, body)));
+      ok(`resolve：差し戻しの選択肢の項目の形が違えば不明（${name}）`, r.kind === "unknown", JSON.stringify(r));
+    }
+
     for (const [name, body] of [
       ["no が数でない", { ...RESOLVED, no: "12" }],
       ["sha256 の形が違う", { ...RESOLVED, artifactSha256: "abc" }],

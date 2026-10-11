@@ -177,8 +177,19 @@ export interface FixResolved {
    * 「番号で直す」の返事として扱わない（約束の「差し戻しの選択肢のための土台」P1・P4）
    */
   kind: string;
-  /** 今の依頼が待っている返事の種類。「番号で直す」は "fix"。項目の無い portal は "fix" とみなす（P1・P4。いまは読むだけで、分岐には使わない） */
+  /**
+   * 今の依頼が待っている返事の種類。"fix"＝番号で直す／"choose"＝差し戻しの対応の選択待ち／"review"＝確認の知らせへの OK 待ち
+   * （差し戻しの選択肢の設計 2026-10-11 の E12）。項目の無い portal は "fix" とみなす
+   */
   phase: string;
+  /** 始めた作り直しの回数（0〜3）。項目の無い portal は 0。古さの比べには使わない（ログ用） */
+  rejectRound: number;
+  /** 今の選択肢の世代（0 以上）。#J つきの選択・OK・9 の expectGen にそのまま渡す。項目の無い portal は 0 */
+  choiceGen: number;
+  /** 引用先の知らせの世代。引用で引いたときだけ数が入る（番号で引いたとき・項目の無い portal は null）。引用の返信の expectGen に渡す */
+  messageGen: number | null;
+  /** 今出せる番号（1〜4 の昇順。phase が "choose" のときだけ中身がある）。項目の無い portal は []。文には使わない（断りの choices を使う） */
+  choices: number[];
 }
 
 export type FixResolveRequest =
@@ -229,6 +240,17 @@ async function postJson(path: string, payload: Record<string, unknown>, opts: Po
 }
 
 const isPositiveInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+const isCount = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0;
+/** 選択の番号の並び（1〜4 の整数だけ）。形が違えば null */
+function parseChoices(v: unknown): number[] | null {
+  if (!Array.isArray(v)) return null;
+  const out: number[] = [];
+  for (const x of v) {
+    if (typeof x !== "number" || !Number.isInteger(x) || x < 1 || x > 4) return null;
+    out.push(x);
+  }
+  return out;
+}
 
 /**
  * 断りの共通の分け方。503 は、portal がはっきり止めていると答えた code（stopCodes）のときだけ断り。
@@ -271,7 +293,12 @@ export async function postFixResolve(req: FixResolveRequest, opts: PortalOpts): 
       FIX_ESTIMATES.has(b.closable) &&
       // kind・phase は、あれば文字列（無い portal は今までどおり受ける。文字列でなければ形の違う応答）
       (b.kind === undefined || typeof b.kind === "string") &&
-      (b.phase === undefined || typeof b.phase === "string")
+      (b.phase === undefined || typeof b.phase === "string") &&
+      // 差し戻しの選択肢の4項目も、あれば決まった形（無い portal は 0・0・null・[] とみなす。形が違えば、形の違う応答）
+      (b.rejectRound === undefined || isCount(b.rejectRound)) &&
+      (b.choiceGen === undefined || isCount(b.choiceGen)) &&
+      (b.messageGen === undefined || b.messageGen === null || isCount(b.messageGen)) &&
+      (b.choices === undefined || parseChoices(b.choices) !== null)
     ) {
       return {
         kind: "accepted",
@@ -284,6 +311,10 @@ export async function postFixResolve(req: FixResolveRequest, opts: PortalOpts): 
           closable: b.closable as FixEstimate,
           kind: typeof b.kind === "string" ? b.kind : "",
           phase: typeof b.phase === "string" ? b.phase : "fix",
+          rejectRound: isCount(b.rejectRound) ? b.rejectRound : 0,
+          choiceGen: isCount(b.choiceGen) ? b.choiceGen : 0,
+          messageGen: isCount(b.messageGen) ? b.messageGen : null,
+          choices: parseChoices(b.choices) ?? [],
         },
       };
     }
