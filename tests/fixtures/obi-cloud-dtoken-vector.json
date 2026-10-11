@@ -1,0 +1,13 @@
+{
+  "note": "テスト専用。本番の鍵ではない。秘密鍵は seedText の sha256（32バイト）を種にして、テストの中で組み立てる",
+  "seedText": "obi-cloud-dtoken test vector v1 (not a secret)",
+  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAjfcy9aX+Muor70ZmdYwrg6VM9aHCtZrATyiJHrpOsCY=\n-----END PUBLIC KEY-----\n",
+  "kid": "cloud-0000-00",
+  "nowMs": 1791504000000,
+  "jti": "0123456789abcdef",
+  "no": 12,
+  "sha256": "abababababababababababababababababababababababababababababababab",
+  "groupId": "C0123456789abcdef0123456789abcdef",
+  "payloadJson": "{\"v\":1,\"kid\":\"cloud-0000-00\",\"jti\":\"0123456789abcdef\",\"s\":\"job-12\",\"f\":\"portal:job-12\",\"h\":\"abababababababababababababababababababababababababababababababab\",\"i\":1791504000,\"e\":1791590400,\"aud\":\"line-group\",\"g\":\"C0123456789abcdef0123456789abcdef\"}",
+  "token": "eyJ2IjoxLCJraWQiOiJjbG91ZC0wMDAwLTAwIiwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZiIsInMiOiJqb2ItMTIiLCJmIjoicG9ydGFsOmpvYi0xMiIsImgiOiJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiIiwiaSI6MTc5MTUwNDAwMCwiZSI6MTc5MTU5MDQwMCwiYXVkIjoibGluZS1ncm91cCIsImciOiJDMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ.9Kqvxrxqyg_AYOyuU8ug73UDIivwE8ne1wr2S_RD75ILVOLbEzkRY7tUZCbeXY8qjOQdBkLe15XKX_QCO2ehDw"
+}
