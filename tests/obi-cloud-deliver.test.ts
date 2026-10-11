@@ -165,7 +165,8 @@ async function main() {
         lines.length === 5,
     );
     const v = viewer.verify(tokenOf(w.line.texts[0]), {
-      publicKeys: { [KID]: TEST_PUBLIC_PEM },
+      publicKeys: {},
+      cloudPublicKeys: { [KID]: TEST_PUBLIC_PEM },
       now: w.clock.now(),
     });
     ok(
@@ -848,7 +849,7 @@ async function main() {
     ok("再開（prepared）：文は、止まらなかった回と同じ（トークンの所を除く）", withoutToken(w.line.texts[0]) === withoutToken(control.line.texts[0]), w.line.texts[0]);
     const lines = w.line.texts[0].split("\n");
     ok("再開（prepared）：1行目は整えた物件名・要確認と帯の外の行は控えの facts から", lines[0] === `#J12 帯替えが完成しました（${CLEAN_PROPERTY}）` && lines[1].startsWith("⚠ 要確認 2ページ") && lines[2].startsWith("帯の外の他社の文字を1か所消しました（3ページ）"));
-    const v = viewer.verify(tokenOf(w.line.texts[0]), { publicKeys: { [KID]: TEST_PUBLIC_PEM }, now: w.clock.now() });
+    const v = viewer.verify(tokenOf(w.line.texts[0]), { publicKeys: {}, cloudPublicKeys: { [KID]: TEST_PUBLIC_PEM }, now: w.clock.now() });
     ok("再開（prepared）：トークンは再開の回に作っている", v.ok === true && v.payload.i === Math.floor(w.clock.now() / 1000));
     ok("再開（prepared）：完成の一覧より前に再開している", w.journal.findIndex((e) => e === "line:push") < w.journal.findIndex((e) => e.startsWith("portal:listJobs")));
   }

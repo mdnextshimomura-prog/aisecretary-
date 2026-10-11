@@ -122,45 +122,23 @@ function main() {
     );
   }
 
-  // 閲覧ページの検証
+  // 閲覧ページの検証（K2 の版：クラウドの鍵は、今までの表とは別の表 cloudPublicKeys で受ける）
   const keys = { [vec.kid]: vec.publicKeyPem };
-  const v = viewer.verify(t.token, { publicKeys: keys, now: vec.nowMs });
-  ok(
-    "閲覧ページの verify を通る",
-    v.ok === true,
-    JSON.stringify(v.reason ?? ""),
-  );
+  const asCloud = (now: number, cloudPublicKeys: Record<string, string> = keys) =>
+    viewer.verify(t.token, { publicKeys: {}, cloudPublicKeys, now });
+  const v = asCloud(vec.nowMs);
+  ok("閲覧ページの verify を通る（クラウドの鍵の表に入れたとき）", v.ok === true, JSON.stringify(v.reason ?? ""));
+  ok("閲覧ページがクラウドのリンクと読む（originOf）", v.ok === true && viewer.originOf(v.payload, keys).kind === "cloud");
   const aud = viewer.audienceOf(v.payload);
-  ok(
-    "閲覧ページがグループあてと読む",
-    aud.kind === "line-group" && aud.g === vec.groupId,
-  );
-  ok(
-    "期限の直前は通る",
-    viewer.verify(t.token, {
-      publicKeys: keys,
-      now: vec.nowMs + 86_400_000 - 1000,
-    }).ok === true,
-  );
-  ok(
-    "期限ちょうどは expired",
-    viewer.verify(t.token, { publicKeys: keys, now: vec.nowMs + 86_400_000 })
-      .reason === "expired",
-  );
-  ok(
-    "別の鍵の公開鍵では bad-signature",
-    viewer.verify(t.token, {
-      publicKeys: { [vec.kid]: pubPem(fresh) },
-      now: vec.nowMs,
-    }).reason === "bad-signature",
-  );
-  ok(
-    "kid が表に無ければ unknown-kid",
-    viewer.verify(t.token, {
-      publicKeys: { "cloud-9999-99": vec.publicKeyPem },
-      now: vec.nowMs,
-    }).reason === "unknown-kid",
-  );
+  ok("閲覧ページがグループあてと読む", aud.kind === "line-group" && aud.g === vec.groupId);
+  const asMac = viewer.verify(t.token, { publicKeys: keys, now: vec.nowMs });
+  ok("今までの鍵の表に入れると断られる（bad-origin）", asMac.ok === false && asMac.reason === "bad-origin", JSON.stringify(asMac.reason ?? ""));
+  ok("今までの表にも入っていて、クラウドの表が空でも断られる", viewer.verify(t.token, { publicKeys: keys, cloudPublicKeys: {}, now: vec.nowMs }).reason === "bad-origin");
+  ok("どちらの表にも無ければ unknown-kid", viewer.verify(t.token, { publicKeys: {}, now: vec.nowMs }).reason === "unknown-kid");
+  ok("期限の直前は通る", asCloud(vec.nowMs + 86_400_000 - 1000).ok === true);
+  ok("期限ちょうどは expired", asCloud(vec.nowMs + 86_400_000).reason === "expired");
+  ok("別の鍵の公開鍵では bad-signature", asCloud(vec.nowMs, { [vec.kid]: pubPem(fresh) }).reason === "bad-signature");
+  ok("kid が表に無ければ unknown-kid", asCloud(vec.nowMs, { "cloud-9999-99": vec.publicKeyPem }).reason === "unknown-kid");
 
   // 約束の検査（K2 がクラウドの kid に掛ける検査）
   const p = v.payload as Record<string, unknown>;
@@ -268,7 +246,7 @@ function main() {
       "https://liff.line.me/1234567890-AbCdEfGh?t=TOKEN",
   );
 
-  // 写しを勝手に直していないこと（元：Mac＝feature/v1 5cb9d62、閲覧ページ＝feature/group-obi-viewer 415518b）
+  // 写しを勝手に直していないこと（元：Mac＝feature/v1 の src/dtoken.js〔5cb9d62 から 7ff13e4 まで同じ〕、閲覧ページ＝K2 の枝 feature/obi-cloud-viewer 9d6c28e の delivery/lib/dtoken.js）
   ok(
     "写し：dtoken-mac.cjs の sha256",
     sha("dtoken-mac.cjs") ===
@@ -277,7 +255,7 @@ function main() {
   ok(
     "写し：dtoken-viewer.cjs の sha256",
     sha("dtoken-viewer.cjs") ===
-      "7dd8836a7f7f2c51846ca7584d8fdd542c5e20c2cf285e895459e62c7b1ba9a4",
+      "b1fe57a71878ac063a5c14691d49252cb3f33b800af3ddb89f08cd79e6f09389",
   );
 
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
