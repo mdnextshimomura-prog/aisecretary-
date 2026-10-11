@@ -45,7 +45,7 @@ import type { FixBody, FixCode } from "./fix-parse";
 import { OBI_MESSAGES } from "./intake";
 import { OBI_FIX_KEY_TTL_SECONDS, type ObiStore } from "./memo";
 import { postFix, postFixResolve, type FixEstimate, type FixOutcome, type FixResolved } from "./portal";
-import { planQuotedNumber, type ChoicePlan } from "./reject-plan";
+import { planNumberedNumber, planQuotedNumber, type ChoicePlan } from "./reject-plan";
 import { sanitizeForReply } from "./sanitize";
 
 /** Webhook の開始からの締め切り */
@@ -177,7 +177,14 @@ export interface ObiFixResult {
     | "forbidden"
     | "refused"
     /** fix を呼んだが、結果が分からない（「確かめられませんでした」を1回返した） */
-    | "unknown";
+    | "unknown"
+    /**
+     * 「#J4 2」で、依頼が対応の選択待ち（phase: choose）だった：訂正ではなく選択（設計 2026-10-11 の E12）。
+     * ここでは返事も fix もしていない（認可と resolve だけ済んでいる）。呼ぶ側が、同じ予約の中で reject.ts の runObiReject に plan を渡す
+     */
+    | "to-choice";
+  /** to-choice のときだけ */
+  plan?: ChoicePlan;
 }
 
 /** runObiFix が呼ぶ側へ段階を知らせる（例外で止まったときの扱いを、呼ぶ側が決めるため） */
@@ -453,6 +460,16 @@ export async function runObiFix(
     // 結果不明でも fix は呼ばない（resolve は何も書き換えないので、何も変わっていないのが確か）
     if (r.kind !== "accepted") return refuse(`resolve-${r.kind}`, OBI_FIX_MESSAGES.unreachable);
     resolved = r.resolved;
+    // 「#J4 2」：依頼が対応の選択待ち（phase: choose）で、ページなし・向きなし・1〜4 なら、訂正ではなく選択。
+    //   それ以外（phase が fix・review、ページつき、0・5）は、今までどおり下へ（review のときは fix が FIX_UNAVAILABLE を返す。T1）。
+    //   聞き返しへの引用（via: ask）は訂正の続きなので、ここでは見ない
+    if (target.via === "number") {
+      const plan = planNumberedNumber(input.body, resolved);
+      if (plan) {
+        console.log("帯替えの訂正:", `#J${no}`, `code=${code}`, "to-choice");
+        return { outcome: "to-choice", plan };
+      }
+    }
   }
 
   // 完成品がまだ無い依頼（resolve の sha256 が空文字）：fix は呼ばない（expectSha256 に渡すものが無い）。

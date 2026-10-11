@@ -1620,6 +1620,63 @@ async function main() {
       JSON.stringify(t2),
     );
   }
+  // ══ 「#J12 2」は、依頼の状態（resolve の phase）で、訂正か対応の選択かが決まる（設計 2026-10-11 の E12） ══
+  const CHOOSING = { ...RESOLVED, artifactSha256: "", fixable: "unavailable", closable: "unavailable", kind: "", phase: "choose", rejectRound: 0, choiceGen: 41, messageGen: null, choices: [1, 3, 4] };
+  for (const [text, choice] of [["#J12 1", 1], ["#J12 2", 2], ["#J12 3", 3], ["#J12 4", 4]] as Array<[string, number]>) {
+    const w = world();
+    w.resolve = () => json(200, CHOOSING);
+    const r = await runObiFix(input(w, text), byNumber, deps(w));
+    ok(
+      `選択待ち（phase: choose）の「${text}」：選択として呼ぶ側へ返す（世代は今のもの）`,
+      r.outcome === "to-choice" && JSON.stringify(r.plan) === JSON.stringify({ action: "choose", choice, expectGen: 41, expectSha256: "" }),
+      JSON.stringify(r),
+    );
+    ok(
+      `選択待ちの「${text}」：ここでは返事も fix も印もしない（resolve だけ）`,
+      paths(w) === RESOLVE && w.replies.length === 0 && w.pushes.length === 0 && w.kv.length === 0 && w.fixCalled === 0 && w.committed === 0,
+      JSON.stringify(w.kv),
+    );
+  }
+  {
+    const w = world();
+    w.resolve = () => json(200, CHOOSING);
+    const r = await runObiFix(input(w, "#J12 2", { allowed: false }), byNumber, deps(w));
+    ok(
+      "選択待ちの「#J12 2」でも、認可が先（許可されていなければ portal を呼ばない）",
+      r.outcome === "forbidden" && w.portal.length === 0 && texts(w).join("|") === OBI_MESSAGES.fixForbidden,
+      JSON.stringify(texts(w)),
+    );
+  }
+  {
+    // ページつき・0・5 は、選択待ちでも選択ではない（今までどおり「番号で直す」の続きへ）
+    const w = world();
+    w.resolve = () => json(200, CHOOSING);
+    const r = await runObiFix(input(w, "#J12 3ページ 2"), byNumber, deps(w));
+    ok("選択待ちの「#J12 3ページ 2」：選択にしない（完成品が無いので、見込みどおり「番号では直せません」）", r.outcome === "refused" && texts(w).join("|") === OBI_FIX_MESSAGES.unavailable(12) && paths(w) === RESOLVE, JSON.stringify(texts(w)));
+    const w2 = world();
+    w2.resolve = () => json(200, CHOOSING);
+    const r2 = await runObiFix(input(w2, "#J12 0"), byNumber, deps(w2));
+    ok("選択待ちの「#J12 0」：選択にしない", r2.outcome === "refused" && texts(w2).join("|") === OBI_FIX_MESSAGES.unavailable(12), JSON.stringify(texts(w2)));
+  }
+  for (const phase of ["fix", "review"]) {
+    // phase が fix・review の「#J12 2」は今までどおり（review のときは見込みが unavailable＝「番号では直せません」。T1）
+    const w = world();
+    w.resolve = () => json(200, { ...RESOLVED, phase, ...(phase === "review" ? { fixable: "unavailable", closable: "unavailable" } : {}) });
+    const r = await runObiFix(input(w, "#J12 2"), byNumber, deps(w));
+    ok(
+      `phase: ${phase} の「#J12 2」：選択にしない（今までどおり）`,
+      r.outcome !== "to-choice" && texts(w).join("|") === (phase === "review" ? OBI_FIX_MESSAGES.unavailable(12) : OBI_FIX_MESSAGES.askPage(12)),
+      JSON.stringify(texts(w)),
+    );
+  }
+  {
+    // 聞き返しへの引用（via: ask）は訂正の続き：選択待ちでも選択にしない
+    const w = world();
+    w.resolve = () => json(200, CHOOSING);
+    const r = await runObiFix(input(w, "2", { quotedMessageId: QUOTED }), { kind: "target", via: "ask", no: 12, resolved: null }, deps(w));
+    ok("聞き返しへの引用の「2」：選択待ちでも選択にしない", r.outcome !== "to-choice", JSON.stringify(r));
+  }
+
   // ══ 聞き返しが届いていないことが確かなときだけ、依頼ごとの印を消す（L2） ══
   {
     // reply をはっきり断られ（4xx）、push もはっきり断られた（4xx）：届いていないのが確か
