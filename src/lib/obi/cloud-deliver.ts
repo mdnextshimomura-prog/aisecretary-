@@ -265,13 +265,16 @@ export async function sendPrepared(
     const retryLater =
       at.kind === "unknown" ||
       at.code === "WRITE_CONFLICT" ||
-      at.status === 401;
+      at.status === 401 ||
+      at.status === 403;
     if (retryLater) {
-      // この回は送らない。控えは attempt-requested のまま（次の回に attempt をやり直す）
+      // この回は送らない。控えは attempt-requested のまま（次の回に attempt をやり直す）。
+      // 401・403（portal の手前で断られている）も控えを残す：消すと、予約の期限まで配り直せなくなる。
+      // 残しておけば、期限まで5分を切った回に not_sent で完成へ戻り、自動で配り直せる
       say(ctx, no, `attempt-unknown ${signOf(at)}`);
       return;
     }
-    // CLAIM_MISMATCH（その予約はもう自分のものではない）・404・400・403・そのほかの 4xx：控えを消すだけ。
+    // CLAIM_MISMATCH（その予約はもう自分のものではない）・404・400・そのほかの 4xx：控えを消すだけ。
     // 送らない・結果も報告しない・待ち時間も数えない
     if (await dropMemo(ctx, no)) say(ctx, no, `memo-stale ${signOf(at)}`);
     return;

@@ -320,6 +320,8 @@ async function main() {
       ["500", { kind: "unknown", reason: "http-5xx" }],
       ["時間切れ", { kind: "unknown", reason: "timeout" }],
       ["401", { kind: "rejected", status: 401, code: "UNAUTHORIZED" }],
+      // 403 も 401 と同じ（控えを残す・打ち切る）。消すと、期限まで配り直せなくなる
+      ["403", { kind: "rejected", status: 403, code: "HTTP_403" }],
       ["形の違う応答", { kind: "unknown", reason: "invalid-body" }],
     ];
     for (const [label, canned] of keep) {
@@ -335,9 +337,9 @@ async function main() {
           k.portal.job(NO).status === "納品中",
         String(stage(k)),
       );
-      if (label === "401")
+      if (label === "401" || label === "403")
         ok(
-          "attempt：401 → その回の portal の仕事を打ち切る",
+          `attempt：${label} → その回の portal の仕事を打ち切る`,
           kctx.state.portalStopped === true,
         );
       else
@@ -349,7 +351,6 @@ async function main() {
     for (const [status, code] of [
       [404, "NOT_FOUND"],
       [400, "INVALID_REQUEST"],
-      [403, "HTTP_403"],
     ] as const) {
       const d = world();
       const dctx = d.ctx();
@@ -363,8 +364,8 @@ async function main() {
           hasLog(d, `#J12 memo-stale ${code}`),
       );
       ok(
-        `attempt：${status} → 打ち切り${status === 403 ? "る" : "らない"}`,
-        dctx.state.portalStopped === (status === 403),
+        `attempt：${status} → 打ち切らない`,
+        dctx.state.portalStopped === false,
       );
     }
     const m = world();
@@ -906,6 +907,7 @@ async function main() {
       ["5xx", { kind: "unknown", reason: "http-5xx" }],
       ["形の違う応答", { kind: "unknown", reason: "invalid-body" }],
       ["401", { kind: "rejected", status: 401, code: "UNAUTHORIZED" }],
+      ["403", { kind: "rejected", status: 403, code: "HTTP_403" }],
       ["WRITE_CONFLICT", { kind: "rejected", status: 409, code: "WRITE_CONFLICT" }],
     ];
     for (const [label, canned] of cases) {
@@ -929,6 +931,18 @@ async function main() {
     w.clock.advance(2 * MIN);
     await run(w);
     ok("…期限まで5分を切ったら not_sent・config", lastResult(w)?.outcome === "not_sent" && lastResult(w)?.reason === "config" && w.portal.job(NO).status === "完成" && w.line.texts.length === 0);
+  }
+  {
+    // 403 が続いても控えは残り、期限まで5分を切ったら not_sent で完成へ戻る（自動で配り直せる）
+    const w = await haltedWorld("completion-prepared");
+    w.clock.advance(2 * MIN);
+    w.portal.calls.length = 0;
+    w.portal.failNext("attemptDelivery", { kind: "rejected", status: 403, code: "HTTP_403" });
+    const ctx = await run(w);
+    ok("再開で attempt が 403 → 控えを残す（消さない）・その回の portal の仕事を打ち切る（一覧も呼ばない）", stage(w) === "attempt-requested" && ctx.state.portalStopped && count(w, "listJobs") === 0 && w.line.texts.length === 0 && hasLog(w, "#J12 attempt-unknown HTTP_403"));
+    w.clock.advance(40 * MIN);
+    await run(w);
+    ok("…403 のまま期限が近づいたら、not_sent・config で完成へ戻る", lastResult(w)?.outcome === "not_sent" && lastResult(w)?.reason === "config" && w.portal.job(NO).status === "完成" && w.line.texts.length === 0);
   }
   // ---- 競合
   {
@@ -965,14 +979,14 @@ async function main() {
     ok("人が完成へ戻しただけ → 古い控えでは送らず、同じ回に新しい予約で1回だけ配る", w.line.texts.length === 1 && w.portal.job(NO).status === "納品済み" && w.portal.issuedClaimIds.length === 2 && hasLog(w, "#J12 memo-stale CLAIM_MISMATCH"));
     ok("…attempt は2回（古い claimId は断られ、新しい claimId が通る）", count(w, "attemptDelivery") === 2 && (w.portal.callsOf("attemptDelivery")[1].args as { claimId: string }).claimId === w.portal.issuedClaimIds[1]);
   }
-  for (const [status, code] of [[404, "NOT_FOUND"], [400, "INVALID_REQUEST"], [403, "HTTP_403"]] as const) {
+  for (const [status, code] of [[404, "NOT_FOUND"], [400, "INVALID_REQUEST"]] as const) {
     const w = await haltedWorld("completion-prepared");
     w.clock.advance(2 * MIN);
     w.portal.calls.length = 0;
     w.portal.failNext("attemptDelivery", { kind: "rejected", status, code });
     const ctx = await run(w);
     ok(`再開で attempt が ${status} → 控えを消すだけ・push 0回・結果の報告なし`, w.store.rawJob(NO) === null && w.line.texts.length === 0 && count(w, "reportDeliveryResult") === 0);
-    ok(`再開で attempt が ${status} → ${status === 403 ? "その回の portal の仕事を打ち切る（一覧も呼ばない）" : "打ち切らない"}`, ctx.state.portalStopped === (status === 403) && (count(w, "listJobs") === 0) === (status === 403));
+    ok(`再開で attempt が ${status} → 打ち切らない`, ctx.state.portalStopped === false && count(w, "listJobs") === 1);
   }
   {
     const w = await haltedWorld("completion-prepared");
