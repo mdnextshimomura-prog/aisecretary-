@@ -406,7 +406,7 @@ export interface FakePortal extends CloudPortal {
   /** 次の1回だけ、その答えを返す。applied: true なら、portal の側は受けた上で、その答えを返す */
   failNext(op: PortalOp, canned: Canned): void;
   /** 呼ばれるたびに動かす（時間の予算の試験で、時計を進める） */
-  onCall: (() => void) | null;
+  onCall: ((op: PortalOp, no: number | null) => void) | null;
   calls: Array<{ op: PortalOp; no: number | null; args: unknown }>;
   callsOf(
     op: PortalOp,
@@ -514,7 +514,7 @@ export function fakePortal(
       no,
       args: args === undefined ? null : JSON.parse(JSON.stringify(args)),
     });
-    self.onCall?.();
+    self.onCall?.(op, no);
     const c = canned.get(op)?.shift();
     let result: PortalCall<T>;
     if (c) {
