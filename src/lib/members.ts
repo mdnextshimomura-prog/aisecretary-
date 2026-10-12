@@ -27,6 +27,8 @@ export interface Member {
   email: string | null;
   active: boolean; // 在籍
   external: boolean; // 社外
+  /** Notion のユーザー ID（名簿の「Notionユーザー」）。未登録の人は null */
+  notionUserId: string | null;
 }
 
 // Notionへの往復をメッセージごとに行うと遅くなるため短時間だけ持つ。
@@ -91,6 +93,9 @@ export async function loadMembers(): Promise<Member[]> {
       email: (props["メール"] as { email: string | null } | undefined)?.email ?? null,
       active: sel("在籍") !== "退職",
       external: sel("区分") === "社外",
+      notionUserId:
+        (props["Notionユーザー"] as { people: Array<{ id: string }> } | undefined)
+          ?.people?.[0]?.id ?? null,
     };
   });
 

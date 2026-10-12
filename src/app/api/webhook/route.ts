@@ -105,6 +105,10 @@ import {
 } from "@/lib/task-status";
 import { statusDeps } from "@/lib/task-status-wire";
 import {
+  recordAfterCreate,
+  recordAssigneeChange,
+} from "@/lib/task-record-wire";
+import {
   buildDigest,
   candidatesEnabled,
   isCandidateListRequest,
@@ -560,6 +564,14 @@ async function registerTaskFromText(
     return "failed";
   }
   await completeMessage(sourceMessageId, pageId).catch(() => undefined);
+  // 誰が頼んだか・どこから来たか・どの案件か（スイッチが off なら何もしない。失敗しても止めない）
+  await recordAfterCreate(pageId, {
+    senderId,
+    groupId,
+    assignee: parsed.assignee,
+    assigneeUserId: parsed.assigneeUserId,
+    propertyKey: parsed.propertyKey,
+  });
 
   // 通常経路と同じ初動確認をかける。ここを飛ばすと、曖昧確認メニュー経由の
   // 依頼だけ聞き返しが働かず、同じ「これ買いたい」でも挙動が変わってしまう。
@@ -1181,6 +1193,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               // 後付けの担当者指定も名簿の正式氏名に寄せる（登録時と同じ扱いにする）
               const c = await canonicalAssignee(m.userId ?? null, name);
               await updateTaskAssignee(task.id, c.name ?? name, c.userId);
+              await recordAssigneeChange(task.id, c.name ?? name, c.userId);
               markCommitted();
               await sendLineMessage(
                 replyToken,
@@ -1437,6 +1450,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               `・内容を人の目で確認し、種別・担当・期日を設定してください。`,
             ]).catch(() => undefined);
             await completeMessage(event.message.id, pageId).catch(() => undefined);
+            await recordAfterCreate(pageId, {
+              senderId: source.userId,
+              groupId: source.groupId,
+              assignee: null,
+              assigneeUserId: null,
+              propertyKey: null,
+            });
           } catch (e2) {
             console.error("停止中の控え登録にも失敗:", e2);
           }
@@ -1595,6 +1615,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 登録済みを確定させる。以後の再送はここで止まり、二重登録にならない。
       await completeMessage(event.message.id, pageId).catch(() => undefined);
       markCommitted();
+      // 誰が頼んだか・どこから来たか・どの案件か（スイッチが off なら何もしない。失敗しても止めない）
+      await recordAfterCreate(pageId, {
+        senderId: source.userId,
+        groupId: source.groupId,
+        assignee: parsed.assignee,
+        assigneeUserId: parsed.assigneeUserId,
+        propertyKey: parsed.propertyKey,
+      });
       if (parsed.assignmentReason) {
         await appendTaskNote(pageId, [
           `🤖 自動割当：${parsed.assignee ?? "未割当"}`,
