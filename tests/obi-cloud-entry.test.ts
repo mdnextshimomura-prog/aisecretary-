@@ -417,8 +417,9 @@ async function main() {
     const find = (p: string) =>
       vercel.crons.find((c) => c.path === p)?.schedule;
     ok(
-      "vercel.json：cron は既存の2本だけ（見回りは Vercel の cron を使わない。portal の worker が毎分たたく）",
-      vercel.crons.length === 2 && find("/api/remind") === "0 23 * * *" && find("/api/report") === "0 1 * * *" && find("/api/obi/cloud-tick") === undefined,
+      "vercel.json：cron は決まった3本だけ（見回りは Vercel の cron を使わない。portal の worker が毎分たたく）",
+      // 3本目は、タスクの候補を17時台に聞く入口（2026-10-12。日に1回なので Hobby プランの cron で足りる）
+      vercel.crons.length === 3 && find("/api/remind") === "0 23 * * *" && find("/api/report") === "0 1 * * *" && find("/api/candidates-ask") === "0 8 * * *" && find("/api/obi/cloud-tick") === undefined,
     );
     const route = readFileSync(
       path.join(root, "src", "app", "api", "obi", "cloud-tick", "route.ts"),
