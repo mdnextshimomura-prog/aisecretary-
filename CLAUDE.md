@@ -48,14 +48,14 @@ src/app/api/webhook/route.ts   … 署名検証 → メンション判定 → �
 | `src/lib/claude.ts` | メッセージ→タスクJSON解析（model: claude-sonnet-4-6） |
 | `src/lib/notion.ts` | Notion登録・期日近接タスク取得。**プロパティ名は日本語**（名前/種別/緊急度/期日/担当者/ステータス/元メッセージ） |
 | `src/lib/line.ts` | LINE送信・署名検証・完了メッセージ整形 |
-| `src/lib/remind.ts` | 日次リマインド（Prisma/SQLite参照） |
+| `src/lib/remind.ts` | 日次リマインド（Notion 参照） |
 | `src/lib/calendar.ts` | Googleカレンダー連携（**現状フローでは未使用**。残置） |
 | `prisma/schema.prisma` | Taskモデル定義（SQLite。リマインド用に残置） |
 
 ## 重要な制約・前提（壊さないこと）
 - **Notionのプロパティ名は日本語固定**。`notion.ts` の `名前`/`種別` 等を変えるとNotion側スキーマと不整合になる。
 - **種別は5択**：売買 / 賃貸 / 管理 / 買取再販 / その他。**緊急度は3択**：今日中 / 今週中 / 来週以降。Notionのセレクト選択肢と一致させること。
-- **メンション不要・文脈で自動判定**：全発言を `parseTaskFromMessage` に渡し、Claudeが `isTask`＋`confidence` を返す。`confidence >= TASK_CONFIDENCE_THRESHOLD`（既定0.7、env調整可）のときだけNotion登録する。雑談・相槌・報告は黙ってスキップ。
+- **AI秘書へのメンションがタスク受付の入口**（2026-09-04〜）。メンションの無い発言は解析しない。`confidence >= TASK_CONFIDENCE_THRESHOLD`（既定0.7、env調整可）のときだけNotion登録する。雑談・相槌・報告は黙ってスキップ。
 - **担当者**：メンションがあればそのテキストから名前を取得して上書き（任意）。LINE APIは使わない。
 - **永続化の主軸はNotion**。SQLite/Google Calendarは過去に主軸から外した（remind.tsのみSQLite参照）。
 
@@ -93,6 +93,15 @@ LINE の Webhook の再送が無効だと、portal の結果不明・一覧の�
 - ログ（`cloud-tick #J12 delivered` の形）に出すのは、受付番号・段の名前・結果の符号・変数の名前だけ。LINE の ID・本文・物件名・トークン・リンク・鍵・予約の番号は出さない。
 - 止め方・戻し方・鍵が漏れたときの手順は `docs/運用.md`。
 文法は `src/lib/obi/fix-parse.ts` が正で、line-secretary の `src/jobs/parse.js` と共通の表 `tests/fixtures/job-command-cases.json`（sha256 をテストで固定）の全行で同じ結果にしてある。片方だけ直さない。
+
+（タスクの追いかけ・2026-10-12）`TASK_FOLLOWUP`（`1` のときだけ動く。既定 off）。on にすると、
+①「3待ち 売主の書類 金曜」「3延期 10/20」「3不要」の返事（番号つき）と、引用リプライの「待ち …」「延期 …」を受け付ける
+（`src/lib/task-status-command.ts`＝読み取り／`task-status.ts`＝Notion の欄と返事／`task-status-wire.ts`＝本物へのつなぎ）、
+② 朝のリマインドが「次に確認する日」が先のタスクを出さず、確認日が来たもの・前日から入ったものを足す（`src/lib/remind-select.ts`）、
+③ 完了にしたとき「終わり方」を残す。
+Notion「LINEタスク」の欄 `状況`・`次に確認する日`・`終わり方` を使う（10/12 に作成済み。消すと on のあいだ登録・更新が失敗する）。
+off に戻せば今までの動き。on のあいだに付いた「待ち」は、off にすると毎朝のリマインドにまた出る（欄は残る）。
+設計は `docs/superpowers/specs/2026-10-12-task-followup-pilot-design.md`。
 
 ## よく使うコマンド
 ```bash

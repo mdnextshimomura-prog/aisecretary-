@@ -1,5 +1,6 @@
 import { Client } from "@notionhq/client";
 import type { ParsedTask } from "./claude";
+import { closeProps, followupEnabled } from "./task-status";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const DATABASE_ID = process.env.NOTION_DATABASE_ID!;
@@ -213,9 +214,12 @@ export async function updateTaskAssignee(
 export async function completeTask(pageId: string): Promise<void> {
   await notion.pages.update({
     page_id: pageId,
-    properties: {
-      ステータス: { select: { name: "完了" } },
-    },
+    properties: followupEnabled()
+      ? // 終わり方（完了／不要／重複）を残す。「不要」は状況の返事（3不要）が入れる
+        (closeProps("完了") as Parameters<
+          typeof notion.pages.update
+        >[0]["properties"])
+      : { ステータス: { select: { name: "完了" } } },
   });
 }
 
