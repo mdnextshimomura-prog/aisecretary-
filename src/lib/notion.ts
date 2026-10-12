@@ -219,6 +219,20 @@ export async function completeTask(pageId: string): Promise<void> {
   });
 }
 
+// 状況の返事（待ち・延期・不要）で、欄をまとめて書き換える。
+// 欄の組み立ては task-status.ts（テストあり）が行い、ここは渡すだけ。
+export async function updateTaskProps(
+  pageId: string,
+  properties: Record<string, unknown>
+): Promise<void> {
+  await notion.pages.update({
+    page_id: pageId,
+    properties: properties as Parameters<
+      typeof notion.pages.update
+    >[0]["properties"],
+  });
+}
+
 // リマインドに載せた順番（1始まり）を書き込む。
 // これがあることで「3済」のような番号指定で完了にできる。毎回のリマインドで振り直す。
 export async function setRemindNumber(
@@ -235,7 +249,8 @@ export async function setRemindNumber(
 // 「未完了」かつ「期日が明日まで」＝リマインドに載る範囲に限定しているため、
 // 過去に振られた古い番号を誤って拾うことがない（範囲内のタスクは毎回振り直されるため）。
 export async function findTaskByRemindNumber(
-  num: number
+  num: number,
+  opts: { anyDue?: boolean } = {}
 ): Promise<{ id: string; title: string } | null> {
   const response = await notion.databases.query({
     database_id: DATABASE_ID,
@@ -244,7 +259,11 @@ export async function findTaskByRemindNumber(
       and: [
         { property: "リマインド番号", number: { equals: num } },
         { property: "ステータス", select: { does_not_equal: "完了" } },
-        { property: "期日", date: { on_or_before: jstDateStr(1) } },
+        // anyDue：新しい知らせ方では、期日が先のタスクにも番号が付く。
+        // 古い番号の取り違えは、知らせるたびに載せなかったタスクの番号を消すことで防ぐ
+        ...(opts.anyDue
+          ? []
+          : [{ property: "期日", date: { on_or_before: jstDateStr(1) } }]),
       ],
     },
   });
