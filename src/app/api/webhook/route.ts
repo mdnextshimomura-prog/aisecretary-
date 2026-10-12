@@ -97,6 +97,13 @@ import {
   appendTaskNote,
   jstDateStr,
 } from "@/lib/notion";
+import { parseStatusBody, parseStatusCommand } from "@/lib/task-status-command";
+import {
+  applyStatusCommand,
+  applyStatusToTask,
+  followupEnabled,
+} from "@/lib/task-status";
+import { statusDeps } from "@/lib/task-status-wire";
 import { dispatchObiEvents, type ObiEventDeps } from "@/lib/obi/webhook-event";
 import { getObiStore } from "@/lib/obi/memo";
 
@@ -873,7 +880,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const done: string[] = [];
         const notFound: number[] = [];
         for (const n of numbers) {
-          const t = await findTaskByRemindNumber(n);
+          const t = await findTaskByRemindNumber(n, { anyDue: followupEnabled() });
           if (!t) {
             notFound.push(n);
             continue;
@@ -905,6 +912,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         );
       }
       continue;
+    }
+
+    // ②' 番号での状況の返事（「3待ち 売主の書類 金曜」「3延期 10/20」「3不要」）。
+    // 完了（「3済」）は上の②が先に拾う。スイッチが off のあいだは何もしない。
+    if (followupEnabled()) {
+      const statusCmd = parseStatusCommand(
+        stripMentions(event.message),
+        jstDateStr(0)
+      );
+      if (statusCmd) {
+        try {
+          const r = await applyStatusCommand(statusCmd, statusDeps());
+          if (r.changed > 0) markCommitted();
+          await sendLineMessage(replyToken, r.text);
+        } catch (err) {
+          console.error("状況の返事の処理エラー:", err);
+          await sendLineMessage(
+            replyToken,
+            "⚠️ 状況を書き込めませんでした。もう一度お試しください。"
+          );
+        }
+        continue;
+      }
     }
 
     // ③ 引用リプライ → 既存タスクへの操作（取り消し／完了／担当者の後付け・変更）として扱う。
@@ -946,6 +976,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             );
           }
           continue;
+        }
+        // (a3) 「待ち 売主の書類 金曜」「延期 10/20」→ 状況・期日を書き換える。
+        // 「不要」「いらない」は上の (a) が今までどおり取り消し（ページを消す）として扱う。
+        if (followupEnabled()) {
+          const body = parseStatusBody(
+            stripMentions(event.message),
+            jstDateStr(0)
+          );
+          if (body && body.kind !== "drop") {
+            try {
+              const text = await applyStatusToTask(body, task, statusDeps());
+              markCommitted();
+              await sendLineMessage(replyToken, text);
+            } catch (err) {
+              console.error("状況の返事（引用）の処理エラー:", err);
+              await sendLineMessage(
+                replyToken,
+                "⚠️ 状況を書き込めませんでした。もう一度お試しください。"
+              );
+            }
+            continue;
+          }
         }
         // (b) @メンション → 担当者の設定・変更
         if (userMentions.length > 0) {
