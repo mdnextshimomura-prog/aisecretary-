@@ -7,6 +7,10 @@
     {
       "path": "/api/report",
       "schedule": "0 1 * * *"
+    },
+    {
+      "path": "/api/candidates-ask",
+      "schedule": "0 8 * * *"
     }
   ]
 }
