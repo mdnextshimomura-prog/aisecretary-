@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleCloudTick } from "@/lib/obi/cloud-entry";
+import { runDueRemindersOnTick } from "@/lib/remind-due";
 
 // 帯替えの完成リンク・差し戻し・失敗の知らせを、クラウドから出す毎分の見回り（設計 2026-10-11 の C1）。
 // 起こすのは portal（Railway の worker が毎分、portal の web を経由して、ここを POST でたたく）。
@@ -14,6 +15,14 @@ const NO_STORE = { "cache-control": "no-store" };
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const r = await handleCloudTick(req.headers.get("x-obi-tick-token"));
+  // 期限前の通知（「まもなく期限です」）の相乗り。合言葉が通った見回りのときだけ、10 分に 1 回動く
+  // （DUE_REMIND_TICK=1 のとき。帯替えのスイッチとは別）。失敗しても、見回りの応答は変えない
+  if (r.status !== 401) {
+    await runDueRemindersOnTick(Date.now()).catch((err) => {
+      const name = (err as { name?: unknown } | null)?.name;
+      console.error(`[remind-due] tick error ${typeof name === "string" ? name : "Error"}`);
+    });
+  }
   return NextResponse.json(r.body, { status: r.status, headers: NO_STORE });
 }
 

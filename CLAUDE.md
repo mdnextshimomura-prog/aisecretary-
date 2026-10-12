@@ -135,3 +135,5 @@ npm run db:studio    # DB確認
 - **入力**：LINE Webhookイベント（外部トリガ）。親から直接呼ぶ場合は「解析したいメッセージ文字列＋今日の日付」。
 - **出力**：Notionに登録されたタスク（`notionId`）と、LINE返信用の整形済みメッセージ。
 - 失敗時はLINEにエラー文を返し、`console.error` に記録する（webhook/route.ts）。
+
+（期限前の通知・2026-10-13）「⏰ まもなく期限です」は `src/lib/remind-due.ts`。起こすのは毎分の見回り `/api/obi/cloud-tick` への相乗りで、**スイッチは `DUE_REMIND_TICK=1`（既定 off）**。10 分に 1 回（KV の枠）。`/api/remind-due` を外から叩く仕組みは無い。詳しくは `docs/運用.md`。
