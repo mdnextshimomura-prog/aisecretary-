@@ -16,7 +16,8 @@ export type CloseReason = "完了" | "不要" | "重複";
 export function waitProps(note: string, checkDate: string) {
   return {
     ステータス: { select: { name: "進行中" } },
-    状況: { rich_text: note ? [{ text: { content: note } }] : [] },
+    // 理由を省いた「3待ち」では、前に入れた状況を消さない（確認日だけ延ばす使い方のため）
+    ...(note ? { 状況: { rich_text: [{ text: { content: note } }] } } : {}),
     次に確認する日: { date: { start: checkDate } },
   };
 }
