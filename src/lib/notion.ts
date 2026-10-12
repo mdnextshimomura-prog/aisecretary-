@@ -245,6 +245,37 @@ export async function setRemindNumber(
   });
 }
 
+// 今回の知らせに載せなかったタスクの番号を消す。
+// 新しい知らせ方では期日が先のタスクにも番号が付くので、古い番号が残っていると
+// 「3済」が別のタスクに当たる。知らせるたびに、載せた分以外の番号を消しておく。
+export async function clearStaleRemindNumbers(keepIds: string[]): Promise<number> {
+  const keep = new Set(keepIds);
+  let cleared = 0;
+  let cursor: string | undefined;
+  do {
+    const response = await notion.databases.query({
+      database_id: DATABASE_ID,
+      start_cursor: cursor,
+      filter: {
+        and: [
+          { property: "リマインド番号", number: { is_not_empty: true } },
+          { property: "ステータス", select: { does_not_equal: "完了" } },
+        ],
+      },
+    });
+    for (const page of response.results) {
+      if (keep.has(page.id)) continue;
+      await notion.pages.update({
+        page_id: page.id,
+        properties: { リマインド番号: { number: null } },
+      });
+      cleared++;
+    }
+    cursor = response.has_more ? response.next_cursor ?? undefined : undefined;
+  } while (cursor);
+  return cleared;
+}
+
 // リマインド番号からタスクを引く。
 // 「未完了」かつ「期日が明日まで」＝リマインドに載る範囲に限定しているため、
 // 過去に振られた古い番号を誤って拾うことがない（範囲内のタスクは毎回振り直されるため）。
@@ -463,7 +494,7 @@ export async function setTaskStatus(
 // 期限を過ぎたタスクも拾うため（以前は on_or_after: 今日 で絞っていたため、
 // 期限切れが二度と通知されず静かに埋もれていた）。
 // 期日の古い順に返すので、呼び出し側で 期限超過／本日／明日 に振り分ける。
-export async function getUpcomingTasks(): Promise<
+export async function getUpcomingTasks(opts: { followup?: boolean } = {}): Promise<
   Array<{
     id: string;
     title: string;
@@ -474,28 +505,65 @@ export async function getUpcomingTasks(): Promise<
     /** 「要確認」＝初動確認の回答待ち。リマインドで別枠に出して回答を促す */
     status: string;
     url: string;
+    /** 次に確認する日（"YYYY-MM-DD"）。無ければ null */
+    nextCheck: string | null;
+    /** 状況（待ち相手・理由のひとこと）。無ければ "" */
+    note: string;
+    /** 登録した日（JST の "YYYY-MM-DD"） */
+    createdDate: string;
   }>
 > {
   const tomorrowStr = jstDateStr(1);
+  const notDone = { property: "ステータス", select: { does_not_equal: "完了" } };
+  const dueSoon = { property: "期日", date: { on_or_before: tomorrowStr } };
 
-  const response = await notion.databases.query({
+  // followup（TASK_FOLLOWUP=1）のときだけ、期日が先のタスクも候補に入れる。
+  // 載せるかどうかの最終判定は remind-select.ts の shouldRemind が行う。
+  // 「入ったばかり」は登録日時での絞り込みで、Notion の型の都合で入れ子の or に
+  // 混ぜられないため、問い合わせを 2 本に分けて ID で重ねる。
+  const sorts = [{ property: "期日", direction: "ascending" as const }];
+  const primary = await notion.databases.query({
     database_id: DATABASE_ID,
-    sorts: [{ property: "期日", direction: "ascending" }],
-    filter: {
-      and: [
-        {
-          property: "期日",
-          date: { on_or_before: tomorrowStr },
-        },
-        {
-          property: "ステータス",
-          select: { does_not_equal: "完了" },
-        },
-      ],
-    },
+    sorts,
+    filter: opts.followup
+      ? {
+          and: [
+            notDone,
+            {
+              or: [
+                dueSoon,
+                // 確認日が来たもの（待ちにしていたもの）
+                {
+                  property: "次に確認する日",
+                  date: { on_or_before: jstDateStr(0) },
+                },
+              ],
+            },
+          ],
+        }
+      : { and: [dueSoon, notDone] },
   });
+  const results = [...primary.results];
+  if (opts.followup) {
+    // 入ったばかりのもの（期日が先でも一度は知らせる）
+    const fresh = await notion.databases.query({
+      database_id: DATABASE_ID,
+      sorts,
+      filter: {
+        and: [
+          notDone,
+          {
+            timestamp: "created_time",
+            created_time: { on_or_after: `${jstDateStr(-1)}T00:00:00+09:00` },
+          },
+        ],
+      },
+    });
+    const seen = new Set(results.map((r) => r.id));
+    for (const r of fresh.results) if (!seen.has(r.id)) results.push(r);
+  }
 
-  return response.results.map((page) => {
+  return results.map((page) => {
     const p = page as Record<string, unknown>;
     const props = (p.properties as Record<string, unknown>) ?? {};
 
@@ -525,6 +593,26 @@ export async function getUpcomingTasks(): Promise<
         (props["ステータス"] as { select: { name: string } | null } | undefined)
           ?.select?.name ?? "未着手",
       url: (p.url as string) ?? "",
+      nextCheck:
+        (
+          props["次に確認する日"] as
+            | { date: { start: string } | null }
+            | undefined
+        )?.date?.start?.slice(0, 10) ?? null,
+      note:
+        (
+          props["状況"] as
+            | { rich_text: Array<{ plain_text: string }> }
+            | undefined
+        )?.rich_text
+          ?.map((r) => r.plain_text)
+          .join("") ?? "",
+      createdDate: (() => {
+        const ms = Date.parse((p.created_time as string) ?? "");
+        return Number.isNaN(ms)
+          ? ""
+          : new Date(ms + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      })(),
     };
   });
 }

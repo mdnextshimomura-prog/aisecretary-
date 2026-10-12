@@ -1,4 +1,11 @@
-import { getUpcomingTasks, jstDateStr, setRemindNumber } from "./notion";
+import {
+  clearStaleRemindNumbers,
+  getUpcomingTasks,
+  jstDateStr,
+  setRemindNumber,
+} from "./notion";
+import { bucketOf, shouldRemind } from "./remind-select";
+import { followupEnabled } from "./task-status";
 import { pushLineChunks, sanitizeForTextV2 } from "./line";
 import { buildChunks, type ChunkItem } from "./chunk";
 import { STATUS_PENDING } from "./clarify";
@@ -110,11 +117,16 @@ export async function sendDailyReminders(): Promise<void> {
     return;
   }
 
-  // 期日が明日まで・未完了のタスク（期限超過を含む）を期日の古い順で取得
-  const tasks = await getUpcomingTasks();
-  if (tasks.length === 0) return;
-
+  // 期日が明日まで・未完了のタスク（期限超過を含む）を期日の古い順で取得。
+  // 新しい知らせ方（TASK_FOLLOWUP=1）では、「待ち」を確認日まで外し、
+  // 確認日が来たもの・入ったばかりのものを足す。
+  const followup = followupEnabled();
   const tomorrowStr = jstDateStr(1);
+  const fetched = await getUpcomingTasks({ followup });
+  const tasks = followup
+    ? fetched.filter((t) => shouldRemind(t, todayStr, tomorrowStr, jstDateStr(-1)))
+    : fetched;
+  if (tasks.length === 0) return;
 
   // 初動確認の回答待ち。期日の枠に混ぜず先頭に独立させる。
   // 混ぜると「担当者がやっていない」ように見えるが、実際は
@@ -122,9 +134,12 @@ export async function sendDailyReminders(): Promise<void> {
   const pendingTasks = tasks.filter((t) => t.status === STATUS_PENDING);
   const actionable = tasks.filter((t) => t.status !== STATUS_PENDING);
 
-  const overdueTasks = actionable.filter((t) => dueDateOnly(t) < todayStr);
-  const todayTasks = actionable.filter((t) => dueDateOnly(t) === todayStr);
-  const tomorrowTasks = actionable.filter((t) => dueDateOnly(t) === tomorrowStr);
+  const bucket = (t: UpcomingTask) => bucketOf(t, todayStr, tomorrowStr);
+  const overdueTasks = actionable.filter((t) => bucket(t) === "overdue");
+  const todayTasks = actionable.filter((t) => bucket(t) === "today");
+  const tomorrowTasks = actionable.filter((t) => bucket(t) === "tomorrow");
+  // 期日が先・期日なし（確認日が来たもの／入ったばかりのもの）。off のあいだは常に空
+  const otherTasks = actionable.filter((t) => bucket(t) === "other");
 
   // 本文に載せる順（この順に1から番号を振る）
   const shown: UpcomingTask[] = [];
@@ -133,6 +148,7 @@ export async function sendDailyReminders(): Promise<void> {
   const push = (t: UpcomingTask, suffix?: string) => {
     shown.push(t);
     let text = `${shown.length}. ${sanitizeForTextV2(t.title)}（${suffix ?? t.urgency}）`;
+    if (t.note) text += `（待ち：${sanitizeForTextV2(t.note)}）`;
     // userIdが無い担当者はメンションできないので名前だけ出す
     if (t.assignee && !t.assigneeUserId) text += `（担当：${t.assignee}）`;
     items.push({ text, userId: t.assigneeUserId });
@@ -162,16 +178,31 @@ export async function sendDailyReminders(): Promise<void> {
     items.push({ text: `\n【明日期限】` });
     for (const t of tomorrowTasks) push(t);
   }
+  if (otherTasks.length > 0) {
+    items.push({ text: `\n【確認する日が来たもの・新しく入ったもの】` });
+    for (const t of otherTasks) {
+      const due = dueDateOnly(t);
+      push(t, due ? `期日 ${due.slice(5).replace("-", "/")}` : "期日なし");
+    }
+  }
 
   const footer =
     "\n\n──────────\n" +
     "終わったものは番号で返信してください\n" +
-    "例：「3済」「1,2完了」「4おわった」";
+    "例：「3済」「1,2完了」「4おわった」" +
+    (followup
+      ? "\n相手待ち：「3待ち 売主の書類 金曜」\n期日を変える：「3延期 10/20」\nやらなくてよい：「3不要」"
+      : "");
 
   const chunks = buildChunks("🔔 本日のリマインドです", items, footer);
 
   // 本文に載せた順で番号を確定させてから送る。
   // 送信後に番号を振ると、先に返信されたときに引けないため順序が重要。
+  if (followup) {
+    await clearStaleRemindNumbers(shown.map((t) => t.id)).catch((e) =>
+      console.error("[remind] 古い番号の掃除でエラー（続行）:", e)
+    );
+  }
   await Promise.all(shown.map((t, i) => setRemindNumber(t.id, i + 1)));
   await pushLineChunks(LINE_GROUP_ID, chunks);
 }
