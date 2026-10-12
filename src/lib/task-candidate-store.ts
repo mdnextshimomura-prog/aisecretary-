@@ -64,29 +64,48 @@ export async function addCandidate(
 }
 
 /**
- * いま控えている候補に番号を振って、その並びを覚える（聞く直前に呼ぶ）。
+ * いま控えている候補に番号を振って、その並びを覚える（聞く直前・一覧を出す直前に呼ぶ）。
  * 以後の「1 登録」「2 なし」は、この並びの番号で引く。
+ *
+ * 番号は振り直さない：前に聞いたときの番号をそのまま保ち、新しく届いた分を後ろに足す。
+ * 途中で誰かが一覧を出し直しても、先に届いた文面の番号がずれないようにするため。
+ * 期限が切れた分は、番号を空ける（null）。全部片付いたら、次は 1 番から振り直す。
  */
 export async function numberCandidates(
   nowMs: number = Date.now(),
-): Promise<Candidate[]> {
-  const list = await listCandidates(nowMs);
-  await write(NUMBERED_KEY, list);
-  return list;
+): Promise<Array<Candidate | null>> {
+  const items = await listCandidates(nowMs);
+  const alive = new Set(items.map((c) => c.id));
+  const kept = (await getNumbered()).map((c) => (c && alive.has(c.id) ? c : null));
+  const base = kept.some((c) => c !== null) ? kept : [];
+  const known = new Set(base.filter((c) => c !== null).map((c) => (c as Candidate).id));
+  const numbered = [...base, ...items.filter((c) => !known.has(c.id))];
+  await write(NUMBERED_KEY, numbered);
+  return numbered;
 }
 
 export async function getNumbered(): Promise<Array<Candidate | null>> {
   return (await read<Array<Candidate | null>>(NUMBERED_KEY)) ?? [];
 }
 
+/** 番号の候補を見る（消さない）。無い番号・片付け済み・期限切れは null。 */
+export async function peekCandidate(
+  n: number,
+  nowMs: number = Date.now(),
+): Promise<Candidate | null> {
+  const c = (await getNumbered())[n - 1] ?? null;
+  if (!c) return null;
+  return pruneExpired([c], nowMs).length > 0 ? c : null;
+}
+
 /**
- * 番号の候補を取り出して、片付いたことにする（一覧からも消す）。
- * 無い番号・片付け済みの番号は null。番号はずらさない（聞いた文面の番号のまま使えるように）。
+ * 番号の候補を片付ける（一覧からも消す）。番号はずらさない。
+ * 登録できたと分かってから呼ぶ（先に消すと、登録に失敗したとき候補まで失う）。
  */
-export async function takeCandidate(n: number): Promise<Candidate | null> {
+export async function removeCandidate(n: number): Promise<void> {
   const numbered = await getNumbered();
   const c = numbered[n - 1] ?? null;
-  if (!c) return null;
+  if (!c) return;
   numbered[n - 1] = null;
   await write(NUMBERED_KEY, numbered);
   const items = (await read<Candidate[]>(ITEMS_KEY)) ?? [];
@@ -94,18 +113,6 @@ export async function takeCandidate(n: number): Promise<Candidate | null> {
     ITEMS_KEY,
     items.filter((x) => x.id !== c.id),
   );
-  return c;
-}
-
-/** 取り出した候補を戻す（登録に失敗したとき、候補まで失わないため）。 */
-export async function putBackCandidate(n: number, c: Candidate): Promise<void> {
-  const numbered = await getNumbered();
-  if (n >= 1 && !numbered[n - 1]) {
-    numbered[n - 1] = c;
-    await write(NUMBERED_KEY, numbered);
-  }
-  const items = (await read<Candidate[]>(ITEMS_KEY)) ?? [];
-  if (!items.some((x) => x.id === c.id)) await write(ITEMS_KEY, [...items, c]);
 }
 
 /**

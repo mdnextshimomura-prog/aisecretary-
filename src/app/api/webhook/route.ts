@@ -115,8 +115,8 @@ import {
 import {
   addCandidate,
   numberCandidates,
-  putBackCandidate,
-  takeCandidate,
+  peekCandidate,
+  removeCandidate,
 } from "@/lib/task-candidate-store";
 import { dispatchObiEvents, type ObiEventDeps } from "@/lib/obi/webhook-event";
 import { getObiStore } from "@/lib/obi/memo";
@@ -485,17 +485,27 @@ async function registerTaskFromText(
   /** 選択の返答メッセージID。二重登録を防ぐ予約キーに使う */
   sourceMessageId: string,
   /** 発言者。初動確認の対象かどうかの判定に使う */
-  senderId: string | undefined
-): Promise<"ok" | "retry"> {
+  senderId: string | undefined,
+  /** 候補から登録するときの上書き（控えたときに分かっていた担当、依頼のあった時刻） */
+  opts: {
+    assignee?: string | null;
+    assigneeUserId?: string | null;
+    /** 依頼のあった時刻（ミリ秒）。「明日までに」を、登録と返した日ではなく依頼の日から数える */
+    baseMs?: number;
+  } = {}
+): Promise<"ok" | "retry" | "failed" | "duplicate"> {
   // 通常経路と同じ予約を通す。ここを素通しにすると、同時到達で
   // 同じ依頼が2つ登録される（選択状態は片方が消す前に両方読める）。
   const claim = await reserveMessage(sourceMessageId);
   if (!claim.proceed) {
     if (claim.inProgress) return "retry";
-    return "ok"; // 既に登録済み
+    return "duplicate"; // 既に登録済み
   }
 
-  const now = jstNow();
+  const now =
+    opts.baseMs !== undefined
+      ? new Date(opts.baseMs + 9 * 60 * 60 * 1000)
+      : jstNow();
   let parsed;
   try {
     parsed = await parseTaskFromMessage(text, todayLabel(now));
@@ -503,9 +513,15 @@ async function registerTaskFromText(
     console.error("タスク解析エラー:", err);
     await releaseMessage(sourceMessageId).catch(() => undefined);
     await sendLineMessage(replyToken, "⚠️ タスクの解析に失敗しました。");
-    return "ok";
+    return "failed";
   }
   await finalizeDue(parsed, now);
+  // 候補を控えたときに分かっていた担当（メンションの相手）を使う。
+  // 本文からはメンションを除いてあるので、AI の読み直しだけでは担当が落ちる。
+  if (opts.assignee) {
+    parsed.assignee = opts.assignee;
+    parsed.assigneeUserId = opts.assigneeUserId ?? null;
+  }
 
   let existing: { id: string } | null = null;
   try {
@@ -516,7 +532,7 @@ async function registerTaskFromText(
   }
   if (existing) {
     await completeMessage(sourceMessageId, existing.id).catch(() => undefined);
-    return "ok";
+    return "duplicate";
   }
 
   let pageId: string;
@@ -541,7 +557,7 @@ async function registerTaskFromText(
       replyToken,
       "⚠️ タスクの登録中にエラーが発生しました。もう一度お試しください。"
     );
-    return "ok";
+    return "failed";
   }
   await completeMessage(sourceMessageId, pageId).catch(() => undefined);
 
@@ -568,9 +584,12 @@ async function registerTaskFromText(
     }
   }
   const botMsgId = await sendLineMessage(replyToken, reply);
-  await setTaskMessageIds(pageId, [botMsgId ?? ""].filter(Boolean)).catch(
-    () => undefined
-  );
+  // 元の発言の ID も残す（Bot の返信の ID だけで上書きすると、二重登録の確認と
+  // 「元の発言を引用して完了」が効かなくなる。通常の登録と同じ形）
+  await setTaskMessageIds(
+    pageId,
+    [sourceMessageId, botMsgId ?? ""].filter(Boolean)
+  ).catch(() => undefined);
   await rememberConfirmMessage(groupId, pageId, botMsgId ?? null);
   return "ok";
 }
@@ -893,7 +912,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // ② 番号での完了報告（「3済」「1,2完了」）。リマインドを引用しなくても返せるようにする。
     // 引用リプライより先に判定するのは、番号の指定のほうが対象が明確なため。
-    const numbers = parseNumberedCompletion(stripMentions(event.message));
+    // 「3待ち 決済 金曜」は「済」の字を含むので、そのままだと 3 番の完了と読まれてしまう。
+    // 新しい返し方を使うあいだは、状況の言葉（待ち・延期・不要）として読めるものを先に外す。
+    const isStatusText =
+      followupEnabled() &&
+      parseStatusCommand(stripMentions(event.message), jstDateStr(0)) !== null;
+    const numbers = isStatusText
+      ? null
+      : parseNumberedCompletion(stripMentions(event.message));
     if (numbers) {
       try {
         const done: string[] = [];
@@ -957,11 +983,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     // ②'' 候補への返事（「1 登録」「2 なし」）と、候補の一覧の頼み（「@AI秘書 候補」）。
-    // スイッチが off のあいだは何もしない。
-    if (candidatesEnabled()) {
+    // スイッチが off のあいだは何もしない。会社グループの中だけで受ける
+    // （候補は会社グループの発言から作るので、別のトークから題名を見たり消したりできないようにする）。
+    if (
+      candidatesEnabled() &&
+      source.groupId &&
+      source.groupId === process.env.LINE_GROUP_ID
+    ) {
       const stripped = stripMentions(event.message);
       const candCmd = parseCandidateCommand(stripped);
-      if (candCmd) {
+      // 聞き返しメニュー（「② タスクとして登録」「④ なし」）への返事と形が重なる。
+      // その人がメニューの返事待ちなら、候補の言葉としては読まず、今までの流れに渡す。
+      const menuPending = candCmd
+        ? await getPendingClarification(source.groupId, source.userId).catch(
+            () => null
+          )
+        : null;
+      if (candCmd && !menuPending) {
         try {
           if (candCmd.action === "register") {
             // 登録は 1 件ずつ。登録の返信（期日・担当の説明や聞き返し）を 1 件ごとに出すため
@@ -973,7 +1011,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               continue;
             }
             const n = candCmd.numbers[0];
-            const c = await takeCandidate(n);
+            const c = await peekCandidate(n);
             if (!c) {
               await sendLineMessage(
                 replyToken,
@@ -981,27 +1019,47 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               );
               continue;
             }
-            // 元の発言の ID を鍵にする（同じ依頼を 2 度登録しない。あとで元の発言を引用しても引ける）
+            // 元の発言の ID を鍵にする（同じ依頼を 2 度登録しない）。
+            // 候補を消すのは、登録できたと分かってから。
             const r = await registerTaskFromText(
               c.text,
               replyToken,
               source.groupId,
               c.id,
-              c.senderId ?? undefined
+              c.senderId ?? undefined,
+              {
+                assignee: c.assignee,
+                assigneeUserId: c.assigneeUserId,
+                baseMs: c.createdAt,
+              }
             );
-            if (r === "retry") {
-              await putBackCandidate(n, c);
-              requestRetry();
-              continue;
+            if (r === "ok") {
+              await removeCandidate(n);
+              markCommitted();
+            } else if (r === "duplicate") {
+              await removeCandidate(n);
+              markCommitted();
+              await sendLineMessage(
+                replyToken,
+                `${n}番はすでに登録済みです。`
+              );
+            } else if (r === "retry") {
+              // LINE の再送は無効なので、503 で待たずにその場で知らせる。候補は残す
+              await sendLineMessage(
+                replyToken,
+                `⚠️ 登録できたか確かめられませんでした。少し待ってから、もう一度「${n} 登録」と送ってください。`
+              );
             }
-            markCommitted();
+            // "failed" は registerTaskFromText が理由を返信済み。候補は残す（送り直せる）
           } else {
             const dropped: string[] = [];
             const notFound: number[] = [];
             for (const n of candCmd.numbers) {
-              const c = await takeCandidate(n);
-              if (c) dropped.push(`${n}. ${c.title}`);
-              else notFound.push(n);
+              const c = await peekCandidate(n);
+              if (c) {
+                await removeCandidate(n);
+                dropped.push(`${n}. ${c.title}`);
+              } else notFound.push(n);
             }
             const lines: string[] = [];
             if (dropped.length > 0) {
@@ -1022,12 +1080,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }
         continue;
       }
-      // グループでは @AI秘書 を付けたときだけ（ふつうの会話の「候補」に反応しない）
+      // @AI秘書 を付けたときだけ（ふつうの会話の「候補」に反応しない）
       if (
         isCandidateListRequest(stripped) &&
-        (!source.groupId ||
-          taskMentionState(event.message.mention?.mentionees, BOT_USER_ID)
-            .mentionsBot)
+        taskMentionState(event.message.mention?.mentionees, BOT_USER_ID)
+          .mentionsBot
       ) {
         try {
           const digest = buildDigest(await numberCandidates());
@@ -1037,6 +1094,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           );
         } catch (err) {
           console.error("候補の一覧の処理エラー:", err);
+          await sendLineMessage(
+            replyToken,
+            "⚠️ 候補の一覧を出せませんでした。もう一度お試しください。"
+          );
         }
         continue;
       }
@@ -1051,8 +1112,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (event.message.quotedMessageId) {
       const task = await findTaskByMessageId(event.message.quotedMessageId);
       if (task) {
+        // 「待ち 完了検査 金曜」「待ち キャンセル待ち 金曜」は、理由の中の「完了」「キャンセル」で
+        // 下の (a)(a2) に取られてしまう。状況の言葉として読めるときは (a)(a2) を飛ばして (a3) に回す。
+        const quotedStatus = followupEnabled()
+          ? parseStatusBody(stripMentions(event.message), jstDateStr(0))
+          : null;
+        const isQuotedStatus = quotedStatus !== null && quotedStatus.kind !== "drop";
         // (a) 「タスクじゃない／取り消し」→ タスクを削除
-        if (isCancelIntent(stripMentions(event.message))) {
+        if (!isQuotedStatus && isCancelIntent(stripMentions(event.message))) {
           try {
             await archiveTask(task.id);
             markCommitted();
@@ -1066,7 +1133,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           continue;
         }
         // (a2) 「完了／終わりました」→ ステータスを完了にする（記録は残す）
-        if (isCompleteIntent(stripMentions(event.message))) {
+        if (!isQuotedStatus && isCompleteIntent(stripMentions(event.message))) {
           try {
             await completeTask(task.id);
             await sendLineMessage(
@@ -1249,18 +1316,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             parsedCand.confidence >= CANDIDATE_MIN_CONFIDENCE
           ) {
             let assignee = parsedCand.assignee;
+            let assigneeUserId: string | null = null;
             const m = mentioned[0];
             if (m) {
               const raw = event.message.text.slice(m.index, m.index + m.length);
               const name = raw.startsWith("@") ? raw.slice(1) : raw;
               const c = await canonicalAssignee(m.userId ?? null, name);
               assignee = c.name ?? name ?? assignee;
+              assigneeUserId = c.userId ?? m.userId ?? null;
             }
             await addCandidate({
               id: event.message.id,
               text,
               title: parsedCand.title,
               assignee: assignee ?? null,
+              assigneeUserId,
               senderId: source.userId ?? null,
               createdAt: Date.now(),
             });
@@ -1395,6 +1465,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         candidatesEnabled() &&
         parsed.isTask &&
         parsed.confidence >= CANDIDATE_MIN_CONFIDENCE &&
+        // 本文の無い発言（メンションと添付だけ）は、あとで登録し直せないので控えない
+        text &&
+        // 対象者が設定されていないあいだは、誰の発言も控えない
+        pilotUserIds().length > 0 &&
         source.groupId &&
         source.groupId === process.env.LINE_GROUP_ID
       ) {
@@ -1403,6 +1477,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           text,
           title: parsed.title,
           assignee: parsed.assignee ?? null,
+          assigneeUserId: parsed.assigneeUserId ?? null,
           senderId: source.userId ?? null,
           createdAt: Date.now(),
         }).catch((err) => console.error("候補の控えに失敗（何もしない）:", err));

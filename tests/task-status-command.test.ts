@@ -56,12 +56,23 @@ eq("3待ち だけ", parseStatusCommand("3待ち", TODAY), {
   date: null,
   numbers: [3],
 });
-eq("全角数字・空白なし", parseStatusCommand("３待ち銀行の回答", TODAY), {
+eq("全角数字", parseStatusCommand("３待ち 銀行の回答", TODAY), {
   kind: "wait",
   note: "銀行の回答",
   date: null,
   numbers: [3],
 });
+eq("理由に「決済」「完了」を含んでも待ちとして読む", [
+  parseStatusCommand("3待ち 決済 金曜", TODAY)?.kind,
+  parseStatusCommand("3待ち 完了検査 金曜", TODAY)?.kind,
+], ["wait", "wait"]);
+eq("待ちの直後に文が続くものは読まない（空白か文末だけ）", [
+  parseStatusCommand("3待ち合わせは14時で", TODAY),
+  parseStatusCommand("2まちがいです", TODAY),
+  parseStatusCommand("3待ち銀行の回答", TODAY),
+  parseStatusBody("待ち合わせは駅前で", TODAY),
+  parseStatusBody("延期の連絡をお願いします", TODAY),
+], [null, null, null, null, null]);
 eq("複数番号", parseStatusCommand("1,2待ち 司法書士の返事 10/20", TODAY), {
   kind: "wait",
   note: "司法書士の返事",

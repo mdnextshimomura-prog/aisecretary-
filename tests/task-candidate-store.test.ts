@@ -20,6 +20,7 @@ const cand = (id: string, createdAt = NOW): Candidate => ({
   text: `${id} の本文`,
   title: `${id} の題名`,
   assignee: null,
+  assigneeUserId: null,
   senderId: "U_A",
   createdAt,
 });
@@ -40,31 +41,36 @@ const cand = (id: string, createdAt = NOW): Candidate => ({
   );
 
   eq("聞く前は番号の一覧が無い", await s.getNumbered(), []);
-  eq(
-    "番号を振る",
-    (await s.numberCandidates(NOW)).map((c) => c.id),
-    ["m1", "m2"],
-  );
-  // 聞いた後に新しく届いた候補は、次に聞くまで番号が付かない
+  const ids = (l: Array<Candidate | null>) => l.map((c) => c?.id ?? null);
+  eq("番号を振る", ids(await s.numberCandidates(NOW)), ["m1", "m2"]);
   await s.addCandidate(cand("m3"), NOW);
-  eq(
-    "後から届いた分は番号の一覧に入らない",
-    (await s.getNumbered()).map((c) => c?.id ?? null),
-    ["m1", "m2"],
-  );
+  eq("後から届いた分は、次に番号を振るまで入らない", ids(await s.getNumbered()), ["m1", "m2"]);
 
-  eq("1 番を取り出す", (await s.takeCandidate(1))?.id, "m1");
-  eq("同じ番号は 2 度取れない", await s.takeCandidate(1), null);
-  eq("番号はずれない", (await s.takeCandidate(2))?.id, "m2");
-  eq("無い番号", await s.takeCandidate(9), null);
-  eq(
-    "取り出した分は一覧からも消える",
-    (await s.listCandidates(NOW)).map((c) => c.id),
-    ["m3"],
-  );
+  eq("1 番を見る（消さない）", (await s.peekCandidate(1, NOW))?.id, "m1");
+  eq("見ただけでは残る", (await s.peekCandidate(1, NOW))?.id, "m1");
+  await s.removeCandidate(1);
+  eq("片付けた番号は見えない", await s.peekCandidate(1, NOW), null);
+  eq("番号はずれない", (await s.peekCandidate(2, NOW))?.id, "m2");
+  eq("無い番号", await s.peekCandidate(9, NOW), null);
+  eq("片付けた分は一覧からも消える", ids(await s.listCandidates(NOW)), ["m2", "m3"]);
 
-  await s.putBackCandidate(2, cand("m2"));
-  eq("戻すと同じ番号でまた取れる", (await s.takeCandidate(2))?.id, "m2");
+  eq(
+    "一覧を出し直しても番号は変わらず、新しい分が後ろに付く",
+    ids(await s.numberCandidates(NOW)),
+    [null, "m2", "m3"],
+  );
+  eq(
+    "期限が切れた分は番号が空く",
+    ids(await s.numberCandidates(NOW + 6 * DAY)),
+    [],
+  );
+  await s.addCandidate(cand("m9", NOW + 6 * DAY), NOW + 6 * DAY);
+  eq(
+    "全部片付いた後は 1 番から振り直す",
+    ids(await s.numberCandidates(NOW + 6 * DAY)),
+    ["m9"],
+  );
+  eq("期限切れの候補は番号が残っていても取れない", await s.peekCandidate(1, NOW + 12 * DAY), null);
 
   eq("その日の 1 回目は聞く", await s.claimDailyAsk("2026-10-12"), true);
   eq("同じ日の 2 回目は聞かない", await s.claimDailyAsk("2026-10-12"), false);

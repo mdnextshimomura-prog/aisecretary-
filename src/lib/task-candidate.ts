@@ -9,6 +9,8 @@
  * このファイルは判断と文面だけ（純粋関数）。控えの置き場は task-candidate-store.ts。
  */
 
+import { isContextlessRequest } from "./task-intake";
+
 /** 候補の機能を使うか。外せば今までどおり（メンションの無い発言は何もしない）。 */
 export function candidatesEnabled(): boolean {
   return process.env.TASK_CANDIDATES === "1";
@@ -31,6 +33,8 @@ export interface Candidate {
   title: string;
   /** 担当（AI の読み、またはメンションの名前）。分からなければ null */
   assignee: string | null;
+  /** 担当の LINE userId（メンションで指定されたとき）。無ければ null */
+  assigneeUserId: string | null;
   /** 頼んだ人の LINE userId */
   senderId: string | null;
   /** 控えた時刻（ミリ秒） */
@@ -70,6 +74,8 @@ export function shouldCapture(opts: {
     (opts.senderId !== undefined && opts.pilot.includes(opts.senderId)) ||
     opts.mentionedUserIds.some((id) => opts.pilot.includes(id));
   if (!involved) return false;
+  // 「お願いします」だけの発言は、何の依頼か分からないので AI に渡さない
+  if (isContextlessRequest(opts.text)) return false;
   return looksLikeRequest(opts.text);
 }
 
@@ -116,10 +122,12 @@ export function pruneExpired(
 
 const JST_MS = 9 * 60 * 60 * 1000;
 
-/** 17:00〜17:09（JST）か。10 分おきの見回りのうち、この 1 回だけ候補を聞く。 */
+/**
+ * 17 時台（JST）か。10 分おきの見回りが少しずれても、その日の分を聞き逃さないよう 1 時間の幅にする。
+ * 1 日 1 回に絞るのは、置き場の印（claimDailyAsk）の役目。
+ */
 export function isDigestTime(nowMs: number): boolean {
-  const jst = new Date(nowMs + JST_MS);
-  return jst.getUTCHours() === 17 && jst.getUTCMinutes() < 10;
+  return new Date(nowMs + JST_MS).getUTCHours() === 17;
 }
 
 /**
@@ -141,6 +149,7 @@ export function buildDigest(numbered: Array<Candidate | null>): string | null {
     "",
     "タスクにする：「1 登録」",
     "しない：「2 なし」（まとめて「2,3 なし」も可）",
+    "※ 朝のリマインドの番号とは別です（「済」「待ち」はリマインドの番号に効きます）",
     "返事が無いものは数日で消えます",
   ].join("\n");
 }

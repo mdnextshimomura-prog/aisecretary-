@@ -18,6 +18,7 @@ const cand: Candidate = {
   text: "見積書を送付お願いします",
   title: "見積書の送付",
   assignee: null,
+  assigneeUserId: null,
   senderId: "U_A",
   createdAt: 0,
 };

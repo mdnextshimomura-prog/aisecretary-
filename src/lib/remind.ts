@@ -148,7 +148,8 @@ export async function sendDailyReminders(): Promise<void> {
   const push = (t: UpcomingTask, suffix?: string) => {
     shown.push(t);
     let text = `${shown.length}. ${sanitizeForTextV2(t.title)}（${suffix ?? t.urgency}）`;
-    if (t.note) text += `（待ち：${sanitizeForTextV2(t.note)}）`;
+    // off に戻したあとは、残っている状況を文面に出さない（今までの文面と同じにする）
+    if (followup && t.note) text += `（待ち：${sanitizeForTextV2(t.note)}）`;
     // userIdが無い担当者はメンションできないので名前だけ出す
     if (t.assignee && !t.assigneeUserId) text += `（担当：${t.assignee}）`;
     items.push({ text, userId: t.assigneeUserId });

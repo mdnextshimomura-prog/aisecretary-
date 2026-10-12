@@ -78,16 +78,23 @@ export function resolveDateToken(token: string, todayJst: string): string | null
   return null;
 }
 
-const BODY_RE = /^(待ち|まち|延期|不要|いらない)(.*)$/;
+// 待ち・延期の後ろは、空白か文末に限る。前方一致だけだと「待ち合わせは14時で」
+// 「2まちがいです」まで待ちとして読んでしまう。
+const WAIT_POSTPONE_RE = /^(待ち|まち|延期)(?:\s+(.*))?$/;
+// 不要は「3不要です。」のように語尾が続くので、後ろをそのまま取って下で確かめる
+const DROP_RE = /^(不要|いらない)(.*)$/;
 
 /** 番号なしの本文（「待ち 売主の書類 金曜」）を読む。引用リプライ用。 */
-export function parseStatusBody(text: string, todayJst: string): StatusBody | null {
+export function parseStatusBody(
+  text: string,
+  todayJst: string,
+): StatusBody | null {
   const t = normalize(text);
   if (t.length === 0 || t.length > MAX_COMMAND_LENGTH) return null;
-  const m = t.match(BODY_RE);
+  const m = t.match(WAIT_POSTPONE_RE) ?? t.match(DROP_RE);
   if (!m) return null;
   const word = m[1];
-  const rest = m[2].trim();
+  const rest = (m[2] ?? "").trim();
 
   if (word === "不要" || word === "いらない") {
     // 後ろに文が続くなら依頼文（「不要な書類を整理して」）

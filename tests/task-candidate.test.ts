@@ -147,6 +147,7 @@ const cand = (p: Partial<Candidate>): Candidate => ({
   text: "見積書を送付お願いします",
   title: "見積書の送付",
   assignee: null,
+  assigneeUserId: null,
   senderId: "U_A",
   createdAt: 0,
   ...p,
@@ -165,7 +166,8 @@ eq(
 );
 // 2026-10-12 17:05 JST = 08:05 UTC
 eq("17:05 は聞く時刻", isDigestTime(Date.UTC(2026, 9, 12, 8, 5)), true);
-eq("17:10 は過ぎている", isDigestTime(Date.UTC(2026, 9, 12, 8, 10)), false);
+eq("17:55 もまだ聞く時刻（見回りがずれても逃さない）", isDigestTime(Date.UTC(2026, 9, 12, 8, 55)), true);
+eq("18:00 は過ぎている", isDigestTime(Date.UTC(2026, 9, 12, 9, 0)), false);
 eq("16:59 はまだ", isDigestTime(Date.UTC(2026, 9, 12, 7, 59)), false);
 eq("候補が無ければ文面なし", buildDigest([]), null);
 eq("済みの番号だけなら文面なし", buildDigest([null, null]), null);
