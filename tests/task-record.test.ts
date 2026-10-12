@@ -137,6 +137,11 @@ function fake(opts: { failOn?: (props: Record<string, unknown>) => boolean; deal
     const f = fake({ failOn: (p) => "案件" in p });
     const r = await enrichTask("p1", info, f.deps);
     eq("案件に書けなければ、状態だけ残す", [r.deal, f.warns], ["候補あり", ["deal-link"]]);
+    eq(
+      "案件に書けなかったときは、絞れた 1 件の名前を本文に控える（人が選べるように）",
+      f.notes.length === 1 && f.notes[0].includes("サンプルハイツ梅田"),
+      true,
+    );
   }
   {
     const f = fake({ dealsFail: true });

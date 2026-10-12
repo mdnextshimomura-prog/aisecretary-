@@ -181,9 +181,12 @@ export async function enrichTask(
     deps.warn("deal-load");
     return done;
   }
+  // 案件の欄に入れられたか（入れられなかったら、候補の名前を本文に控えて人が選べるようにする）
+  let linked = false;
   try {
     await deps.update(pageId, dealLinkProps(match));
     done.deal = match.state;
+    linked = match.dealId !== null;
   } catch {
     deps.warn("deal-link");
     // 案件の欄に書けない（案件の DB が秘書の連携に共有されていない等）ときは、状態だけでも残す
@@ -194,7 +197,7 @@ export async function enrichTask(
       deps.warn("deal-state");
     }
   }
-  if (match.state === "候補あり" && !match.dealId && match.names.length > 0) {
+  if (match.state === "候補あり" && !linked && match.names.length > 0) {
     await deps
       .note(pageId, `案件の候補：${match.names.join(" ／ ")}`)
       .catch(() => deps.warn("deal-note"));
