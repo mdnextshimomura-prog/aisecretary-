@@ -104,6 +104,20 @@ import {
   followupEnabled,
 } from "@/lib/task-status";
 import { statusDeps } from "@/lib/task-status-wire";
+import {
+  buildDigest,
+  candidatesEnabled,
+  isCandidateListRequest,
+  parseCandidateCommand,
+  pilotUserIds,
+  shouldCapture,
+} from "@/lib/task-candidate";
+import {
+  addCandidate,
+  numberCandidates,
+  putBackCandidate,
+  takeCandidate,
+} from "@/lib/task-candidate-store";
 import { dispatchObiEvents, type ObiEventDeps } from "@/lib/obi/webhook-event";
 import { getObiStore } from "@/lib/obi/memo";
 
@@ -235,6 +249,11 @@ interface LineWebhookBody {
 }
 
 const BOT_USER_ID = process.env.LINE_BOT_USER_ID!;
+
+// 候補として控える確信度の下限。これ未満は雑談・報告とみなして控えない。
+// 登録のしきい値（TASK_CONFIDENCE_THRESHOLD、既定 0.7）より低くしてある：
+// 候補は人が「登録／なし」を決めるので、迷うものを落とさず拾う側に倒す。
+const CANDIDATE_MIN_CONFIDENCE = 0.5;
 
 // メンション部分をテキストから除去して純粋なタスク内容だけ取り出す
 function stripMentions(message: LineMessage): string {
@@ -937,6 +956,92 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
     }
 
+    // ②'' 候補への返事（「1 登録」「2 なし」）と、候補の一覧の頼み（「@AI秘書 候補」）。
+    // スイッチが off のあいだは何もしない。
+    if (candidatesEnabled()) {
+      const stripped = stripMentions(event.message);
+      const candCmd = parseCandidateCommand(stripped);
+      if (candCmd) {
+        try {
+          if (candCmd.action === "register") {
+            // 登録は 1 件ずつ。登録の返信（期日・担当の説明や聞き返し）を 1 件ごとに出すため
+            if (candCmd.numbers.length > 1) {
+              await sendLineMessage(
+                replyToken,
+                "登録は 1 件ずつお願いします（例：「1 登録」）"
+              );
+              continue;
+            }
+            const n = candCmd.numbers[0];
+            const c = await takeCandidate(n);
+            if (!c) {
+              await sendLineMessage(
+                replyToken,
+                `⚠️ ${n}番の候補は見つかりませんでした（登録済みか、消えています）`
+              );
+              continue;
+            }
+            // 元の発言の ID を鍵にする（同じ依頼を 2 度登録しない。あとで元の発言を引用しても引ける）
+            const r = await registerTaskFromText(
+              c.text,
+              replyToken,
+              source.groupId,
+              c.id,
+              c.senderId ?? undefined
+            );
+            if (r === "retry") {
+              await putBackCandidate(n, c);
+              requestRetry();
+              continue;
+            }
+            markCommitted();
+          } else {
+            const dropped: string[] = [];
+            const notFound: number[] = [];
+            for (const n of candCmd.numbers) {
+              const c = await takeCandidate(n);
+              if (c) dropped.push(`${n}. ${c.title}`);
+              else notFound.push(n);
+            }
+            const lines: string[] = [];
+            if (dropped.length > 0) {
+              lines.push(`🗑 候補から外しました（${dropped.length}件）`, ...dropped);
+              markCommitted();
+            }
+            if (notFound.length > 0) {
+              lines.push(`⚠️ ${notFound.join("・")}番の候補は見つかりませんでした`);
+            }
+            await sendLineMessage(replyToken, lines.join("\n"));
+          }
+        } catch (err) {
+          console.error("候補への返事の処理エラー:", err);
+          await sendLineMessage(
+            replyToken,
+            "⚠️ 候補を処理できませんでした。もう一度お試しください。"
+          );
+        }
+        continue;
+      }
+      // グループでは @AI秘書 を付けたときだけ（ふつうの会話の「候補」に反応しない）
+      if (
+        isCandidateListRequest(stripped) &&
+        (!source.groupId ||
+          taskMentionState(event.message.mention?.mentionees, BOT_USER_ID)
+            .mentionsBot)
+      ) {
+        try {
+          const digest = buildDigest(await numberCandidates());
+          await sendLineMessage(
+            replyToken,
+            digest ?? "いま控えている候補はありません。"
+          );
+        } catch (err) {
+          console.error("候補の一覧の処理エラー:", err);
+        }
+        continue;
+      }
+    }
+
     // ③ 引用リプライ → 既存タスクへの操作（取り消し／完了／担当者の後付け・変更）として扱う。
     // 元の依頼メッセージ or Botの「✅タスク登録しました」への引用のどちらでも特定できる。
     const userMentions =
@@ -1120,7 +1225,54 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // ⑥ 通常会話への誤反応を防ぐ。新規タスクは @AI秘書 がある発言だけ受け付ける。
     //    メンションなしの「お願いします」や、社員同士の@メンションには反応しない。
-    if (!mentionState.mentionsBot) continue;
+    if (!mentionState.mentionsBot) {
+      // メンションの無い依頼は、登録せず「候補」として控える（返事はしない）。
+      // 対象は、試行の人が頼んだ／頼まれた、会社グループの、依頼に見える発言だけ。
+      const mentioned = (event.message.mention?.mentionees ?? []).filter(
+        (m) => m.type === "user" && m.userId && m.userId !== BOT_USER_ID
+      );
+      if (
+        candidatesEnabled() &&
+        shouldCapture({
+          groupId: source.groupId,
+          mainGroupId: process.env.LINE_GROUP_ID,
+          senderId: source.userId,
+          mentionedUserIds: mentioned.map((m) => m.userId as string),
+          text,
+          pilot: pilotUserIds(),
+        })
+      ) {
+        try {
+          const parsedCand = await parseTaskFromMessage(text, todayLabel(jstNow()));
+          if (
+            parsedCand.isTask &&
+            parsedCand.confidence >= CANDIDATE_MIN_CONFIDENCE
+          ) {
+            let assignee = parsedCand.assignee;
+            const m = mentioned[0];
+            if (m) {
+              const raw = event.message.text.slice(m.index, m.index + m.length);
+              const name = raw.startsWith("@") ? raw.slice(1) : raw;
+              const c = await canonicalAssignee(m.userId ?? null, name);
+              assignee = c.name ?? name ?? assignee;
+            }
+            await addCandidate({
+              id: event.message.id,
+              text,
+              title: parsedCand.title,
+              assignee: assignee ?? null,
+              senderId: source.userId ?? null,
+              createdAt: Date.now(),
+            });
+            markCommitted();
+          }
+        } catch (err) {
+          // 候補は補助。控えられなくても、今までどおり何もしないだけにする
+          console.error("候補の控えに失敗（何もしない）:", err);
+        }
+      }
+      continue;
+    }
 
     // ここまでで処理されなかった＝タスク候補。ここで初めて添付を取りに行く。
     //    先に取ると「@下村亮太 この名刺の方にメール送って」のようなメール指示でも
@@ -1237,6 +1389,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // タスクでない、または確信度が低い発言は登録しない（雑談・相槌・報告など）
     if (!parsed.isTask || parsed.confidence < TASK_CONFIDENCE_THRESHOLD) {
+      // @AI秘書 あての依頼で、確信度が足りず登録しないもの。今までは黙って捨てていた。
+      // 依頼らしさが残るものは候補に控えて、あとで人に決めてもらう。
+      if (
+        candidatesEnabled() &&
+        parsed.isTask &&
+        parsed.confidence >= CANDIDATE_MIN_CONFIDENCE &&
+        source.groupId &&
+        source.groupId === process.env.LINE_GROUP_ID
+      ) {
+        await addCandidate({
+          id: event.message.id,
+          text,
+          title: parsed.title,
+          assignee: parsed.assignee ?? null,
+          senderId: source.userId ?? null,
+          createdAt: Date.now(),
+        }).catch((err) => console.error("候補の控えに失敗（何もしない）:", err));
+      }
       continue;
     }
 

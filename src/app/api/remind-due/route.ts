@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDueSoonTasks, markNotified } from "@/lib/notion";
 import { pushLineMessageWithMentions, sanitizeForTextV2 } from "@/lib/line";
+import { askCandidatesIfDue } from "@/lib/task-candidate-ask";
 
 // 期限前通知（Vercel Cronから10分おきに呼ばれる）
 // - 期日当日に登録されたタスク（短期のもの）: 期限の1時間前に通知
@@ -25,8 +26,19 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const tasks = await getDueSoonTasks();
   const now = Date.now();
+
+  // タスクの候補を 1 日 1 回（17 時台）聞く。この入口が 10 分おきに叩かれるのに相乗りする。
+  // 失敗しても、下の期限前通知は止めない。ログには結果の符号だけ出す（本文は出さない）
+  const asked = await askCandidatesIfDue(now).catch((e) => {
+    console.error("[remind-due] 候補の聞き取りでエラー（続行）:", e);
+    return "error" as const;
+  });
+  if (asked !== "off" && asked !== "not-time") {
+    console.log(`[remind-due] 候補の聞き取り: ${asked}`);
+  }
+
+  const tasks = await getDueSoonTasks();
   let sent = 0;
   // 起動役（GAS）から叩かれているか可視化するための目印
   console.log(`[remind-due] invoked / 対象候補 ${tasks.length}件`);
