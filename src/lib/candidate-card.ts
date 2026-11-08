@@ -21,6 +21,7 @@ import {
   candidatesEnabled,
   isCandidateGroup,
   type Candidate,
+  type CandidateCommand,
 } from "./task-candidate";
 import {
   CANDIDATE_ID_RE,
@@ -30,6 +31,7 @@ import {
   heldIds,
   holdCandidate,
   numberCandidates,
+  peekCandidate,
   releaseRegister,
   removeCandidateById,
 } from "./task-candidate-store";
@@ -555,4 +557,138 @@ export async function replyCandidateList(
   const r = await candidateListPage(0, groupId, over.list ?? defaultCandidateListDeps());
   await (over.reply ?? replyTextAndCard)(replyToken, r.text, r.card);
   console.log(`[task-candidate] list shown ${r.shown ?? 0}`);
+}
+
+// ── 文字の「n 登録」「n なし」（TASK_MENU on のときだけ route.ts から呼ぶ。off は route.ts の今の処理のまま）──
+
+export interface CandidateTextDeps {
+  /** 番号の候補（そのグループの番号の並びで引く） */
+  peek(n: number, nowMs: number, groupId: string): Promise<Candidate | null>;
+  claimRegister(id: string): Promise<boolean>;
+  releaseRegister(id: string): Promise<void>;
+  /** ID で片付ける（番号では消さない：登録の間に番号が振り直されても別の候補を消さない） */
+  remove(id: string): Promise<void>;
+  members(): Promise<Member[]>;
+  register(c: Candidate, replyToken: string, groupId: string): Promise<RegisterResult>;
+  reply(replyToken: string, text: string): Promise<unknown>;
+  now(): number;
+  log(line: string): void;
+}
+
+export function defaultCandidateTextDeps(
+  io: Pick<CandidateTextDeps, "register" | "reply" | "log">,
+): CandidateTextDeps {
+  return {
+    peek: (n, nowMs, g) => peekCandidate(n, nowMs, g),
+    claimRegister,
+    releaseRegister,
+    remove: removeCandidateById,
+    members: loadMembers,
+    now: Date.now,
+    ...io,
+  };
+}
+
+/**
+ * 文字の「n 登録」「n なし」。押せる人はボタンと同じ（依頼者・メンションされた人・ADMIN・名簿の別アカウント）。
+ * 登録はボタンと同じ予約（SET NX）を通し、失敗・例外では予約を外して候補を残す。片付けは手元の ID で。
+ * 返事の文は今の文字の処理と同じ（押せないときだけボタンと同じ断りの文）。例外は投げない。
+ * committed：何かを片付けた・登録した（route.ts の markCommitted に使う）。
+ */
+export async function handleCandidateTextCommand(
+  cmd: CandidateCommand,
+  actorId: string | undefined,
+  groupId: string,
+  replyToken: string,
+  deps: CandidateTextDeps,
+): Promise<{ committed: boolean }> {
+  const say = async (text: string, code: string) => {
+    deps.log(`[task-candidate] text-${cmd.action} ${code}`);
+    try {
+      await deps.reply(replyToken, text);
+    } catch {
+      deps.log(`[task-candidate] reply-failed text-${cmd.action} ${code}`);
+    }
+  };
+  try {
+    const now = deps.now();
+    const members = await deps.members().catch(() => [] as Member[]);
+    if (cmd.action === "register") {
+      // 登録は 1 件ずつ。登録の返信（期日・担当の説明や聞き返し）を 1 件ごとに出すため
+      if (cmd.numbers.length > 1) {
+        await say("登録は 1 件ずつお願いします（例：「1 登録」）", "multi");
+        return { committed: false };
+      }
+      const n = cmd.numbers[0];
+      const c = await deps.peek(n, now, groupId);
+      if (!c) {
+        await say(`⚠️ ${n}番の候補は見つかりませんでした（登録済みか、消えています）`, "not-found");
+        return { committed: false };
+      }
+      if (!canOperateCandidate(actorId, c, members)) {
+        await say(MSG_CAND_FORBIDDEN, "forbidden");
+        return { committed: false };
+      }
+      if (!(await deps.claimRegister(c.id))) {
+        await say(MSG_CAND_BUSY, "busy");
+        return { committed: false };
+      }
+      let r: RegisterResult;
+      try {
+        r = await deps.register(c, replyToken, groupId);
+      } catch {
+        await deps.releaseRegister(c.id).catch(() => deps.log("[task-candidate] text-register release-failed"));
+        await say(MSG_CAND_ERROR, "error");
+        return { committed: false };
+      }
+      if (r === "ok" || r === "duplicate") {
+        await deps.remove(c.id).catch(() => deps.log("[task-candidate] text-register remove-failed"));
+        if (r === "ok") deps.log("[task-candidate] text-register registered");
+        else await say(`${n}番はすでに登録済みです。`, "duplicate");
+        return { committed: true };
+      }
+      // 失敗：予約を外して候補を残す（送り直せる）
+      await deps.releaseRegister(c.id).catch(() => deps.log("[task-candidate] text-register release-failed"));
+      if (r === "retry") {
+        // LINE の再送は無効なので、503 で待たずにその場で知らせる
+        await say(
+          `⚠️ 登録できたか確かめられませんでした。少し待ってから、もう一度「${n} 登録」と送ってください。`,
+          "retry",
+        );
+      } else deps.log("[task-candidate] text-register failed"); // 理由は登録の側が返事済み
+      return { committed: false };
+    }
+
+    const dropped: string[] = [];
+    const notFound: number[] = [];
+    const forbidden: number[] = [];
+    for (const n of cmd.numbers) {
+      const c = await deps.peek(n, now, groupId);
+      if (!c) notFound.push(n);
+      else if (!canOperateCandidate(actorId, c, members)) forbidden.push(n);
+      else {
+        await deps.remove(c.id);
+        dropped.push(`${n}. ${c.title}`);
+      }
+    }
+    if (dropped.length === 0 && notFound.length === 0 && forbidden.length > 0) {
+      await say(MSG_CAND_FORBIDDEN, "forbidden");
+      return { committed: false };
+    }
+    const lines: string[] = [];
+    if (dropped.length > 0) {
+      lines.push(`🗑 候補から外しました（${dropped.length}件）`, ...dropped);
+    }
+    if (notFound.length > 0) {
+      lines.push(`⚠️ ${notFound.join("・")}番の候補は見つかりませんでした`);
+    }
+    if (forbidden.length > 0) {
+      lines.push(`⚠️ ${forbidden.join("・")}番：${MSG_CAND_FORBIDDEN}`);
+    }
+    await say(lines.join("\n"), dropped.length > 0 ? "dropped" : "not-found");
+    return { committed: dropped.length > 0 };
+  } catch {
+    await say(MSG_CAND_ERROR, "error");
+    return { committed: false };
+  }
 }

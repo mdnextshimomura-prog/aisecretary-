@@ -139,15 +139,14 @@ import {
 } from "@/lib/task-candidate";
 import {
   addCandidate,
-  claimRegister,
   numberCandidates,
   peekCandidate,
-  releaseRegister,
   removeCandidate,
 } from "@/lib/task-candidate-store";
 import {
   candidateCardsActive,
-  MSG_CAND_BUSY,
+  defaultCandidateTextDeps,
+  handleCandidateTextCommand,
   replyCandidateCard,
   replyCandidateList,
 } from "@/lib/candidate-card";
@@ -1126,6 +1125,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             () => null
           )
         : null;
+      if (candCmd && !menuPending && candidateCardsActive()) {
+        // TASK_MENU on：ボタンと同じ押せる人・同じ登録の予約（失敗・例外で外す）・ID での片付け（candidate-card.ts）
+        const r = await handleCandidateTextCommand(
+          candCmd,
+          source.userId,
+          candGroup,
+          replyToken,
+          defaultCandidateTextDeps({
+            register: (c, token, groupId) =>
+              registerTaskFromText(c.text, token, groupId, c.id, c.senderId ?? undefined, {
+                assignee: c.assignee,
+                assigneeUserId: c.assigneeUserId,
+                baseMs: c.createdAt,
+                buttons: true,
+              }),
+            reply: sendLineMessage,
+            log: (line) => console.log(line),
+          })
+        );
+        if (r.committed) markCommitted();
+        continue;
+      }
       if (candCmd && !menuPending) {
         try {
           if (candCmd.action === "register") {
@@ -1146,14 +1167,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               );
               continue;
             }
-            // TASK_MENU on：ボタンの［登録する］と同じ予約（SET NX）を通す（文字とボタンが同時でも1回）
-            const regClaimed = candidateCardsActive()
-              ? await claimRegister(c.id)
-              : true;
-            if (!regClaimed) {
-              await sendLineMessage(replyToken, MSG_CAND_BUSY);
-              continue;
-            }
             // 元の発言の ID を鍵にする（同じ依頼を 2 度登録しない）。
             // 候補を消すのは、登録できたと分かってから。
             const r = await registerTaskFromText(
@@ -1169,9 +1182,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
                 buttons: true,
               }
             );
-            if (candidateCardsActive() && r !== "ok" && r !== "duplicate") {
-              await releaseRegister(c.id).catch(() => undefined);
-            }
             if (r === "ok") {
               await removeCandidate(n, candGroup);
               markCommitted();

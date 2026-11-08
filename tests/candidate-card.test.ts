@@ -871,6 +871,93 @@ const setEnv = (on: { menu?: boolean; cand?: boolean }) => {
     s._setKvForTest(null);
   }
 
+  // ── 文字の「n 登録」「n なし」（TASK_MENU on。handleCandidateTextCommand）──
+  {
+    setEnv({ menu: true });
+    const f = fakeKv();
+    s._setKvForTest(f.kv);
+    const mk = (over: Partial<import("../src/lib/candidate-card").CandidateTextDeps> = {}) => {
+      const replies: string[] = [];
+      const deps: import("../src/lib/candidate-card").CandidateTextDeps = {
+        ...cc.defaultCandidateTextDeps({
+          register: async () => "ok",
+          reply: async (_t, text) => {
+            replies.push(text);
+          },
+          log: () => undefined,
+        }),
+        members: async () => members,
+        now: () => NOW,
+        ...over,
+      };
+      return { deps, replies };
+    };
+    await s.addCandidate(cand("t1"), NOW);
+    await s.addCandidate(cand("t2"), NOW + 1);
+    await s.numberCandidates(NOW, G1);
+
+    // 例外でも予約を外す
+    const d1 = mk({
+      register: async () => {
+        throw new Error("x");
+      },
+    });
+    const r1 = await cc.handleCandidateTextCommand({ action: "register", numbers: [1] }, U_REQ, G1, "rt", d1.deps);
+    ok("文字の登録で例外：予約を外す", !f.data.has("taskcand:reg:t1"), Array.from(f.data.keys()).join());
+    ok("文字の登録で例外：候補は残り、失敗の文", (await s.getCandidate("t1", NOW)) !== null && d1.replies.join() === cc.MSG_CAND_ERROR && r1.committed === false);
+
+    // retry・failed でも予約を外す
+    for (const res of ["retry", "failed"] as const) {
+      const d = mk({ register: async () => res });
+      await cc.handleCandidateTextCommand({ action: "register", numbers: [1] }, U_REQ, G1, "rt", d.deps);
+      ok(`文字の登録が ${res}：予約を外して候補を残す`, !f.data.has("taskcand:reg:t1") && (await s.getCandidate("t1", NOW)) !== null);
+    }
+
+    // 登録の間に番号が振り直されても、手元の ID の候補を消す
+    const d2 = mk({
+      register: async () => {
+        // 登録の最中に1番が片付き、全部片付いたあと新しい候補が1番に振られた、という並びを作る
+        await s.removeCandidateById("t1");
+        await s.removeCandidateById("t2");
+        await s.addCandidate(cand("t9"), NOW + 9);
+        await f.kv.set(`taskcand:num:${G1}`, ["t9"], { ex: 60 });
+        await s.addCandidate(cand("t1"), NOW);
+        return "ok";
+      },
+    });
+    const r2 = await cc.handleCandidateTextCommand({ action: "register", numbers: [1] }, U_REQ, G1, "rt", d2.deps);
+    ok("文字の登録：番号ではなく ID で片付ける（振り直された1番＝別の候補を消さない）", (await s.getCandidate("t9", NOW)) !== null && (await s.getCandidate("t1", NOW)) === null && r2.committed === true);
+
+    // 押せる人を揃える
+    await s.removeCandidateById("t9");
+    await s.addCandidate(cand("u1"), NOW);
+    await s.addCandidate(cand("u2", { senderId: U_OTHER, mentionedUserIds: [] }), NOW + 1);
+    await f.kv.del(`taskcand:num:${G1}`);
+    await s.numberCandidates(NOW, G1);
+    const nums = (await s.getNumbered(G1)).map((c) => c?.id ?? null);
+    const nU1 = nums.indexOf("u1") + 1;
+    const nU2 = nums.indexOf("u2") + 1;
+    let registered = 0;
+    const d3 = mk({
+      register: async () => {
+        registered++;
+        return "ok";
+      },
+    });
+    await cc.handleCandidateTextCommand({ action: "register", numbers: [nU1] }, U_OTHER, G1, "rt", d3.deps);
+    ok("文字の登録：押せない人はボタンと同じ断り", d3.replies.join() === cc.MSG_CAND_FORBIDDEN && registered === 0 && (await s.getCandidate("u1", NOW)) !== null);
+    const d4 = mk();
+    await cc.handleCandidateTextCommand({ action: "skip", numbers: [nU1] }, U_OTHER, G1, "rt", d4.deps);
+    ok("文字の「なし」：押せない人はボタンと同じ断り・消さない", d4.replies.join() === cc.MSG_CAND_FORBIDDEN && (await s.getCandidate("u1", NOW)) !== null);
+    const d5 = mk();
+    await cc.handleCandidateTextCommand({ action: "skip", numbers: [nU1, nU2] }, U_TO_ALT, G1, "rt", d5.deps);
+    ok("文字の「なし」：外せる分だけ外し、外せない番号は断りを添える", (await s.getCandidate("u1", NOW)) === null && (await s.getCandidate("u2", NOW)) !== null && d5.replies[0].includes("候補から外しました（1件）") && d5.replies[0].includes(`${nU2}番：${cc.MSG_CAND_FORBIDDEN}`), d5.replies.join());
+    const d6 = mk();
+    const r6 = await cc.handleCandidateTextCommand({ action: "skip", numbers: [nU2, 9] }, U_ADMIN, G1, "rt", d6.deps);
+    ok("文字の「なし」：ADMIN は外せる・無い番号は今まで通りの文", (await s.getCandidate("u2", NOW)) === null && d6.replies[0].includes("⚠️ 9番の候補は見つかりませんでした") && r6.committed === true);
+    s._setKvForTest(null);
+  }
+
   // ── 迷った依頼の返事：候補カード1枚（reply）──
   {
     setEnv({ menu: true });
