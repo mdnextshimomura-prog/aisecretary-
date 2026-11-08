@@ -9,7 +9,7 @@
  * - 残りタスク数・近い期日は、一覧（task-menu.ts）と同じく押したグループの `発生元` で絞って数える
  *   （別グループのタスクの件数を見せない）。案件そのもの（名前・フェーズ）は社内の CRM なので絞らない。
  * - ［タスクを足す］：KV に `dealnext:<groupId>:<userId>` = 案件 ID（10分）。その人の次の @秘書 の依頼の
- *   登録が成功したら、`案件` を入れて `案件の状態` を「確定」にし、印を消す（applyDealPick）。
+ *   登録が成功したら、`案件` を入れて `案件の状態` を「確定」にする（印は GETDEL で取ると同時に消す。applyDealPick）。
  *   TASK_RECORD の自動の照合より優先（照合は飛ばす）。TASK_RECORD が off でも案件だけは書く。
  * - CRM_案件 の欄には書かない（読むだけ）。読めなければ「案件を読み取れませんでした」。
  * Notion・KV は deps で受け取る（本物は deal-card-wire.ts）。ログは操作名・件数・符号だけ（案件名・userId は出さない）。
@@ -275,6 +275,8 @@ export interface DealKv {
   get(key: string): Promise<unknown>;
   set(key: string, value: unknown, ex: number): Promise<void>;
   del(key: string): Promise<void>;
+  /** 読むのと消すのを1回で（Redis の GETDEL。並行した2件の登録の片方だけが印を取れる） */
+  getdel(key: string): Promise<unknown>;
 }
 
 export interface DealDeps {
@@ -365,8 +367,9 @@ export interface DealPickDeps {
 }
 
 /**
- * 登録の前に、その人の［タスクを足す］の印を読む（消さない）。TASK_MENU off・1対1・KV 未設定・読めないときは null
- * （off のあいだは KV を1回も呼ばない）。
+ * 登録の前に、その人の［タスクを足す］の印を取る（GETDEL＝読むのと同時に消す。同じ人の2件の依頼が別々の webhook で
+ * 並行しても、印を取れるのは片方だけ）。取ったあと書き込みに失敗すると印は失われる（ログ write-failed。それでよい）。
+ * TASK_MENU off・1対1・KV 未設定・読めないときは null（off のあいだは KV を1回も呼ばない）。
  */
 export async function takeDealPick(
   groupId: string | null | undefined,
@@ -375,7 +378,7 @@ export async function takeDealPick(
 ): Promise<string | null> {
   if (!menuActive() || !groupId || !userId || !deps.kv) return null;
   try {
-    const v = (await deps.kv.get(dealNextKey(groupId, userId))) as
+    const v = (await deps.kv.getdel(dealNextKey(groupId, userId))) as
       { dealId?: unknown } | null | undefined;
     const id = v && typeof v === "object" ? v.dealId : null;
     return typeof id === "string" && PAGE_ID_RE.test(id) ? id : null;
@@ -394,7 +397,7 @@ export function pickedDealProps(dealId: string): Record<string, unknown> {
 }
 
 /**
- * 登録が成功したあとに呼ぶ：`案件` を入れて「確定」にし、印を消す（書けなくても印は消す＝登録は成功しているため）。
+ * 登録が成功したあとに呼ぶ：`案件` を入れて「確定」にする（印は takeDealPick で取った時点で消えている）。
  * 例外は投げない。
  */
 export async function applyDealPick(
@@ -410,11 +413,6 @@ export async function applyDealPick(
     wrote = true;
   } catch {
     deps.log("[deal-card] pick write-failed");
-  }
-  try {
-    await deps.kv?.del(dealNextKey(groupId, userId));
-  } catch {
-    deps.log("[deal-card] pick clear-failed");
   }
   deps.log(`[deal-card] pick ${wrote ? "applied" : "not-applied"}`);
   return wrote;

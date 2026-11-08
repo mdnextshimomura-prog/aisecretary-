@@ -75,6 +75,7 @@ export function defaultDealKv(): DealKv | null {
     del: async (key) => {
       await kv.del(key);
     },
+    getdel: (key) => kv.getdel(key),
   };
 }
 

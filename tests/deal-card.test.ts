@@ -127,6 +127,13 @@ function fakeKv(init: Record<string, unknown> = {}) {
       calls.push(`del ${k}`);
       data.delete(k);
     },
+    // 本物の GETDEL と同じ意味：読むのと消すのを1回で（間に await を挟まない）
+    getdel: async (k) => {
+      calls.push(`getdel ${k}`);
+      const v = data.get(k) ?? null;
+      data.delete(k);
+      return v;
+    },
   };
   return { kv, data, calls, sets };
 }
@@ -559,6 +566,14 @@ const bubbleText = (b: Record<string, unknown>) => JSON.stringify(b);
     "on：印を読む",
     (await takeDealPick("Cg", U1, { kv: kon.kv, log })) === did(1),
   );
+  ok("取った時点で印は消えている（GETDEL）", !kon.data.has(dealNextKey("Cg", U1)) && kon.calls.some((c) => c.startsWith("getdel ")) && !kon.calls.some((c) => c.startsWith("get ")));
+  kon.data.set(dealNextKey("Cg", U1), { dealId: did(1) });
+  const kpar = fakeKv({ [dealNextKey("Cg", U1)]: { dealId: did(1) } });
+  const both = await Promise.all([
+    takeDealPick("Cg", U1, { kv: kpar.kv, log }),
+    takeDealPick("Cg", U1, { kv: kpar.kv, log }),
+  ]);
+  ok("並行2件：片方だけに案件が付く", both.filter((x) => x === did(1)).length === 1 && both.filter((x) => x === null).length === 1, JSON.stringify(both));
   ok(
     "ほかの人の印は使わない",
     (await takeDealPick("Cg", U2, { kv: kon.kv, log })) === null,
@@ -587,6 +602,7 @@ const bubbleText = (b: Record<string, unknown>) => JSON.stringify(b);
   const update = async (p: string, props: Record<string, unknown>) => {
     updates.push([p, props]);
   };
+  kon.calls.length = 0;
   const wrote = await applyDealPick(tid(1), did(1), "Cg", U1, {
     kv: kon.kv,
     update,
@@ -606,7 +622,7 @@ const bubbleText = (b: Record<string, unknown>) => JSON.stringify(b);
         案件: { relation: [{ id: did(1) }] },
       }),
   );
-  ok("反映：印を消す", !kon.data.has(dealNextKey("Cg", U1)));
+  ok("反映：applyDealPick は KV を呼ばない（印は取った時点で消えている）", wrote && kon.calls.length === 0);
   const kfail = fakeKv({ [dealNextKey("Cg", U1)]: { dealId: did(1) } });
   const wf = await applyDealPick(tid(1), did(1), "Cg", U1, {
     kv: kfail.kv,
@@ -616,8 +632,8 @@ const bubbleText = (b: Record<string, unknown>) => JSON.stringify(b);
     log,
   });
   ok(
-    "書けなくても印は消す（登録は成功している）",
-    !wf && !kfail.data.has(dealNextKey("Cg", U1)),
+    "書けなければ write-failed（applyDealPick は印に触らない）",
+    !wf && logs.includes("[deal-card] pick write-failed") && kfail.calls.length === 0,
   );
   ok(
     "ログに ID を出さない",
@@ -854,6 +870,10 @@ const bubbleText = (b: Record<string, unknown>) => JSON.stringify(b);
       },
       del: async () => {
         touched++;
+      },
+      getdel: async () => {
+        touched++;
+        return null;
       },
     },
   };
