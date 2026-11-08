@@ -259,6 +259,44 @@ async function main() {
     after?.assignee === "鈴木 次郎" && after?.assigneeUserId === U4,
     JSON.stringify(after),
   );
+  // Notion が書けなければ、セッションは残り、完了印も付けない
+  reset();
+  await handleTaskPostbackEvent(ev(`v1|done|${PAGE}`, "E8"), io({
+    deps: {
+      ...deps,
+      session: sessionDeps("G1"),
+      complete: async () => {
+        throw new Error("notion down");
+      },
+    },
+  }));
+  ok("Notion 失敗：セッションが残る", (await getPendingTaskConfirm("G1", null, PAGE)) !== null);
+  ok("Notion 失敗：完了印を付けない", completed.length === 0, completed.join());
+  ok("Notion 失敗：もう一度の返事", String(replies[0]?.text).startsWith("⚠️ 書き込めませんでした"));
+  // 成功ならセッションが消える
+  reset();
+  await handleTaskPostbackEvent(ev(`v1|done|${PAGE}`, "E9"), io({
+    deps: { ...deps, session: sessionDeps("G1") },
+  }));
+  ok("成功：セッションが消える", (await getPendingTaskConfirm("G1", null, PAGE)) === null);
+  ok("成功：完了印を付ける", completed.join() === "pb:E9");
+  await savePendingTaskConfirm("G1", { ...base });
+  // セッション削除の失敗は種別だけログ、返事は成功
+  reset();
+  await handleTaskPostbackEvent(ev(`v1|done|${PAGE}`, "E10"), io({
+    deps: {
+      ...deps,
+      session: {
+        ...deps.session,
+        clear: async () => {
+          throw new Error("kv down");
+        },
+      },
+    },
+  }));
+  ok("削除失敗：session-clear-failed を出す", logs.includes("[task-buttons] session-clear-failed"), logs.join(" / "));
+  ok("削除失敗：返事は成功のまま", String(replies[0]?.text).startsWith("☑️ 完了にしました"));
+  ok("削除失敗：完了印は付ける", completed.join() === "pb:E10");
   await s.clear(PAGE);
   ok(
     "済・不要：確認セッションを消す",

@@ -12,6 +12,7 @@ import {
   completeEvent,
   deletePendingTaskConfirm,
   getPendingTaskConfirm,
+  releaseEvent,
   reserveEvent,
   savePendingTaskConfirm,
 } from "./email/session";
@@ -122,6 +123,8 @@ export interface PostbackIo {
   deps: ButtonDeps;
   reserve(key: string): Promise<{ proceed: boolean }>;
   complete(key: string): Promise<void>;
+  /** Notion に書けなかったとき、予約を外す */
+  release(key: string): Promise<void>;
   /** 送ったメッセージの ID。送れなければ null */
   reply(replyToken: string, text: string, quickReply?: QuickReply): Promise<string | null>;
   log(line: string): void;
@@ -144,6 +147,7 @@ export async function handleTaskPostbackEvent(
     deps: over.deps ?? buttonDeps(event.source.groupId),
     reserve: over.reserve ?? reserveEvent,
     complete: over.complete ?? completeEvent,
+    release: over.release ?? releaseEvent,
     reply: over.reply ?? sendLineMessage,
     log: over.log ?? ((line) => console.log(line)),
   };
@@ -178,25 +182,29 @@ export async function handleTaskPostbackEvent(
     }
     if (!claim.proceed) return;
   }
+  let r;
   try {
-    let r;
-    try {
-      r = await handleTaskButton(data, event.source.userId, io.deps);
-    } catch {
-      io.log(`[task-buttons] ${op} failed`);
-      await send("⚠️ 書き込めませんでした。もう一度お試しください。", undefined, "error");
-      return;
-    }
+    r = await handleTaskButton(data, event.source.userId, io.deps);
+  } catch {
+    // Notion に書けなかった（または読めなかった）。何も消さず、完了印も付けない。
+    // 予約は外す（再送が来ればやり直せる。押し直しは別のイベントになる）
+    io.log(`[task-buttons] ${op} failed`);
+    if (key) await io.release(key).catch(() => io.log("[task-buttons] release-failed"));
+    await send("⚠️ 書き込めませんでした。もう一度お試しください。", undefined, "error");
+    return;
+  }
+  // ここからは Notion が書けている（または書く必要が無い）。返事が送れなくても完了印は付ける（再適用を防ぐ）
+  try {
     if (!r) {
       io.log("[task-buttons] invalid-data");
       await send("⚠️ このボタンは使えません", undefined, "invalid");
       return;
     }
+    for (const w of r.warnings ?? []) io.log(`[task-buttons] ${w}`);
     const code = r.changed ? "changed" : "no-change";
     io.log(`[task-buttons] ${op} ${code}`);
     await send(r.text, r.quickReply, code);
   } finally {
-    // Notion は書けているので、返事が送れなくても完了印は付ける（再適用を防ぐ）
     if (key) {
       await io.complete(key).catch(() => io.log("[task-buttons] mark-failed"));
     }

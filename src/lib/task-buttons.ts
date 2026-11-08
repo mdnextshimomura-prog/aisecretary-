@@ -270,6 +270,21 @@ export interface ButtonReply {
   quickReply?: QuickReply;
   /** Notion に書いたか */
   changed: boolean;
+  /** 返事は成功のまま、ログに種別だけ出す印（例：session-clear-failed） */
+  warnings?: string[];
+}
+
+/** Notion を書けたあとに確認セッションを消す。消せなくても返事は成功のまま（印だけ返す）。 */
+async function clearSessionAfter(
+  deps: ButtonDeps,
+  pageId: string,
+): Promise<string[] | undefined> {
+  try {
+    await deps.session.clear(pageId);
+    return undefined;
+  } catch {
+    return ["session-clear-failed"];
+  }
 }
 
 /** 特権者（下村さん）：TASK_BUTTONS_ADMIN_IDS（LINE userId、カンマ区切り）。未設定なら誰もいない */
@@ -319,11 +334,17 @@ export async function handleTaskButton(
 
   const again = taskQuickReply(task.id);
   switch (op) {
-    case "done":
-      // 確認セッションを先に消す（残すと、後の回答で「未着手」に戻る）
-      await deps.session.clear(task.id);
+    case "done": {
+      // Notion が先。書けなければ例外で抜け、確認セッション（回答先）は残す。
+      // 書けたらセッションを消す（残すと、後の回答で「未着手」に戻る）
       await deps.complete(task.id);
-      return { text: `☑️ 完了にしました\n📋 ${task.title}`, changed: true };
+      const warnings = await clearSessionAfter(deps, task.id);
+      return {
+        text: `☑️ 完了にしました\n📋 ${task.title}`,
+        changed: true,
+        ...(warnings ? { warnings } : {}),
+      };
+    }
     case "wait": {
       const text = await applyStatusToTask(
         { kind: "wait", note: "", date: null },
@@ -333,9 +354,9 @@ export async function handleTaskButton(
       return { text, quickReply: again, changed: true };
     }
     case "drop": {
-      await deps.session.clear(task.id);
       const text = await applyStatusToTask({ kind: "drop" }, task, deps.status);
-      return { text, changed: true };
+      const warnings = await clearSessionAfter(deps, task.id);
+      return { text, changed: true, ...(warnings ? { warnings } : {}) };
     }
     case "pmenu": {
       const quickReply = postponeQuickReply(task.id, deps.today());

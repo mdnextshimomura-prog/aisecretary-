@@ -499,23 +499,69 @@ async function main() {
       slog.join(),
     );
   }
-  {
-    const { deps, log } = makeDeps(openTask, roster);
+  for (const op of ["done", "drop"] as const) {
+    // Notion が先。書けなければセッションは消さない（確認への回答先を残す）
+    const { deps, slog } = makeDeps(openTask, roster);
+    const broken: ButtonDeps = {
+      ...deps,
+      complete: async () => {
+        throw new Error("notion down");
+      },
+      status: {
+        ...deps.status,
+        update: async () => {
+          throw new Error("notion down");
+        },
+      },
+    };
     let threw = false;
     try {
-      await handleTaskButton(`v1|done|${PAGE}`, U(2), {
-        ...deps,
-        session: {
-          ...deps.session,
-          clear: async () => {
-            throw new Error("kv down");
-          },
-        },
-      });
+      await handleTaskButton(`v1|${op}|${PAGE}`, U(2), broken);
     } catch {
       threw = true;
     }
-    ok("セッションを消せなければ完了も書かない（先に消す）", threw && log.length === 0);
+    ok(`${op}：Notion が書けなければ例外で、セッションは消さない`, threw && slog.length === 0, slog.join());
+
+    // セッションが消せなくても、返事は成功のまま（印だけ返す）
+    const b = makeDeps(openTask, roster);
+    const r = await handleTaskButton(`v1|${op}|${PAGE}`, U(2), {
+      ...b.deps,
+      session: {
+        ...b.deps.session,
+        clear: async () => {
+          throw new Error("kv down");
+        },
+      },
+    });
+    ok(
+      `${op}：セッションが消せなくても返事は成功のまま`,
+      b.log.length === 1 && r?.changed === true && /完了|不要/.test(r.text),
+      r?.text,
+    );
+    ok(
+      `${op}：セッションが消せなかった印を返す`,
+      JSON.stringify(r?.warnings) === JSON.stringify(["session-clear-failed"]),
+      JSON.stringify(r?.warnings),
+    );
+  }
+  {
+    const { deps, log, slog } = makeDeps(openTask, roster);
+    const order: string[] = [];
+    await handleTaskButton(`v1|done|${PAGE}`, U(2), {
+      ...deps,
+      complete: async (id) => {
+        order.push("notion");
+        await deps.complete(id);
+      },
+      session: {
+        ...deps.session,
+        clear: async (id) => {
+          order.push("session");
+          await deps.session.clear(id);
+        },
+      },
+    });
+    ok("済：Notion を書いてからセッションを消す", order.join() === "notion,session" && log.length === 1 && slog.length === 1, order.join());
   }
 
   // ── 処理済み・見つからない ──
