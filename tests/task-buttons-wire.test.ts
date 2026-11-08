@@ -19,6 +19,8 @@ import {
   addPendingHandoff,
   getPendingHandoffs,
   deletePendingTaskConfirm,
+  acquireLock,
+  releaseLock,
 } from "../src/lib/email/session";
 import { statusForConfirmComplete } from "../src/lib/task-closed";
 
@@ -30,6 +32,13 @@ const ok = (name: string, cond: boolean, d = "") => {
     console.log(`❌ ${name} ${d}`);
   }
 };
+
+// 外部（LINE・Notion・KV）へ通信したら失敗にする（どのテストも差し替えだけで動くことを確かめる）
+let fetchCalls = 0;
+globalThis.fetch = (async () => {
+  fetchCalls++;
+  throw new Error("このテストで外部へ通信してはいけない");
+}) as typeof fetch;
 
 const PAGE = "1234abcd-1234-1234-1234-1234567890ab";
 const U2 = `U${"2".padStart(32, "0")}`;
@@ -89,6 +98,11 @@ function io(over: Partial<PostbackIo> = {}): Partial<PostbackIo> {
       return "m1";
     },
     log: (line) => logs.push(line),
+    readMessageIds: async () => [],
+    setMessageIds: async () => undefined,
+    lock: acquireLock,
+    unlock: releaseLock,
+    sleep: async () => undefined,
     ...over,
   };
 }
@@ -562,6 +576,7 @@ async function main() {
         replies.push({ text, card });
         return { textId: "T2", cardId: "C2" };
       },
+      readMessageIds: async () => ["SRC", "T1", "C1"],
       setMessageIds: async (_pageId, ids) => {
         idWrites.push(ids);
       },
@@ -611,6 +626,108 @@ async function main() {
     }));
     ok("確認セッションが無ければ作らない", (await getPendingTaskConfirm("G5", null, PAGE)) === null);
   }
+
+  // ── 同じタスクへの2操作が並んでも、両方の ID が残る（ID の保存だけ KV ロックで囲み、中で読み直す） ──
+  {
+    process.env.TASK_BUTTONS = "1";
+    process.env.TASK_FOLLOWUP = "1";
+    await savePendingTaskConfirm("G6", { ...base, botMessageId: "T1", cardMessageId: "C1" });
+    let store = ["SRC", "T1", "C1"];
+    const tick = () => new Promise((r) => setTimeout(r, 5));
+    const shared = {
+      deps: { ...deps, session: sessionDeps("G6") },
+      readMessageIds: async () => {
+        const v = [...store];
+        await tick();
+        return v;
+      },
+      setMessageIds: async (_p: string, ids: string[]) => {
+        await tick();
+        store = ids;
+      },
+      sleep: () => new Promise<void>((r) => setTimeout(r, 10)),
+    };
+    let n = 0;
+    reset();
+    await Promise.all(
+      ["PA", "PB"].map((k) =>
+        handleTaskPostbackEvent(
+          { ...ev(`v1|wait|${PAGE}`, k), source: { userId: U2, groupId: "G6" } },
+          io({
+            ...shared,
+            reply: async () => {
+              n++;
+              await tick();
+              return { textId: `T-${k}`, cardId: `C-${k}` };
+            },
+          }),
+        ),
+      ),
+    );
+    ok(
+      "並行2操作：Notion のメッセージID に両方の ID が残る（元の並びも保つ）",
+      n === 2 && store.slice(0, 3).join() === "SRC,T1,C1" &&
+        ["T-PA", "C-PA", "T-PB", "C-PB"].every((id) => store.includes(id)),
+      store.join(),
+    );
+    const sess = await getPendingTaskConfirm("G6", null, PAGE);
+    ok(
+      "並行2操作：確認セッションにも両方の ID が残る",
+      ["T-PA", "C-PA", "T-PB", "C-PB"].every((id) => sess?.moreMessageIds?.includes(id)),
+      JSON.stringify(sess?.moreMessageIds),
+    );
+    ok("並行2操作：ロックは外れている", (await acquireLock(`taskids:${PAGE}`, 5)) !== null);
+    await releaseLock(`taskids:${PAGE}`, "x");
+
+    // ロックが取れないときは ids-busy だけ出し、書かない（返事・完了印は変えない）
+    reset();
+    let wrote = 0;
+    await handleTaskPostbackEvent(
+      { ...ev(`v1|wait|${PAGE}`, "PC"), source: { userId: U2, groupId: "G6" } },
+      io({
+        ...shared,
+        reply: async () => ({ textId: "T-PC", cardId: "C-PC" }),
+        lock: async () => null,
+        setMessageIds: async () => {
+          wrote++;
+        },
+      }),
+    );
+    ok("ロックが取れない：ids-busy を出す", logs.includes("[task-buttons] ids-busy"), logs.join(" / "));
+    ok("ロックが取れない：書かない", wrote === 0);
+    ok("ロックが取れない：完了印は付ける", completed.join() === "pb:PC");
+
+    // 書けなくてもロックは外す（自分のトークンのときだけ）
+    reset();
+    const unlocked: string[] = [];
+    await handleTaskPostbackEvent(
+      { ...ev(`v1|wait|${PAGE}`, "PD"), source: { userId: U2, groupId: "G6" } },
+      io({
+        ...shared,
+        reply: async () => ({ textId: "T-PD", cardId: "C-PD" }),
+        lock: async () => "tok-1",
+        unlock: async (_k, tok) => {
+          unlocked.push(tok);
+        },
+        setMessageIds: async () => {
+          throw new Error("notion down");
+        },
+      }),
+    );
+    ok("書けなくてもロックを外す（自分のトークンで）", unlocked.join() === "tok-1");
+    await deletePendingTaskConfirm("G6", PAGE);
+  }
+  {
+    // ロック本体：同じキーは1人だけ・他人のトークンでは外れない・期限で外れる
+    const t1 = await acquireLock("lk:test", 1);
+    const t2 = await acquireLock("lk:test", 1);
+    ok("ロック：同じキーは1人だけ", t1 !== null && t2 === null);
+    await releaseLock("lk:test", "someone-else");
+    ok("ロック：他人のトークンでは外れない", (await acquireLock("lk:test", 1)) === null);
+    await releaseLock("lk:test", t1!);
+    ok("ロック：自分のトークンで外れる", (await acquireLock("lk:test", 1)) !== null);
+  }
+  ok("このテストは外部へ通信しない", fetchCalls === 0, String(fetchCalls));
 
   if (fail > 0) {
     console.log(`\n${fail} 件失敗`);

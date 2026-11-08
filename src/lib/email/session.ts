@@ -726,6 +726,39 @@ export async function releaseMessage(messageId: string): Promise<void> {
   else claimMem.delete(key);
 }
 
+// ── 短いロック（同じタスクへの並行した書き足しを1つずつにする。task-buttons-wire.ts の ID の保存） ──
+//
+// SET NX＋期限で取り、外すのは自分のトークンのときだけ（期限切れの後に別の人が取ったロックを消さない）。
+const lockMem = new Map<string, { token: string; expireAt: number }>();
+
+/** 取れたらトークン、取れなければ null */
+export async function acquireLock(key: string, ttlSeconds: number): Promise<string | null> {
+  const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const k = `lock:${key}`;
+  if (kvEnabled()) {
+    const won = await kv.set(k, token, { nx: true, ex: ttlSeconds });
+    return won ? token : null;
+  }
+  const cur = lockMem.get(k);
+  if (cur && cur.expireAt > Date.now()) return null;
+  lockMem.set(k, { token, expireAt: Date.now() + ttlSeconds * 1000 });
+  return token;
+}
+
+/** 自分のトークンのときだけ外す */
+export async function releaseLock(key: string, token: string): Promise<void> {
+  const k = `lock:${key}`;
+  if (kvEnabled()) {
+    await kv.eval(
+      'if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end',
+      [k],
+      [token]
+    );
+    return;
+  }
+  if (lockMem.get(k)?.token === token) lockMem.delete(k);
+}
+
 // ── 引き渡し（担当者への通知）の再送待ち ──
 //
 // 送信に失敗したまま確認状態を消すと、条件は固まったのに担当者へ

@@ -12,6 +12,8 @@ import {
   completeEvent,
   deletePendingTaskConfirm,
   getPendingTaskConfirm,
+  acquireLock,
+  releaseLock,
   reserveEvent,
   savePendingTaskConfirm,
 } from "./email/session";
@@ -144,16 +146,57 @@ export interface SentIds {
   cardId: string | null;
 }
 
+/** タスクの今の メッセージID（カンマ区切り）を読む */
+export async function readTaskMessageIds(pageId: string): Promise<string[]> {
+  const page = (await notion.pages.retrieve({
+    page_id: pageId,
+  })) as unknown as Record<string, unknown>;
+  const props = (page.properties as Record<string, unknown>) ?? {};
+  return (richText(props, "メッセージID") ?? "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+const IDS_LOCK_TTL_SECONDS = 5;
+const IDS_LOCK_TRIES = 5;
+const IDS_LOCK_WAIT_MS = 200;
+
 /**
  * 付け直したカード（と text）の ID を控える：確認セッションが残っていれば照合の対象に足し、
- * タスクの メッセージID にも足す（引用で引けるように）。どちらかが失敗しても止めない（印を返す）。
+ * タスクの メッセージID にも足す（引用で引けるように）。
+ * 同じタスクへの操作が並んでも片方の ID が消えないよう、タスク単位の短いロックの中で読み直してから足す。
+ * ロックが取れなければ数回待ってやり直し、それでもだめなら書かずに ids-busy。失敗しても止めない（印を返す）。
  */
 async function rememberResentIds(
   groupId: string | undefined,
   pageId: string,
-  existing: string[],
   ids: string[],
-  setIds: PostbackIo["setMessageIds"],
+  io: PostbackIo,
+): Promise<string[]> {
+  const key = `taskids:${pageId}`;
+  let token: string | null = null;
+  for (let i = 0; i < IDS_LOCK_TRIES && !token; i++) {
+    if (i > 0) await io.sleep(IDS_LOCK_WAIT_MS);
+    try {
+      token = await io.lock(key, IDS_LOCK_TTL_SECONDS);
+    } catch {
+      token = null;
+    }
+  }
+  if (!token) return ["ids-busy"];
+  try {
+    return await writeResentIds(groupId, pageId, ids, io);
+  } finally {
+    await io.unlock(key, token).catch(() => io.log("[task-buttons] unlock-failed"));
+  }
+}
+
+async function writeResentIds(
+  groupId: string | undefined,
+  pageId: string,
+  ids: string[],
+  io: PostbackIo,
 ): Promise<string[]> {
   const warnings: string[] = [];
   try {
@@ -168,7 +211,9 @@ async function rememberResentIds(
     warnings.push("session-ids-failed");
   }
   try {
-    await setIds(pageId, appendMessageIds(existing, ids));
+    // 読み直してから足す（操作の開始時に読んだ一覧で全置換しない）
+    const now = await io.readMessageIds(pageId);
+    await io.setMessageIds(pageId, appendMessageIds(now, ids));
   } catch {
     warnings.push("ids-failed");
   }
@@ -202,6 +247,12 @@ export interface PostbackIo {
   ): Promise<SentIds | string | null>;
   /** タスクの メッセージID を書く（setTaskMessageIds） */
   setMessageIds(pageId: string, ids: string[]): Promise<void>;
+  /** タスクの今の メッセージID を読み直す（ロックの中で使う） */
+  readMessageIds(pageId: string): Promise<string[]>;
+  /** タスク単位の短いロック（取れたらトークン）／外す（自分のトークンのときだけ） */
+  lock(key: string, ttlSeconds: number): Promise<string | null>;
+  unlock(key: string, token: string): Promise<void>;
+  sleep(ms: number): Promise<void>;
   log(line: string): void;
 }
 
@@ -224,6 +275,10 @@ export async function handleTaskPostbackEvent(
     complete: over.complete ?? completeEvent,
     reply: over.reply ?? replyTextAndCard,
     setMessageIds: over.setMessageIds ?? setTaskMessageIds,
+    readMessageIds: over.readMessageIds ?? readTaskMessageIds,
+    lock: over.lock ?? acquireLock,
+    unlock: over.unlock ?? releaseLock,
+    sleep: over.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     log: over.log ?? ((line) => console.log(line)),
   };
   const op = parseButtonData(data)?.op ?? "invalid";
@@ -293,9 +348,8 @@ export async function handleTaskPostbackEvent(
       const ws = await rememberResentIds(
         event.source.groupId,
         r.pageId,
-        r.messageIds ?? [],
         [sent.textId ?? "", sent.cardId ?? ""].filter(Boolean),
-        io.setMessageIds,
+        io,
       );
       for (const w of ws) io.log(`[task-buttons] ${w}`);
     }
