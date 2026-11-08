@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { askCandidatesIfDue } from "@/lib/task-candidate-ask";
+import { isCronAuthorized } from "@/lib/cron-auth";
 
 // タスクの候補を 1 日 1 回、会社グループに聞く（Vercel Cron から。17 時台＝UTC 8 時台）。
 // vercel.json: { "path": "/api/candidates-ask", "schedule": "0 8 * * *" }
@@ -10,9 +11,7 @@ import { askCandidatesIfDue } from "@/lib/task-candidate-ask";
 // 両方が動いても、1 日 1 回に絞る印（claimDailyAsk）があるので二重には聞かない。
 export async function GET(req: NextRequest): Promise<NextResponse> {
   // CRON_SECRET が未設定のときは誰も通さない（`Bearer undefined` で通る書き方にしない）
-  const secret = process.env.CRON_SECRET;
-  const authHeader = req.headers.get("authorization");
-  if (!secret || authHeader !== `Bearer ${secret}`) {
+  if (!isCronAuthorized(req.headers.get("authorization"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

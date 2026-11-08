@@ -16,6 +16,7 @@ import {
   type TaskAttachment,
 } from "@/lib/claude";
 import { mapContext } from "@/lib/maps";
+import { checkSecretarySource } from "@/lib/webhook-source";
 import { shouldClarifyFor } from "@/lib/clarify-target";
 import {
   classifyApiError,
@@ -663,6 +664,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let needsRetry: boolean = obi.needsRetry;
 
   for (const event of obi.rest) {
+    // 送り主の制限（2026-11-08）。会社グループ（LINE_GROUP_ID）と、許可した人との 1対1
+    // （SECRETARY_ALLOWED_USER_IDS）以外からのイベントは何もしないで飛ばす。
+    // 公式アカウントを友だち追加した外部の人や、Bot を招いた別グループから
+    // 会社 Gmail での送信・番号での完了・#新規 の登録をさせないため。
+    // ログには種類と理由だけ出す（ID・本文は出さない）。再送は要らないので 200 のまま。
+    const gate = checkSecretarySource(event.source);
+    if (!gate.ok) {
+      console.log("送り主の制限で読み飛ばし:", event.source?.type ?? "unknown", gate.reason);
+      continue;
+    }
+
     if (event.type !== "message" || !event.message) continue;
 
     // イベント単位で予約する。バッチ内の1件が再送を要求すると LINE は

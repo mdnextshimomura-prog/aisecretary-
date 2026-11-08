@@ -1,14 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runDueReminders } from "@/lib/remind-due";
 import { askCandidatesIfDue } from "@/lib/task-candidate-ask";
+import { isCronAuthorized } from "@/lib/cron-auth";
 
 // 期限前通知の入口（CRON_SECRET で守る）。本体は src/lib/remind-due.ts。
 // 10 分おきに外から叩く前提で作られたが、その仕組みは作られていない。
 // いま起こしているのは、毎分の見回り /api/obi/cloud-tick への相乗り（DUE_REMIND_TICK=1）。
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const authHeader = req.headers.get("authorization");
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  // CRON_SECRET が未設定なら誰も通さない（`Bearer undefined` で通る書き方にしない）
+  if (!isCronAuthorized(req.headers.get("authorization"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

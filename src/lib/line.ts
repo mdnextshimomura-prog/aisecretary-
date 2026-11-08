@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import type { ParsedTask } from "./claude";
+import { timingSafeEqualStr } from "./secure-compare";
 
 const ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN!;
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET!;
@@ -13,7 +14,8 @@ export function verifyLineSignature(
     .createHmac("sha256", CHANNEL_SECRET)
     .update(body)
     .digest("base64");
-  return hash === signature;
+  // 時間差で中身が漏れないように比べる（長さが違えば false）
+  return timingSafeEqualStr(hash, signature);
 }
 
 // LINEメッセージ送信。送ったメッセージのID（引用リプライの照合に使う）を返す。

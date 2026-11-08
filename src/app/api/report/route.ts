@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { loadClosures, firstBusinessDayAfterClosure } from "@/lib/closures";
 import { sendClosureStocktake } from "@/lib/report";
 import { jstDateStr } from "@/lib/notion";
+import { isCronAuthorized } from "@/lib/cron-auth";
 
 /**
  * 休業明けの棚卸しレポート（Vercel Cronから毎日10時に呼ばれる）。
@@ -16,8 +17,8 @@ import { jstDateStr } from "@/lib/notion";
  * `?dry=1` を付けると送らずに本文だけ返す（文面の事前確認用）。
  */
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  const authHeader = req.headers.get("authorization");
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  // CRON_SECRET が未設定なら誰も通さない（`Bearer undefined` で通る書き方にしない）
+  if (!isCronAuthorized(req.headers.get("authorization"))) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
