@@ -435,10 +435,18 @@ export async function handleTaskButton(
       if (!m) {
         return { text: "⚠️ 名簿にいない人には替えられません", changed: false };
       }
-      // 確認セッションの担当を先に合わせる（残すと、確認が済んだとき旧担当へ渡る）
-      await deps.session.syncAssignee(task.id, m.name, extra as string);
+      // Notion が先。書けなければ例外で抜け、確認セッションの担当は変えない（済・不要と同じ考え方）。
+      // 書けたら確認セッションの担当も合わせる（残すと、確認が済んだとき旧担当へ渡る）。
+      // 合わせられなくても返事は成功のまま（印だけ返す）
       await deps.setAssignee(task.id, m.name, extra as string);
+      let warnings: string[] | undefined;
+      try {
+        await deps.session.syncAssignee(task.id, m.name, extra as string);
+      } catch {
+        warnings = ["session-sync-failed"];
+      }
       return {
+        ...(warnings ? { warnings } : {}),
         text: `👤 担当者を ${m.name} さんに設定しました\n📋 ${task.title}`,
         card: taskCard({ ...info, assignee: m.name }),
         changed: true,

@@ -15,7 +15,12 @@ import {
   reserveEvent,
   getPendingTaskConfirm,
   savePendingTaskConfirm,
+  confirmQuoteMatches,
+  addPendingHandoff,
+  getPendingHandoffs,
+  deletePendingTaskConfirm,
 } from "../src/lib/email/session";
+import { statusForConfirmComplete } from "../src/lib/task-closed";
 
 let fail = 0;
 const ok = (name: string, cond: boolean, d = "") => {
@@ -446,6 +451,85 @@ async function main() {
       writes.length === 0 && replies[0]?.card === undefined && /操作できるのは/.test(replies[0]?.text ?? ""),
       replies[0]?.text,
     );
+  }
+
+  // ── カードを引用した回答が確認に結び付く ──
+  {
+    await savePendingTaskConfirm("G3", { ...base, botMessageId: "TXT1", cardMessageId: "CARD1" });
+    const byCard = await getPendingTaskConfirm("G3", "CARD1", null, U4);
+    ok("カードを引用した回答：確認に結び付く（引用 ID だけで引く）", byCard?.pageId === PAGE, JSON.stringify(byCard));
+    const byText = await getPendingTaskConfirm("G3", "TXT1", null, U4);
+    ok("文字の返事を引用した回答：今までどおり結び付く", byText?.pageId === PAGE);
+    ok("知らない引用は結び付けない（今までどおり）", (await getPendingTaskConfirm("G3", "OTHER", null, U4)) === null);
+    ok(
+      "confirmQuoteMatches：text とカードの ID のどちらでも",
+      confirmQuoteMatches(byCard, "CARD1") && confirmQuoteMatches(byCard, "TXT1") &&
+        !confirmQuoteMatches(byCard, "OTHER") && !confirmQuoteMatches(byCard, null) &&
+        !confirmQuoteMatches(null, "CARD1"),
+    );
+    ok(
+      "カードの ID が無い（旧データ・スイッチ off）なら text の ID だけ",
+      confirmQuoteMatches({ ...base, botMessageId: "TXT1" }, "TXT1") &&
+        !confirmQuoteMatches({ ...base, botMessageId: "TXT1" }, "undefined"),
+    );
+    await deletePendingTaskConfirm("G3", PAGE);
+  }
+
+  // ── 確認待ち → ボタン → 回答 → 引き渡し（route.ts の persist と同じ順で通す） ──
+  {
+    process.env.TASK_BUTTONS = "1";
+    process.env.TASK_FOLLOWUP = "1";
+    await savePendingTaskConfirm("G4", { ...base, botMessageId: "TXT4", cardMessageId: "CARD4" });
+    let status = "要確認";
+    let task: ButtonTask = {
+      id: PAGE, title: "重説", closed: false, assigneeId: U2, requesterId: null,
+      due: null, assignee: "田中 一郎",
+    };
+    const flow: ButtonDeps = {
+      ...deps,
+      getTask: async () => task,
+      members: async () => [
+        { name: "鈴木 次郎", userIds: [U4], aliases: [], email: null, active: true, external: false, notionUserId: null },
+      ],
+      status: {
+        update: async (_id, props) => {
+          const st = (props as { ステータス?: { select?: { name?: string } } }).ステータス?.select?.name;
+          if (st) status = st;
+        },
+        defaultCheckDate: async () => "2026-11-12",
+      },
+      setAssignee: async (_id, name, uid) => {
+        task = { ...task, assignee: name, assigneeId: uid };
+      },
+      session: sessionDeps("G4"),
+    };
+    reset();
+    // 担当（U2）が待ちを押し、続けて担当を鈴木さん（U4）に替える
+    await handleTaskPostbackEvent(ev(`v1|wait|${PAGE}`, "FL1"), io({ deps: flow }));
+    await handleTaskPostbackEvent(ev(`v1|as|${PAGE}|${U4}`, "FL2"), io({ deps: flow }));
+    ok("流れ：ボタンの待ちで進行中", status === "進行中", status);
+    // 回答（カードを引用）→ 条件がそろった → persist と同じ順
+    const pending = await getPendingTaskConfirm("G4", "CARD4", null, U2);
+    ok("流れ：カードを引用した回答で確認を引ける", pending?.pageId === PAGE);
+    const next = await statusForConfirmComplete(true, async () => status);
+    await addPendingHandoff("G4", pending!);
+    if (next) status = next;
+    await deletePendingTaskConfirm("G4", PAGE);
+    const handoffs = await getPendingHandoffs("G4");
+    ok(
+      "流れ：引き渡しは新しい担当あて",
+      handoffs.length === 1 && handoffs[0].assignee === "鈴木 次郎" && handoffs[0].assigneeUserId === U4,
+      JSON.stringify(handoffs),
+    );
+    ok("流れ：回答で進行中を未着手に戻さない", status === "進行中", status);
+    ok("流れ：確認セッションは消える", (await getPendingTaskConfirm("G4", null, PAGE)) === null);
+    // スイッチ off なら今までどおり未着手（読まない）
+    let reads = 0;
+    const offNext = await statusForConfirmComplete(false, async () => {
+      reads++;
+      return "進行中";
+    });
+    ok("流れ（off）：今までどおり未着手で、読まない", offNext === "未着手" && reads === 0);
   }
 
   if (fail > 0) {

@@ -7,6 +7,7 @@ import {
   readTaskState,
   statusAfterConfirm,
   readTaskStatusName,
+  statusForConfirmComplete,
 } from "../src/lib/task-closed";
 
 let fail = 0;
@@ -91,6 +92,30 @@ async function main() {
       threw = true;
     }
     ok("読めなければ例外（書かない側に倒す）", threw);
+  }
+
+  // ── スイッチ（TASK_BUTTONS）と読み取りの失敗 ──
+  {
+    let reads = 0;
+    const read = async () => {
+      reads++;
+      return "進行中";
+    };
+    ok(
+      "ボタンが off なら読まずに未着手（今と同じ動き）",
+      (await statusForConfirmComplete(false, read)) === "未着手" && reads === 0,
+    );
+    ok("ボタンが on で進行中なら書かない", (await statusForConfirmComplete(true, read)) === null && reads === 1);
+    ok(
+      "on で要確認なら未着手",
+      (await statusForConfirmComplete(true, async () => "要確認")) === "未着手",
+    );
+    ok(
+      "on で読めなければ今までどおり未着手（エラーにしない）",
+      (await statusForConfirmComplete(true, async () => {
+        throw new Error("notion down");
+      })) === "未着手",
+    );
   }
 
   if (fail > 0) {

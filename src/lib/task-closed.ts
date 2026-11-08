@@ -67,3 +67,23 @@ export async function readTaskStatusName(
   const page = await retrieve(pageId);
   return selectName((page.properties as Record<string, unknown>) ?? {}, "ステータス");
 }
+
+/**
+ * 初動確認の回答で条件がそろったときに書くステータス（route.ts の persist）。null なら書かない。
+ * ボタン（TASK_BUTTONS）が off なら読まずに「未着手」（今と同じ動き・追加の Notion 読み取りなし）。
+ * on のときは今のステータスを読み、進行中・完了なら書かない。読めなければ今までどおり「未着手」
+ * （回答の反映をエラーにしない）。
+ */
+export async function statusForConfirmComplete(
+  buttonsOn: boolean,
+  readStatus: () => Promise<string | null>,
+): Promise<string | null> {
+  if (!buttonsOn) return "未着手";
+  let current: string | null;
+  try {
+    current = await readStatus();
+  } catch {
+    return "未着手";
+  }
+  return statusAfterConfirm(current);
+}

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   verifyLineSignature,
   sendLineMessage,
+  replyTextAndCard,
   buildTaskRegisteredMessage,
   pushLineMessage,
   pushLineMessageWithMentions,
@@ -69,6 +70,7 @@ import {
   releaseEvent,
   savePendingTaskConfirm,
   getPendingTaskConfirm,
+  confirmQuoteMatches,
   deletePendingTaskConfirm,
   reserveMessage,
   releaseMessage,
@@ -109,9 +111,10 @@ import {
   MSG_CLOSED,
   MSG_UNCONFIRMED,
   registeredCardFor,
+  buttonsActive,
 } from "@/lib/task-buttons";
 import { handleTaskPostbackEvent, taskState, taskStatusName } from "@/lib/task-buttons-wire";
-import { statusAfterConfirm } from "@/lib/task-closed";
+import { statusForConfirmComplete } from "@/lib/task-closed";
 import {
   recordAfterCreate,
   recordAssigneeChange,
@@ -467,12 +470,15 @@ async function clarifyAfterCreate(
 async function rememberConfirmMessage(
   groupId: string | undefined,
   pageId: string,
-  botMessageId: string | null
+  botMessageId: string | null,
+  cardMessageId?: string | null
 ): Promise<void> {
   if (!botMessageId) return;
   const p = await getPendingTaskConfirm(groupId, null, pageId);
   if (!p || p.pageId !== pageId) return;
   p.botMessageId = botMessageId;
+  // カード（2通目）を引用した回答も結び付ける。カードが無ければ欄を足さない（off なら今と同じ中身）
+  if (cardMessageId) p.cardMessageId = cardMessageId;
   await savePendingTaskConfirm(groupId, p);
 }
 
@@ -608,18 +614,19 @@ async function registerTaskFromText(
     }
   }
   // カードは受付の返事に毎回付ける（初動確認の聞き返し・確認失敗の返事も。2通目に足す。ID は1通目）
-  const botMsgId = await sendLineMessage(
+  const sent = await replyTextAndCard(
     replyToken,
     reply,
     opts.buttons ? registeredCardFor(pageId, parsed) : undefined
   );
+  const botMsgId = sent.textId;
   // 元の発言の ID も残す（Bot の返信の ID だけで上書きすると、二重登録の確認と
-  // 「元の発言を引用して完了」が効かなくなる。通常の登録と同じ形）
+  // 「元の発言を引用して完了」が効かなくなる。通常の登録と同じ形）。カードの ID も（引用で引けるように）
   await setTaskMessageIds(
     pageId,
-    [sourceMessageId, botMsgId ?? ""].filter(Boolean)
+    [sourceMessageId, botMsgId ?? "", sent.cardId ?? ""].filter(Boolean)
   ).catch(() => undefined);
-  await rememberConfirmMessage(groupId, pageId, botMsgId ?? null);
+  await rememberConfirmMessage(groupId, pageId, botMsgId ?? null, sent.cardId);
   return "ok";
 }
 
@@ -811,7 +818,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const quoteResolved =
         Boolean(quotedId) &&
         Boolean(pending) &&
-        (quotedTask?.id === pending?.pageId || pending?.botMessageId === quotedId);
+        (quotedTask?.id === pending?.pageId || confirmQuoteMatches(pending, quotedId));
 
       if (pending && !quotedIsOther) {
         const body = stripMentions(event.message);
@@ -834,7 +841,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           ]);
           if (r.complete) {
             // 聞き返し中にカードの［待ち］［延期］で「進行中」になっていたら「未着手」で上書きしない
-            const nextStatus = statusAfterConfirm(await taskStatusName(pending.pageId));
+            // （ボタンが off なら読まずに未着手。読めなければ未着手）
+            const nextStatus = await statusForConfirmComplete(buttonsActive(), () =>
+              taskStatusName(pending.pageId)
+            );
             // **引き渡し待ちを先に積んでから**確認状態を消す。
             // 逆順だと、消した直後に落ちた場合に確認も引き渡しも残らず、
             // 条件は固まったのに担当者へ永久に伝わらない。
@@ -1709,7 +1719,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
       }
 
-      const botMsgId = await sendLineMessage(
+      const sent = await replyTextAndCard(
         replyToken,
         reply,
         // カードは受付の返事に毎回付ける（初動確認の聞き返し・確認失敗の返事も。2通目に足す。ID は1通目）
@@ -1718,11 +1728,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         console.error("返信に失敗（登録は完了）:", e);
         return null;
       });
+      const botMsgId = sent?.textId ?? null;
+      const cardMsgId = sent?.cardId ?? null;
       await setTaskMessageIds(
         pageId,
-        [event.message.id, botMsgId ?? ""].filter(Boolean)
+        [event.message.id, botMsgId ?? "", cardMsgId ?? ""].filter(Boolean)
       ).catch(() => undefined);
-      await rememberConfirmMessage(source.groupId, pageId, botMsgId ?? null).catch(
+      await rememberConfirmMessage(source.groupId, pageId, botMsgId ?? null, cardMsgId).catch(
         () => undefined
       );
 

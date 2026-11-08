@@ -16,8 +16,8 @@
  *   https://developers.line.biz/en/reference/messaging-api/#bubble
  * - Reply API は 1 回で最大 5 通（messages Max: 5）：
  *   https://developers.line.biz/en/reference/messaging-api/#send-reply-message
- *   応答の sentMessages の並びが送った順であることは公式に明記が無い（未確認）。今までどおり
- *   sentMessages[0] を1通目（text）の ID として使う。
+ *   応答の sentMessages は送った順に並ぶ（公式で保証）。sentMessages[0]＝1通目（text）、[1]＝カード：
+ *   https://developers.line.biz/en/docs/messaging-api/get-quote-tokens/
  * - 未確認：PC 版でカードのボタン（postback）を押したときに webhook が届くこと（公式に PC だけの
  *   制限の記述は無いが、明記も無い）。実機で確かめる。
  */

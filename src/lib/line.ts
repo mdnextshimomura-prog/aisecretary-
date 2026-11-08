@@ -28,6 +28,17 @@ export async function sendLineMessage(
   text: string,
   card?: FlexMessage
 ): Promise<string | null> {
+  return (await replyTextAndCard(replyToken, text, card)).textId;
+}
+
+// sendLineMessage と同じ送り方で、2通目（カード）の ID も返す。
+// sentMessages は送った順に並ぶ（公式：https://developers.line.biz/en/docs/messaging-api/get-quote-tokens/）。
+// カードを引用した回答を初動確認に結び付けるのに使う（route.ts の受付の返事）。
+export async function replyTextAndCard(
+  replyToken: string,
+  text: string,
+  card?: FlexMessage
+): Promise<{ textId: string | null; cardId: string | null }> {
   const res = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
     headers: {
@@ -39,11 +50,14 @@ export async function sendLineMessage(
       messages: card ? [{ type: "text", text }, card] : [{ type: "text", text }],
     }),
   });
-  if (!res.ok) return null;
+  if (!res.ok) return { textId: null, cardId: null };
   const data = (await res.json()) as {
     sentMessages?: Array<{ id: string }>;
   };
-  return data.sentMessages?.[0]?.id ?? null;
+  return {
+    textId: data.sentMessages?.[0]?.id ?? null,
+    cardId: card ? (data.sentMessages?.[1]?.id ?? null) : null,
+  };
 }
 
 // グループメンバーの表示名を取得

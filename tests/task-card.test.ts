@@ -46,7 +46,19 @@ ok("ラベルは 40 字で切る", Array.from(a.label).length === FLEX_LABEL_MAX
 ok("displayText は 300 字で切る", a.displayText.length === 300);
 ok("postback", a.type === "postback" && a.data === "v1|done|p");
 ok("問いかけの行を出す", JSON.stringify(c2).includes("いつに延期しますか？"));
-ok("1つの bubble は 30KB 未満", JSON.stringify(c2).length < 30_000);
+ok("1つの bubble は 30KB 未満（UTF-8 のバイト数）", Buffer.byteLength(JSON.stringify(c2.contents), "utf8") < 30 * 1024);
+{
+  // 一番大きいカード：担当の候補 13 人（名前 40 字）＋長いタスク名
+  const big = buildTaskCard(
+    { pageId: "1234abcd-1234-1234-1234-1234567890ab", title: "長".repeat(500), due: "2026-11-20T17:00:00+09:00", assignee: "担".repeat(100) },
+    Array.from({ length: 13 }, (_, i) =>
+      cardButton("名".repeat(60), `v1|as|1234abcd-1234-1234-1234-1234567890ab|U${String(i).padStart(32, "0")}`, "表".repeat(400)),
+    ),
+    "誰に替えますか？",
+  );
+  const bytes = Buffer.byteLength(JSON.stringify(big.contents), "utf8");
+  ok("最大の想定でも bubble は 30KB 未満（UTF-8）", bytes < 30 * 1024, String(bytes));
+}
 
 if (fail > 0) {
   console.log(`\n${fail} 件失敗`);

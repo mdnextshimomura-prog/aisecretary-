@@ -2,6 +2,7 @@
  * reply の結果を「送れた・はっきり失敗・不明」に分ける（設計 14）。LINE は偽物の fetch に差し替える。
  */
 import {
+  replyTextAndCard,
   replyLineMessageDetailed,
   deliverReply,
   pushLineMessage,
@@ -160,6 +161,18 @@ async function main() {
   ok("返す ID は1通目（text）の ID", id9 === "m9", String(id9));
   respond = json(400, {});
   ok("カードつきで断られたら null（今どおり）", (await sendLineMessage("rt", "x", card)) === null);
+
+  // ── カードの ID も取る（カードを引用した回答を確認に結び付けるため。sentMessages は送った順） ──
+  respond = json(200, { sentMessages: [{ id: "t1" }, { id: "c1" }] });
+  const both = await replyTextAndCard("rt", "受付", card);
+  ok("replyTextAndCard：text とカードの ID", both.textId === "t1" && both.cardId === "c1", JSON.stringify(both));
+  respond = json(200, { sentMessages: [{ id: "t2" }] });
+  calls.length = 0;
+  const one = await replyTextAndCard("rt", "受付");
+  ok("replyTextAndCard：カードなしは cardId null・body は今と同じ", one.textId === "t2" && one.cardId === null && JSON.stringify(calls[0].body) === plain);
+  respond = json(400, {});
+  const ng = await replyTextAndCard("rt", "受付", card);
+  ok("replyTextAndCard：断られたら両方 null", ng.textId === null && ng.cardId === null);
 
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);

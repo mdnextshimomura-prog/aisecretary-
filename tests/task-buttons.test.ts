@@ -549,6 +549,68 @@ async function main() {
       slog.join(),
     );
   }
+  {
+    // 担当変更：Notion が先。書けなければ確認セッションの担当は変えない（済・不要と同じ考え方）
+    const { deps, slog } = makeDeps(openTask, roster);
+    const order: string[] = [];
+    let threw = false;
+    try {
+      await handleTaskButton(`v1|as|${PAGE}|${U(4)}`, U(3), {
+        ...deps,
+        setAssignee: async () => {
+          order.push("notion");
+          throw new Error("notion down");
+        },
+        session: {
+          ...deps.session,
+          syncAssignee: async (id, name, uid) => {
+            order.push("session");
+            await deps.session.syncAssignee(id, name, uid);
+          },
+        },
+      });
+    } catch {
+      threw = true;
+    }
+    ok(
+      "担当変更：Notion が書けなければ例外で、確認セッションの担当は変えない",
+      threw && slog.length === 0 && order.join() === "notion",
+      order.join(),
+    );
+    const b = makeDeps(openTask, roster);
+    const seq: string[] = [];
+    await handleTaskButton(`v1|as|${PAGE}|${U(4)}`, U(3), {
+      ...b.deps,
+      setAssignee: async (id, n, u) => {
+        seq.push("notion");
+        await b.deps.setAssignee(id, n, u);
+      },
+      session: {
+        ...b.deps.session,
+        syncAssignee: async (id, n, u) => {
+          seq.push("session");
+          await b.deps.session.syncAssignee(id, n, u);
+        },
+      },
+    });
+    ok("担当変更：Notion を書いてから確認セッションを合わせる", seq.join() === "notion,session", seq.join());
+    const c = makeDeps(openTask, roster);
+    const r = await handleTaskButton(`v1|as|${PAGE}|${U(4)}`, U(3), {
+      ...c.deps,
+      session: {
+        ...c.deps.session,
+        syncAssignee: async () => {
+          throw new Error("kv down");
+        },
+      },
+    });
+    ok(
+      "担当変更：セッションが合わせられなくても返事は成功のまま（印を返す）",
+      c.log.length === 1 && r?.changed === true && r.card !== undefined &&
+        JSON.stringify(r.warnings) === JSON.stringify(["session-sync-failed"]),
+      JSON.stringify(r?.warnings),
+    );
+  }
   for (const op of ["done", "drop"] as const) {
     // Notion が先。書けなければセッションは消さない（確認への回答先を残す）
     const { deps, slog } = makeDeps(openTask, roster);

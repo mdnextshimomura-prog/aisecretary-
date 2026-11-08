@@ -390,6 +390,8 @@ export interface PendingTaskConfirm {
   assigneeUserId?: string | null;
   /** Botが送った確認メッセージのID。引用リプライでこの確認を特定するのに使う */
   botMessageId?: string | null;
+  /** 同じ返事の2通目（タスクのカード。TASK_BUTTONS=1 のときだけ）の ID。カードを引用した回答も結び付ける */
+  cardMessageId?: string | null;
   createdAt: number;
 }
 
@@ -490,6 +492,15 @@ export async function savePendingTaskConfirm(
   );
 }
 
+/** 引用先がこの確認の Bot の返事（1通目の text か、2通目のカード）か */
+export function confirmQuoteMatches(
+  p: Pick<PendingTaskConfirm, "botMessageId" | "cardMessageId"> | null | undefined,
+  quotedMessageId: string | null | undefined
+): boolean {
+  if (!p || !quotedMessageId) return false;
+  return p.botMessageId === quotedMessageId || p.cardMessageId === quotedMessageId;
+}
+
 /**
  * 回答の宛先になる確認を1件返す。
  *
@@ -517,7 +528,7 @@ export async function getPendingTaskConfirm(
     // **引用先が特定できなければ、直近に当てない。**
     // 無関係な発言を引用しただけで「直近の確認への回答」と見なされ、
     // 別依頼がそのタスクに吸い込まれて登録されなくなる。
-    return items.find((i) => i.botMessageId === quotedMessageId) ?? null;
+    return items.find((i) => confirmQuoteMatches(i, quotedMessageId)) ?? null;
   }
 
   // 引用のない短い返信は、元の依頼者自身の確認にだけ結び付ける。
