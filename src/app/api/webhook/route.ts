@@ -104,6 +104,8 @@ import {
   followupEnabled,
 } from "@/lib/task-status";
 import { statusDeps } from "@/lib/task-status-wire";
+import { registeredQuickReply } from "@/lib/task-buttons";
+import { handleTaskPostbackEvent } from "@/lib/task-buttons-wire";
 import {
   recordAfterCreate,
   recordAssigneeChange,
@@ -246,6 +248,8 @@ interface LineWebhookEvent {
   replyToken?: string;
   source: { userId: string; type: string; groupId?: string };
   message?: LineMessage;
+  webhookEventId?: string;
+  postback?: { data?: string }; // ボタン（クイックリプライ）が押された（task-buttons.ts）
 }
 
 interface LineWebhookBody {
@@ -595,7 +599,7 @@ async function registerTaskFromText(
         `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
     }
   }
-  const botMsgId = await sendLineMessage(replyToken, reply);
+  const botMsgId = await sendLineMessage(replyToken, reply, registeredQuickReply(pageId));
   // 元の発言の ID も残す（Bot の返信の ID だけで上書きすると、二重登録の確認と
   // 「元の発言を引用して完了」が効かなくなる。通常の登録と同じ形）
   await setTaskMessageIds(
@@ -663,6 +667,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   let needsRetry: boolean = obi.needsRetry;
 
   for (const event of obi.rest) {
+    // 受付の返事のボタン（TASK_BUTTONS=1 のときだけ。off なら今までどおり何もしない）
+    if (event.type === "postback") {
+      await handleTaskPostbackEvent(event).catch(() => undefined);
+      continue;
+    }
     if (event.type !== "message" || !event.message) continue;
 
     // イベント単位で予約する。バッチ内の1件が再送を要求すると LINE は
@@ -1654,7 +1663,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
       }
 
-      const botMsgId = await sendLineMessage(replyToken, reply).catch((e) => {
+      const botMsgId = await sendLineMessage(
+        replyToken,
+        reply,
+        registeredQuickReply(pageId)
+      ).catch((e) => {
         console.error("返信に失敗（登録は完了）:", e);
         return null;
       });
