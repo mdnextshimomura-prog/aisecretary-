@@ -1,0 +1,49 @@
+/**
+ * タスクがもう処理済みか（ステータスが完了／ページがアーカイブ・ゴミ箱）。
+ * 終わり方は判定に使わない：再開（notion.ts の setTaskStatus）はステータスだけ戻して終わり方を残すため。
+ * 済・不要はボタンでも文字でもステータスを「完了」にする（task-status.ts の closeProps・notion.ts の completeTask）。
+ * Notion の object_not_found は削除だけでなく共有外・権限喪失でも返るので、処理済みにしない（"missing"）。
+ *
+ * 使い道：
+ *  - 初動確認への回答で Notion を更新する直前の安全網（route.ts）。ボタン等で完了・不要にした
+ *    タスクを、残っていた確認セッションへの回答で「未着手」に戻さない。
+ *  - ボタンの「このタスクはもう処理済みです」の判定（task-buttons-wire.ts）。
+ */
+
+type PageLike = Record<string, unknown>;
+
+function selectName(
+  props: Record<string, unknown>,
+  key: string,
+): string | null {
+  return (
+    (props[key] as { select?: { name: string } | null } | undefined)?.select
+      ?.name ?? null
+  );
+}
+
+export function isClosedPage(page: PageLike): boolean {
+  if (page.archived || page.in_trash) return true;
+  const props = (page.properties as Record<string, unknown>) ?? {};
+  return selectName(props, "ステータス") === "完了";
+}
+
+export type TaskState = "open" | "closed" | "missing";
+
+/**
+ * Notion からページを読んで判定する。見つからない（object_not_found）は "missing"。
+ * それ以外の読み取りの失敗は例外のまま返す（呼び出し側は更新しない側に倒す）。
+ */
+export async function readTaskState(
+  pageId: string,
+  retrieve: (pageId: string) => Promise<PageLike>,
+): Promise<TaskState> {
+  let page: PageLike;
+  try {
+    page = await retrieve(pageId);
+  } catch (err) {
+    if ((err as { code?: string }).code === "object_not_found") return "missing";
+    throw err;
+  }
+  return isClosedPage(page) ? "closed" : "open";
+}

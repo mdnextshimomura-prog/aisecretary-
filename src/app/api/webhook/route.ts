@@ -106,6 +106,12 @@ import {
 } from "@/lib/task-status";
 import { statusDeps } from "@/lib/task-status-wire";
 import {
+  MSG_CLOSED,
+  MSG_UNCONFIRMED,
+  registeredQuickReply,
+} from "@/lib/task-buttons";
+import { handleTaskPostbackEvent, taskState } from "@/lib/task-buttons-wire";
+import {
   recordAfterCreate,
   recordAssigneeChange,
 } from "@/lib/task-record-wire";
@@ -247,6 +253,8 @@ interface LineWebhookEvent {
   replyToken?: string;
   source: { userId: string; type: string; groupId?: string };
   message?: LineMessage;
+  webhookEventId?: string;
+  postback?: { data?: string }; // ボタン（クイックリプライ）が押された（task-buttons.ts）
 }
 
 interface LineWebhookBody {
@@ -497,6 +505,8 @@ async function registerTaskFromText(
     assigneeUserId?: string | null;
     /** 依頼のあった時刻（ミリ秒）。「明日までに」を、登録と返した日ではなく依頼の日から数える */
     baseMs?: number;
+    /** 受付の返事にボタンを付けるか（候補の「1 登録」だけ。聞き返しメニューからの登録には付けない） */
+    buttons?: boolean;
   } = {}
 ): Promise<"ok" | "retry" | "failed" | "duplicate"> {
   // 通常経路と同じ予約を通す。ここを素通しにすると、同時到達で
@@ -596,7 +606,14 @@ async function registerTaskFromText(
         `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
     }
   }
-  const botMsgId = await sendLineMessage(replyToken, reply);
+  // ボタンは確定した受付の返事だけ（初動確認の質問を返したときは付けない）
+  const botMsgId = await sendLineMessage(
+    replyToken,
+    reply,
+    opts.buttons
+      ? registeredQuickReply(pageId, reply === buildTaskRegisteredMessage(parsed))
+      : undefined
+  );
   // 元の発言の ID も残す（Bot の返信の ID だけで上書きすると、二重登録の確認と
   // 「元の発言を引用して完了」が効かなくなる。通常の登録と同じ形）
   await setTaskMessageIds(
@@ -675,6 +692,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       continue;
     }
 
+    // 受付の返事のボタン（TASK_BUTTONS=1 のときだけ。off なら今までどおり何もしない）
+    if (event.type === "postback") {
+      await handleTaskPostbackEvent(event).catch(() => undefined);
+      continue;
+    }
     if (event.type !== "message" || !event.message) continue;
 
     // イベント単位で予約する。バッチ内の1件が再送を要求すると LINE は
@@ -823,6 +845,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           }
         };
 
+        // 回答で Notion を更新する直前の安全網：もう完了（済・不要）・アーカイブされたタスクなら
+        // 更新せず（「未着手」に戻さない）、確認だけ消して知らせる。見つからない（削除・共有外・
+        // 権限喪失）は何も消さずに知らせる。読めなければ例外＝失敗の返事
+        const stopIfClosed = async (): Promise<boolean> => {
+          const st = await taskState(pending.pageId);
+          if (st === "open") return false;
+          if (st === "missing") {
+            await sendLineMessage(replyToken, MSG_UNCONFIRMED);
+            return true;
+          }
+          await deletePendingTaskConfirm(source.groupId, pending.pageId).catch(
+            () => undefined
+          );
+          await sendLineMessage(replyToken, MSG_CLOSED);
+          return true;
+        };
+
         // 元の依頼者が「何もしなくてよい」と返したら、確認待ちを放置しない。
         // 引用がない場合も createdByUserId で同一人物と確認済みなので、
         // この時点で安全に取り消せる。
@@ -848,6 +887,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // (a) 提案をそのまま承認
         if (isApproval(body)) {
           try {
+            if (await stopIfClosed()) continue;
             const r = applyApproval(state);
             await persist(r, []);
             markCommitted();
@@ -894,6 +934,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
         if (relatesToTask) {
           try {
+            if (await stopIfClosed()) continue;
             const r = applyAnswer(state, ans.updates);
             const overridden = ans.overrides
               .map((k) => pending.fields.find((f) => f.key === k)?.label ?? k);
@@ -1055,6 +1096,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
                 assignee: c.assignee,
                 assigneeUserId: c.assigneeUserId,
                 baseMs: c.createdAt,
+                buttons: true,
               }
             );
             if (r === "ok") {
@@ -1666,7 +1708,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
       }
 
-      const botMsgId = await sendLineMessage(replyToken, reply).catch((e) => {
+      const botMsgId = await sendLineMessage(
+        replyToken,
+        reply,
+        // ボタンは確定した受付の返事だけ（初動確認の質問・確認失敗の返事には付けない）
+        registeredQuickReply(pageId, reply === buildTaskRegisteredMessage(parsed))
+      ).catch((e) => {
         console.error("返信に失敗（登録は完了）:", e);
         return null;
       });

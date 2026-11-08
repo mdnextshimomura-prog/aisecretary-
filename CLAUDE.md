@@ -122,6 +122,8 @@ Notion「LINEタスク」へ `依頼者`・`依頼者ID`・`発生元`（グル�
 ファイル：`src/lib/task-record.ts`（照合と欄の組み立て）／`task-record-wire.ts`（本物へのつなぎ。案件は `CRM_NOTION_TOKEN`（無ければ `NOTION_API_KEY`）と `CRM_DEALS_DB_ID` で読み、5 分覚える）。
 前提：`案件` に書くには、本体の連携（`NOTION_API_KEY`）が CRM_案件 を読めること。読めないと `deal-link` で失敗し、状態だけが入る。
 
+（受付の返事のボタン・2026-11-08）`TASK_BUTTONS`（`1` かつ `TASK_FOLLOWUP=1` のときだけ、確定した受付の返事に［済］［待ち］［延期］［不要］［担当を変える］を付け、押されたら処理する。既定 off）／`TASK_BUTTONS_ADMIN_IDS`（担当者・依頼者のほかに押せる人＝下村さんの LINE userId。カンマ区切り。未設定なら担当者・依頼者だけ。`JOB_ALLOWED_USER_IDS` とは別）。ファイル：`src/lib/task-buttons.ts`（判断・文面）／`task-buttons-wire.ts`（本物へのつなぎ・postback の入口）。依頼者ID が空のタスク（`TASK_RECORD=0` の間に登録）は担当者と特権者だけが押せる。
+
 ## よく使うコマンド
 ```bash
 npm run dev          # ローカル開発
