@@ -52,6 +52,9 @@ export const MSG_PAUSED = "いまボタン操作は止めています。文字�
 export const MSG_FORBIDDEN =
   "このタスクを操作できるのは担当者・依頼者・下村さんだけです";
 export const MSG_CLOSED = "このタスクはもう処理済みです";
+/** タスクを読めなかった（見つからない＝削除・共有外・権限喪失のどれか分からない） */
+export const MSG_UNCONFIRMED =
+  "このタスクを確認できませんでした。少し時間をおいてもう一度お試しください";
 
 export interface PostbackAction {
   type: "postback";
@@ -270,6 +273,8 @@ export interface ButtonReply {
   quickReply?: QuickReply;
   /** Notion に書いたか */
   changed: boolean;
+  /** true なら入口はイベントの完了印を付けない（タスクを確認できなかった） */
+  retryable?: boolean;
   /** 返事は成功のまま、ログに種別だけ出す印（例：session-clear-failed） */
   warnings?: string[];
 }
@@ -326,7 +331,9 @@ export async function handleTaskButton(
   const { op, pageId, extra } = parsed;
 
   const task = await deps.getTask(pageId);
-  if (!task || task.closed) return { text: MSG_CLOSED, changed: false };
+  // 見つからないは処理済みにしない（共有外・権限喪失でも同じ答えが返るため）。完了印も付けさせない
+  if (!task) return { text: MSG_UNCONFIRMED, changed: false, retryable: true };
+  if (task.closed) return { text: MSG_CLOSED, changed: false };
 
   const members = await deps.members().catch(() => [] as Member[]);
   if (!canOperate(actorId, task, members))

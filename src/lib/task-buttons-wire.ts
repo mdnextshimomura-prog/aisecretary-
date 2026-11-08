@@ -18,7 +18,7 @@ import {
 import { recordAssigneeChange } from "./task-record-wire";
 import { statusDeps } from "./task-status-wire";
 import { jstDateStr } from "./notion";
-import { isClosedPage, readTaskClosed } from "./task-closed";
+import { isClosedPage, readTaskState, type TaskState } from "./task-closed";
 import {
   buttonsActive,
   handleTaskButton,
@@ -71,8 +71,8 @@ export async function getButtonTask(
 
 /** 初動確認のセッション（KV）。route.ts の確認の流れと同じ関数で読み書きする。 */
 /** 初動確認への回答の前に見る：そのタスクがもう処理済みか（route.ts の安全網） */
-export function isTaskClosed(pageId: string): Promise<boolean> {
-  return readTaskClosed(
+export function taskState(pageId: string): Promise<TaskState> {
+  return readTaskState(
     pageId,
     async (id) =>
       (await notion.pages.retrieve({ page_id: id })) as unknown as Record<string, unknown>,
@@ -203,11 +203,12 @@ export async function handleTaskPostbackEvent(
       return;
     }
     for (const w of r.warnings ?? []) io.log(`[task-buttons] ${w}`);
-    const code = r.changed ? "changed" : "no-change";
+    const code = r.retryable ? "unconfirmed" : r.changed ? "changed" : "no-change";
     io.log(`[task-buttons] ${op} ${code}`);
     await send(r.text, r.quickReply, code);
   } finally {
-    if (key) {
+    // タスクを確認できなかったときは完了印を付けない（予約は付けたまま）
+    if (key && !r?.retryable) {
       await io.complete(key).catch(() => io.log("[task-buttons] mark-failed"));
     }
   }

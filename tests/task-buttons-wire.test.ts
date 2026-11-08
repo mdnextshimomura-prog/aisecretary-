@@ -164,6 +164,18 @@ async function main() {
     String(replies[0]?.text).startsWith("⚠️ 書き込めませんでした"),
   );
 
+  // ── 見つからないタスク（完了印を付けない） ──
+  reset();
+  await handleTaskPostbackEvent(ev(`v1|done|${PAGE}`, "E11"), io({
+    deps: { ...deps, getTask: async () => null },
+  }));
+  ok(
+    "見つからない：確認できませんでしたと返し、書かない",
+    writes.length === 0 && String(replies[0]?.text).startsWith("このタスクを確認できませんでした"),
+    replies[0]?.text,
+  );
+  ok("見つからない：完了印を付けない", completed.length === 0, completed.join());
+
   // ── 返事の失敗（5） ──
   reset();
   await handleTaskPostbackEvent(

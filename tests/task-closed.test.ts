@@ -2,7 +2,7 @@
  * タスクがもう処理済みか（完了・終わり方あり・消されている）。初動確認への回答で「未着手」に
  * 戻さないための安全網と、ボタンの「処理済み」の判定に使う。Notion は差し替える。
  */
-import { isClosedPage, readTaskClosed } from "../src/lib/task-closed";
+import { isClosedPage, readTaskState } from "../src/lib/task-closed";
 
 let fail = 0;
 const ok = (name: string, cond: boolean, d = "") => {
@@ -28,7 +28,11 @@ const page = (
 
 async function main() {
   ok("完了は処理済み", isClosedPage(page("完了", null)));
-  ok("終わり方が入っていれば処理済み", isClosedPage(page("進行中", "不要")));
+  ok(
+    "終わり方だけでは処理済みにしない（再開でステータスだけ戻したタスク）",
+    !isClosedPage(page("進行中", "不要")) && !isClosedPage(page("未着手", "完了")),
+  );
+  ok("完了＋終わり方は処理済み", isClosedPage(page("完了", "不要")));
   ok(
     "消されたページは処理済み",
     isClosedPage(page("未着手", null, { archived: true })),
@@ -43,17 +47,18 @@ async function main() {
 
   ok(
     "読めたページで判定する",
-    (await readTaskClosed("p1", async () => page("完了", null))) === true,
+    (await readTaskState("p1", async () => page("完了", null))) === "closed" &&
+      (await readTaskState("p1", async () => page("進行中", null))) === "open",
   );
   ok(
-    "見つからないタスクは処理済み",
-    (await readTaskClosed("p1", async () => {
+    "見つからない（削除・共有外・権限喪失）は処理済みにせず missing",
+    (await readTaskState("p1", async () => {
       throw Object.assign(new Error("nf"), { code: "object_not_found" });
-    })) === true,
+    })) === "missing",
   );
   let threw = false;
   try {
-    await readTaskClosed("p1", async () => {
+    await readTaskState("p1", async () => {
       throw new Error("network");
     });
   } catch {

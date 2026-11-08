@@ -104,8 +104,12 @@ import {
   followupEnabled,
 } from "@/lib/task-status";
 import { statusDeps } from "@/lib/task-status-wire";
-import { MSG_CLOSED, registeredQuickReply } from "@/lib/task-buttons";
-import { handleTaskPostbackEvent, isTaskClosed } from "@/lib/task-buttons-wire";
+import {
+  MSG_CLOSED,
+  MSG_UNCONFIRMED,
+  registeredQuickReply,
+} from "@/lib/task-buttons";
+import { handleTaskPostbackEvent, taskState } from "@/lib/task-buttons-wire";
 import {
   recordAfterCreate,
   recordAssigneeChange,
@@ -829,10 +833,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           }
         };
 
-        // 回答で Notion を更新する直前の安全網：もう完了・不要（終わり方あり）・消されたタスクなら
-        // 更新せず（「未着手」に戻さない）、確認だけ消して知らせる。読めなければ例外＝失敗の返事
+        // 回答で Notion を更新する直前の安全網：もう完了（済・不要）・アーカイブされたタスクなら
+        // 更新せず（「未着手」に戻さない）、確認だけ消して知らせる。見つからない（削除・共有外・
+        // 権限喪失）は何も消さずに知らせる。読めなければ例外＝失敗の返事
         const stopIfClosed = async (): Promise<boolean> => {
-          if (!(await isTaskClosed(pending.pageId))) return false;
+          const st = await taskState(pending.pageId);
+          if (st === "open") return false;
+          if (st === "missing") {
+            await sendLineMessage(replyToken, MSG_UNCONFIRMED);
+            return true;
+          }
           await deletePendingTaskConfirm(source.groupId, pending.pageId).catch(
             () => undefined
           );

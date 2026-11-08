@@ -14,6 +14,7 @@ import {
   handleTaskButton,
   MSG_FORBIDDEN,
   MSG_CLOSED,
+  MSG_UNCONFIRMED,
   buttonsActive,
   type ButtonDeps,
   type ButtonTask,
@@ -579,8 +580,14 @@ async function main() {
     const { deps, log } = makeDeps(null, roster);
     const r = await handleTaskButton(`v1|done|${PAGE}`, U(2), deps);
     ok(
-      "見つからないタスクも処理済み",
-      log.length === 0 && r?.text === MSG_CLOSED,
+      "見つからないタスクは処理済みにせず、確認できませんでしたと返す",
+      log.length === 0 && r?.text === MSG_UNCONFIRMED && r.retryable === true,
+      r?.text,
+    );
+    ok(
+      "文面",
+      MSG_UNCONFIRMED ===
+        "このタスクを確認できませんでした。少し時間をおいてもう一度お試しください",
     );
   }
 
