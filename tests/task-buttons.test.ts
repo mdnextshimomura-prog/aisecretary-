@@ -22,7 +22,6 @@ import {
 } from "../src/lib/task-buttons";
 import type { Member } from "../src/lib/members";
 import { cardActions, type CardInfo, type FlexMessage } from "../src/lib/task-card";
-import { appendMessageIds } from "../src/lib/task-buttons";
 
 const INFO: CardInfo = { pageId: "1234abcd-1234-1234-1234-1234567890ab", title: "重説の作成", due: null, assignee: null };
 const acts = (c: FlexMessage | undefined) => (c ? cardActions(c) : []);
@@ -710,28 +709,13 @@ async function main() {
     ok("形式不正は何もしない（null）", r === null && log.length === 0);
   }
 
-  // ── 付け直したカードの ID をタスクのメッセージID に足す ──
-  ok(
-    "既存の並び（元発言・text・カード）を保ち、後ろに足す",
-    appendMessageIds(["SRC", "T1", "C1"], ["T2", "C2"]).join(",") === "SRC,T1,C1,T2,C2",
-  );
-  ok("同じ ID は足さない・空は捨てる", appendMessageIds(["SRC", "T1"], ["T1", "", "C2"]).join(",") === "SRC,T1,C2");
   {
-    const many = Array.from({ length: 200 }, (_, i) => String(600000000000000000 + i));
-    const out = appendMessageIds(["SRC", "T1", "C1", ...many], ["T9", "C9"]);
-    ok(
-      "長くなったら、先頭3つ（元発言・最初の返事とカード）を残して古い再掲から落とす（2000字未満）",
-      out.slice(0, 3).join() === "SRC,T1,C1" && out.slice(-2).join() === "T9,C9" && out.join(",").length < 2000,
-      String(out.join(",").length),
-    );
-  }
-  {
-    const { deps } = makeDeps({ ...openTask, messageIds: ["SRC", "T1"] }, roster);
+    const { deps } = makeDeps(openTask, roster);
     const r = await handleTaskButton(`v1|wait|${PAGE}`, U(2), deps);
     ok(
-      "カードを付けた返事はタスクの ID と今のメッセージID を返す（入口が再掲カードの ID を足すため）",
-      r?.pageId === PAGE && r?.messageIds?.join() === "SRC,T1",
-      JSON.stringify([r?.pageId, r?.messageIds]),
+      "カードを付けた返事はタスクの ID を返す（入口が再掲カードの ID を cardref に控えるため）",
+      r?.pageId === PAGE,
+      String(r?.pageId),
     );
     const d = await handleTaskButton(`v1|done|${PAGE}`, U(2), makeDeps(openTask, roster).deps);
     ok("カードの無い返事には付けない", d?.pageId === undefined);

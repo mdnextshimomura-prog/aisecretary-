@@ -113,7 +113,12 @@ import {
   registeredCardFor,
   buttonsActive,
 } from "@/lib/task-buttons";
-import { handleTaskPostbackEvent, taskState, taskStatusName } from "@/lib/task-buttons-wire";
+import {
+  findQuotedTaskReal,
+  handleTaskPostbackEvent,
+  taskState,
+  taskStatusName,
+} from "@/lib/task-buttons-wire";
 import { statusForConfirmComplete } from "@/lib/task-closed";
 import {
   recordAfterCreate,
@@ -803,7 +808,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // グループ内に複数の確認が同時に存在しうるため、直近だけを持つ実装にはしない。
     {
       const quotedId = event.message.quotedMessageId ?? null;
-      const quotedTask = quotedId ? await findTaskByMessageId(quotedId) : null;
+      // メッセージID で見つからなければ、付け直したカードの控え（cardref。TASK_BUTTONS=1 のときだけ）
+      const quotedTask = quotedId ? await findQuotedTaskReal(quotedId) : null;
       const pending = await getPendingTaskConfirm(
         source.groupId,
         quotedId,
@@ -1187,7 +1193,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         (m) => m.type === "user" && m.userId !== BOT_USER_ID
       ) ?? [];
     if (event.message.quotedMessageId) {
-      const task = await findTaskByMessageId(event.message.quotedMessageId);
+      // メッセージID で見つからなければ、付け直したカードの控え（cardref。TASK_BUTTONS=1 のときだけ）
+      const task = await findQuotedTaskReal(event.message.quotedMessageId);
       if (task) {
         // 「待ち 完了検査 金曜」「待ち キャンセル待ち 金曜」は、理由の中の「完了」「キャンセル」で
         // 下の (a)(a2) に取られてしまう。状況の言葉として読めるときは (a)(a2) を飛ばして (a3) に回す。

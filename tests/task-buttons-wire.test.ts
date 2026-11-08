@@ -19,9 +19,8 @@ import {
   addPendingHandoff,
   getPendingHandoffs,
   deletePendingTaskConfirm,
-  acquireLock,
-  releaseLock,
 } from "../src/lib/email/session";
+import { findQuotedTask, CARDREF_TTL_SECONDS, type CardRefStore } from "../src/lib/card-ref";
 import { statusForConfirmComplete } from "../src/lib/task-closed";
 
 let fail = 0;
@@ -98,11 +97,7 @@ function io(over: Partial<PostbackIo> = {}): Partial<PostbackIo> {
       return "m1";
     },
     log: (line) => logs.push(line),
-    readMessageIds: async () => [],
-    setMessageIds: async () => undefined,
-    lock: acquireLock,
-    unlock: releaseLock,
-    sleep: async () => undefined,
+    cardRefs: null,
     ...over,
   };
 }
@@ -546,16 +541,23 @@ async function main() {
     ok("流れ（off）：今までどおり未着手で、読まない", offNext === "未着手" && reads === 0);
   }
 
-  // ── 確認待ち → 待ちボタン → 再掲カードを引用して回答 → 確認に結び付く（入口の本物の経路） ──
+  // ── 付け直したカードの控え（cardref）：確認待ち → 待ちボタン → 再掲カードを引用して回答 ──
   {
     process.env.TASK_BUTTONS = "1";
     process.env.TASK_FOLLOWUP = "1";
+    const kvMap = new Map<string, { v: string; ttl: number }>();
+    const fakeKv: CardRefStore = {
+      set: async (k, v, ttl) => {
+        await new Promise((r) => setTimeout(r, 2));
+        kvMap.set(k, { v, ttl });
+      },
+      get: async (k) => kvMap.get(k)?.v ?? null,
+    };
     await savePendingTaskConfirm("G5", { ...base, botMessageId: "T1", cardMessageId: "C1" });
     let status = "要確認";
-    const idWrites: string[][] = [];
     const t5: ButtonTask = {
       id: PAGE, title: "重説", closed: false, assigneeId: U2, requesterId: null,
-      due: null, assignee: "田中 一郎", messageIds: ["SRC", "T1", "C1"],
+      due: null, assignee: "田中 一郎",
     };
     const d5: ButtonDeps = {
       ...deps,
@@ -569,31 +571,34 @@ async function main() {
       },
       session: sessionDeps("G5"),
     };
+    const g5 = (k: string, data = `v1|wait|${PAGE}`) => ({ ...ev(data, k), source: { userId: U2, groupId: "G5" } });
     reset();
-    await handleTaskPostbackEvent({ ...ev(`v1|wait|${PAGE}`, "RC1"), source: { userId: U2, groupId: "G5" } }, io({
+    await handleTaskPostbackEvent(g5("RC1"), io({
       deps: d5,
+      cardRefs: fakeKv,
       reply: async (_rt, text, card) => {
         replies.push({ text, card });
         return { textId: "T2", cardId: "C2" };
       },
-      readMessageIds: async () => ["SRC", "T1", "C1"],
-      setMessageIds: async (_pageId, ids) => {
-        idWrites.push(ids);
-      },
     }));
     ok(
-      "再掲：タスクのメッセージID に text とカードの ID を足す（元発言・最初の返事は保つ）",
-      idWrites.length === 1 && idWrites[0].join(",") === "SRC,T1,C1,T2,C2",
-      JSON.stringify(idWrites),
+      "再掲：text とカードの ID ごとに cardref を 30 日で控える",
+      kvMap.get("cardref:T2")?.v === PAGE && kvMap.get("cardref:C2")?.v === PAGE &&
+        kvMap.get("cardref:C2")?.ttl === CARDREF_TTL_SECONDS && CARDREF_TTL_SECONDS === 2592000,
+      JSON.stringify(Array.from(kvMap.entries())),
     );
-    const viaCard = await getPendingTaskConfirm("G5", "C2", null, U4);
-    ok("再掲カードを引用した回答が確認に結び付く（確認セッションの照合）", viaCard?.pageId === PAGE, JSON.stringify(viaCard));
-    const viaText = await getPendingTaskConfirm("G5", "T2", null, U4);
-    ok("再掲の text を引用した回答も結び付く", viaText?.pageId === PAGE);
-    ok("最初のカードの引用も今までどおり", (await getPendingTaskConfirm("G5", "C1", null, U4))?.pageId === PAGE);
-    ok("confirmQuoteMatches でも再掲の ID を受ける", confirmQuoteMatches(viaCard, "C2"));
-    // 条件がそろった → 進行中のまま（今のステータスを読む）
     ok("再掲：待ちで進行中", status === "進行中");
+    // 入口（route.ts）と同じ順：引用先を findQuotedTask で引き、その pageId で確認を引く
+    const quoted = await findQuotedTask("C2", {
+      findByMessageId: async () => null, // メッセージID には再掲の ID は無い
+      store: fakeKv,
+      readTask: async (id) => (id === PAGE ? { id, title: "重説" } : null),
+      log: (l) => logs.push(l),
+    });
+    ok("再掲カードの引用：cardref からタスクを引く", quoted?.id === PAGE && quoted.title === "重説");
+    const pending = await getPendingTaskConfirm("G5", "C2", quoted?.id ?? null, U4);
+    ok("再掲カードを引用した回答が確認に結び付く", pending?.pageId === PAGE, JSON.stringify(pending));
+    ok("route の quoteResolved と同じ判定（引用先のタスク＝確認のタスク）", quoted?.id === pending?.pageId);
     ok("回答時：進行中は書かない", (await statusForConfirmComplete(true, async () => status)) === null);
     ok(
       "回答時：読めなければ書かない",
@@ -601,131 +606,105 @@ async function main() {
         throw new Error("down");
       })) === null,
     );
-    ok("ログに ID を出さない", !logs.some((l) => /T2|C2|SRC/.test(l)), logs.join(" / "));
+    // 引用での完了（③）：メッセージID で見つからなくても cardref でタスクが引ける（完了・権限の判定はその先の既存の処理）
+    const forDone = await findQuotedTask("T2", {
+      findByMessageId: async () => null,
+      store: fakeKv,
+      readTask: async (id) => ({ id, title: "重説" }),
+      log: () => undefined,
+    });
+    ok("引用での完了：再掲の text の引用でもタスクが引ける", forDone?.id === PAGE);
+    ok(
+      "メッセージID で見つかれば cardref は引かない（今までどおり）",
+      (await findQuotedTask("SRC", {
+        findByMessageId: async () => ({ id: "other", title: "x" }),
+        store: { set: async () => undefined, get: async () => { throw new Error("引いてはいけない"); } },
+        readTask: async () => null,
+        log: () => undefined,
+      }))?.id === "other",
+    );
+    ok("知らない引用は結び付けない", (await getPendingTaskConfirm("G5", "OTHER", null, U4)) === null);
+    ok("ログに ID を出さない", !logs.some((l) => /T2|C2|SRC|1234abcd/.test(l)), logs.join(" / "));
 
-    // ID の保存に失敗しても返事・完了印は成功のまま（種別だけログ）
-    reset();
-    await handleTaskPostbackEvent({ ...ev(`v1|wait|${PAGE}`, "RC2"), source: { userId: U2, groupId: "G5" } }, io({
-      deps: d5,
-      reply: async () => ({ textId: "T3", cardId: "C3" }),
-      setMessageIds: async () => {
-        throw new Error("notion down");
-      },
-    }));
-    ok("ID の保存の失敗は ids-failed を出す", logs.includes("[task-buttons] ids-failed"), logs.join(" / "));
-    ok("ID の保存の失敗でも完了印は付ける", completed.join() === "pb:RC2");
-    ok("Notion に書けなくても確認セッションには足す", (await getPendingTaskConfirm("G5", "C3", null, U4))?.pageId === PAGE);
-
-    // 確認セッションが無ければ作らない
-    await deletePendingTaskConfirm("G5", PAGE);
-    reset();
-    await handleTaskPostbackEvent({ ...ev(`v1|wait|${PAGE}`, "RC3"), source: { userId: U2, groupId: "G5" } }, io({
-      deps: d5,
-      reply: async () => ({ textId: "T4", cardId: "C4" }),
-      setMessageIds: async () => undefined,
-    }));
-    ok("確認セッションが無ければ作らない", (await getPendingTaskConfirm("G5", null, PAGE)) === null);
-  }
-
-  // ── 同じタスクへの2操作が並んでも、両方の ID が残る（ID の保存だけ KV ロックで囲み、中で読み直す） ──
-  {
-    process.env.TASK_BUTTONS = "1";
-    process.env.TASK_FOLLOWUP = "1";
-    await savePendingTaskConfirm("G6", { ...base, botMessageId: "T1", cardMessageId: "C1" });
-    let store = ["SRC", "T1", "C1"];
-    const tick = () => new Promise((r) => setTimeout(r, 5));
-    const shared = {
-      deps: { ...deps, session: sessionDeps("G6") },
-      readMessageIds: async () => {
-        const v = [...store];
-        await tick();
-        return v;
-      },
-      setMessageIds: async (_p: string, ids: string[]) => {
-        await tick();
-        store = ids;
-      },
-      sleep: () => new Promise<void>((r) => setTimeout(r, 10)),
-    };
-    let n = 0;
+    // 並行2操作：単発の SET なので両方の cardref が残る
     reset();
     await Promise.all(
       ["PA", "PB"].map((k) =>
-        handleTaskPostbackEvent(
-          { ...ev(`v1|wait|${PAGE}`, k), source: { userId: U2, groupId: "G6" } },
-          io({
-            ...shared,
-            reply: async () => {
-              n++;
-              await tick();
-              return { textId: `T-${k}`, cardId: `C-${k}` };
-            },
-          }),
-        ),
+        handleTaskPostbackEvent(g5(k), io({
+          deps: d5,
+          cardRefs: fakeKv,
+          reply: async () => {
+            await new Promise((r) => setTimeout(r, 3));
+            return { textId: `T-${k}`, cardId: `C-${k}` };
+          },
+        })),
       ),
     );
     ok(
-      "並行2操作：Notion のメッセージID に両方の ID が残る（元の並びも保つ）",
-      n === 2 && store.slice(0, 3).join() === "SRC,T1,C1" &&
-        ["T-PA", "C-PA", "T-PB", "C-PB"].every((id) => store.includes(id)),
-      store.join(),
+      "並行2操作：両方の cardref が残る",
+      ["T-PA", "C-PA", "T-PB", "C-PB"].every((id) => kvMap.get(`cardref:${id}`)?.v === PAGE),
     );
-    const sess = await getPendingTaskConfirm("G6", null, PAGE);
+
+    // KV の失敗・設定なし：返事と完了印は変わらず、ログは cardref-failed だけ
+    reset();
+    await handleTaskPostbackEvent(g5("KF1"), io({
+      deps: d5,
+      cardRefs: { set: async () => { throw new Error("kv down"); }, get: async () => null },
+      reply: async (_rt, text, card) => {
+        replies.push({ text, card });
+        return { textId: "T5", cardId: "C5" };
+      },
+    }));
     ok(
-      "並行2操作：確認セッションにも両方の ID が残る",
-      ["T-PA", "C-PA", "T-PB", "C-PB"].every((id) => sess?.moreMessageIds?.includes(id)),
-      JSON.stringify(sess?.moreMessageIds),
+      "KV 失敗：返事は同じ（text＋カード）・完了印あり・cardref-failed を1行",
+      replies.length === 1 && replies[0].card?.type === "flex" && completed.join() === "pb:KF1" &&
+        logs.filter((l) => l === "[task-buttons] cardref-failed").length === 1,
+      logs.join(" / "),
     );
-    ok("並行2操作：ロックは外れている", (await acquireLock(`taskids:${PAGE}`, 5)) !== null);
-    await releaseLock(`taskids:${PAGE}`, "x");
-
-    // ロックが取れないときは ids-busy だけ出し、書かない（返事・完了印は変えない）
     reset();
-    let wrote = 0;
-    await handleTaskPostbackEvent(
-      { ...ev(`v1|wait|${PAGE}`, "PC"), source: { userId: U2, groupId: "G6" } },
-      io({
-        ...shared,
-        reply: async () => ({ textId: "T-PC", cardId: "C-PC" }),
-        lock: async () => null,
-        setMessageIds: async () => {
-          wrote++;
-        },
-      }),
+    await handleTaskPostbackEvent(g5("KF2"), io({
+      deps: d5,
+      cardRefs: null,
+      reply: async () => ({ textId: "T6", cardId: "C6" }),
+    }));
+    ok("KV の設定なし：書かずに cardref-failed だけ", logs.includes("[task-buttons] cardref-failed") && completed.join() === "pb:KF2");
+    ok(
+      "KV の設定なし：引くほうも null（メモリで代用しない）",
+      (await findQuotedTask("C2", {
+        findByMessageId: async () => null,
+        store: null,
+        readTask: async (id) => ({ id, title: "x" }),
+        log: () => undefined,
+      })) === null,
     );
-    ok("ロックが取れない：ids-busy を出す", logs.includes("[task-buttons] ids-busy"), logs.join(" / "));
-    ok("ロックが取れない：書かない", wrote === 0);
-    ok("ロックが取れない：完了印は付ける", completed.join() === "pb:PC");
 
-    // 書けなくてもロックは外す（自分のトークンのときだけ）
+    // 済（閉じた）：カードが無いので控えない
     reset();
-    const unlocked: string[] = [];
-    await handleTaskPostbackEvent(
-      { ...ev(`v1|wait|${PAGE}`, "PD"), source: { userId: U2, groupId: "G6" } },
-      io({
-        ...shared,
-        reply: async () => ({ textId: "T-PD", cardId: "C-PD" }),
-        lock: async () => "tok-1",
-        unlock: async (_k, tok) => {
-          unlocked.push(tok);
-        },
-        setMessageIds: async () => {
-          throw new Error("notion down");
-        },
-      }),
-    );
-    ok("書けなくてもロックを外す（自分のトークンで）", unlocked.join() === "tok-1");
-    await deletePendingTaskConfirm("G6", PAGE);
-  }
-  {
-    // ロック本体：同じキーは1人だけ・他人のトークンでは外れない・期限で外れる
-    const t1 = await acquireLock("lk:test", 1);
-    const t2 = await acquireLock("lk:test", 1);
-    ok("ロック：同じキーは1人だけ", t1 !== null && t2 === null);
-    await releaseLock("lk:test", "someone-else");
-    ok("ロック：他人のトークンでは外れない", (await acquireLock("lk:test", 1)) === null);
-    await releaseLock("lk:test", t1!);
-    ok("ロック：自分のトークンで外れる", (await acquireLock("lk:test", 1)) !== null);
+    const before = kvMap.size;
+    await handleTaskPostbackEvent(g5("KD", `v1|done|${PAGE}`), io({
+      deps: d5,
+      cardRefs: fakeKv,
+      reply: async () => ({ textId: "T7", cardId: null }),
+    }));
+    ok("済：カードが無いので cardref を書かない", kvMap.size === before);
+
+    // スイッチ off：一切触らない
+    process.env.TASK_BUTTONS = "0";
+    let touched = 0;
+    const spyKv: CardRefStore = {
+      set: async () => { touched++; },
+      get: async () => { touched++; return PAGE; },
+    };
+    await handleTaskPostbackEvent(g5("OFF1"), io({ deps: d5, cardRefs: spyKv }));
+    const offQ = await findQuotedTask("C2", {
+      findByMessageId: async () => null,
+      store: spyKv,
+      readTask: async (id) => ({ id, title: "x" }),
+      log: () => undefined,
+    });
+    ok("スイッチ off：cardref を書かない・引かない", touched === 0 && offQ === null);
+    process.env.TASK_BUTTONS = "1";
+    await deletePendingTaskConfirm("G5", PAGE);
   }
   ok("このテストは外部へ通信しない", fetchCalls === 0, String(fetchCalls));
 

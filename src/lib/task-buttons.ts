@@ -268,26 +268,6 @@ export interface ButtonTask {
   due?: string | null;
   /** カードに出す担当者の名前（Notion の 担当者）。分からなければ null・省略 */
   assignee?: string | null;
-  /** Notion の メッセージID（カンマ区切り）を分けたもの。付け直したカードの ID を後ろに足すのに使う */
-  messageIds?: string[];
-}
-
-/** Notion の メッセージID は rich_text 1 本（2000 字まで）。余裕を見てこの長さで切る */
-const MAX_MESSAGE_IDS_CHARS = 1900;
-/** 先頭から残す数：元の発言・最初の返事（text）・最初のカード */
-const KEEP_HEAD_IDS = 3;
-
-/**
- * 付け直した返事の ID を、今のメッセージID の後ろに足す（同じ ID・空は足さない）。
- * 長くなったら、先頭の 3 つを残して古い再掲から落とす。
- */
-export function appendMessageIds(existing: string[], add: string[]): string[] {
-  const out = existing.filter(Boolean);
-  for (const id of add) if (id && !out.includes(id)) out.push(id);
-  while (out.join(",").length > MAX_MESSAGE_IDS_CHARS && out.length > KEEP_HEAD_IDS) {
-    out.splice(KEEP_HEAD_IDS, 1);
-  }
-  return out;
 }
 
 export interface ButtonDeps {
@@ -313,9 +293,8 @@ export interface ButtonReply {
   text: string;
   /** 2通目に付けるカード（済・不要で閉じたとき・押せないときは無し） */
   card?: FlexMessage;
-  /** カードを付けたときだけ：対象のタスクと今のメッセージID（入口が再掲の ID を足す） */
+  /** カードを付けたときだけ：対象のタスク（入口が再掲カードの ID を cardref に控える） */
   pageId?: string;
-  messageIds?: string[];
   /** Notion に書いたか */
   changed: boolean;
   /** true なら入口はイベントの完了印を付けない（タスクを確認できなかった） */
@@ -480,8 +459,6 @@ export async function handleTaskButton(
     }
   };
   const r = await runOp();
-  // カードを付けたときだけ、入口が再掲カードの ID を足せるようにタスクの情報を添える
-  return r.card
-    ? { ...r, pageId: t.id, messageIds: t.messageIds ?? [] }
-    : r;
+  // カードを付けたときだけ、入口が再掲カードの ID を控えられるようにタスクの ID を添える
+  return r.card ? { ...r, pageId: t.id } : r;
 }

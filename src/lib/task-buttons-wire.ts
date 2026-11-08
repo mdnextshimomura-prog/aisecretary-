@@ -7,13 +7,17 @@
 import { Client } from "@notionhq/client";
 import { replyTextAndCard } from "./line";
 import { loadMembers } from "./members";
-import { completeTask, setTaskMessageIds, updateTaskAssignee } from "./notion";
+import { completeTask, findTaskByMessageId, updateTaskAssignee } from "./notion";
+import {
+  defaultCardRefStore,
+  findQuotedTask,
+  saveCardRefs,
+  type CardRefStore,
+} from "./card-ref";
 import {
   completeEvent,
   deletePendingTaskConfirm,
   getPendingTaskConfirm,
-  acquireLock,
-  releaseLock,
   reserveEvent,
   savePendingTaskConfirm,
 } from "./email/session";
@@ -32,7 +36,6 @@ import {
   MSG_PAUSED,
   parseButtonData,
   type ButtonDeps,
-  appendMessageIds,
   type ButtonTask,
   type FlexMessage,
 } from "./task-buttons";
@@ -74,11 +77,6 @@ export async function getButtonTask(
     closed: isClosedPage(page),
     assigneeId: richText(props, "担当者ID"),
     requesterId: richText(props, "依頼者ID"),
-    // 今のメッセージID（付け直したカードの ID を後ろに足すため。同じ1回の読み込みから）
-    messageIds: (richText(props, "メッセージID") ?? "")
-      .split(",")
-      .map((v) => v.trim())
-      .filter(Boolean),
     // カードに出す期日・担当（同じ1回の読み込みから。無ければカードに「未定」）
     due:
       (props["期日"] as { date?: { start?: string } | null } | undefined)?.date
@@ -146,78 +144,41 @@ export interface SentIds {
   cardId: string | null;
 }
 
-/** タスクの今の メッセージID（カンマ区切り）を読む */
-export async function readTaskMessageIds(pageId: string): Promise<string[]> {
-  const page = (await notion.pages.retrieve({
-    page_id: pageId,
-  })) as unknown as Record<string, unknown>;
+/** pageId からタスク（id・題名）。消された（アーカイブ・ゴミ箱）・見つからないなら null */
+export async function readTaskRef(
+  pageId: string,
+): Promise<{ id: string; title: string } | null> {
+  let page: Record<string, unknown>;
+  try {
+    page = (await notion.pages.retrieve({
+      page_id: pageId,
+    })) as unknown as Record<string, unknown>;
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code === "object_not_found" || code === "validation_error") return null;
+    throw err;
+  }
+  if (page.archived || page.in_trash) return null;
   const props = (page.properties as Record<string, unknown>) ?? {};
-  return (richText(props, "メッセージID") ?? "")
-    .split(",")
-    .map((v) => v.trim())
-    .filter(Boolean);
+  const title =
+    (props["名前"] as { title?: Array<{ plain_text: string }> } | undefined)
+      ?.title?.[0]?.plain_text ?? "（無題）";
+  return { id: String(page.id), title };
 }
-
-const IDS_LOCK_TTL_SECONDS = 5;
-const IDS_LOCK_TRIES = 5;
-const IDS_LOCK_WAIT_MS = 200;
 
 /**
- * 付け直したカード（と text）の ID を控える：確認セッションが残っていれば照合の対象に足し、
- * タスクの メッセージID にも足す（引用で引けるように）。
- * 同じタスクへの操作が並んでも片方の ID が消えないよう、タスク単位の短いロックの中で読み直してから足す。
- * ロックが取れなければ数回待ってやり直し、それでもだめなら書かずに ids-busy。失敗しても止めない（印を返す）。
+ * 引用先のタスク（route.ts の確認への回答・引用での完了で使う）。まずメッセージID、無ければ
+ * 付け直したカードの控え（cardref）。TASK_BUTTONS が off なら findTaskByMessageId と同じ。
  */
-async function rememberResentIds(
-  groupId: string | undefined,
-  pageId: string,
-  ids: string[],
-  io: PostbackIo,
-): Promise<string[]> {
-  const key = `taskids:${pageId}`;
-  let token: string | null = null;
-  for (let i = 0; i < IDS_LOCK_TRIES && !token; i++) {
-    if (i > 0) await io.sleep(IDS_LOCK_WAIT_MS);
-    try {
-      token = await io.lock(key, IDS_LOCK_TTL_SECONDS);
-    } catch {
-      token = null;
-    }
-  }
-  if (!token) return ["ids-busy"];
-  try {
-    return await writeResentIds(groupId, pageId, ids, io);
-  } finally {
-    await io.unlock(key, token).catch(() => io.log("[task-buttons] unlock-failed"));
-  }
-}
-
-async function writeResentIds(
-  groupId: string | undefined,
-  pageId: string,
-  ids: string[],
-  io: PostbackIo,
-): Promise<string[]> {
-  const warnings: string[] = [];
-  try {
-    const p = await getPendingTaskConfirm(groupId, null, pageId);
-    if (p && p.pageId === pageId) {
-      p.moreMessageIds = [...ids, ...(p.moreMessageIds ?? [])]
-        .filter((v, i, a) => v && a.indexOf(v) === i)
-        .slice(0, 20);
-      await savePendingTaskConfirm(groupId, p);
-    }
-  } catch {
-    warnings.push("session-ids-failed");
-  }
-  try {
-    // 読み直してから足す（操作の開始時に読んだ一覧で全置換しない）
-    const now = await io.readMessageIds(pageId);
-    await io.setMessageIds(pageId, appendMessageIds(now, ids));
-  } catch {
-    warnings.push("ids-failed");
-  }
-  return warnings;
+export function findQuotedTaskReal(
+  messageId: string,
+): Promise<{ id: string; title: string } | null> {
+  return findQuotedTask(messageId, {
+    findByMessageId: findTaskByMessageId,
+    store: defaultCardRefStore(),
+    readTask: readTaskRef,
+    log: (line) => console.log(line),
+  });
 }
 
 export const MSG_BUSY =
@@ -245,14 +206,8 @@ export interface PostbackIo {
     text: string,
     card?: FlexMessage,
   ): Promise<SentIds | string | null>;
-  /** タスクの メッセージID を書く（setTaskMessageIds） */
-  setMessageIds(pageId: string, ids: string[]): Promise<void>;
-  /** タスクの今の メッセージID を読み直す（ロックの中で使う） */
-  readMessageIds(pageId: string): Promise<string[]>;
-  /** タスク単位の短いロック（取れたらトークン）／外す（自分のトークンのときだけ） */
-  lock(key: string, ttlSeconds: number): Promise<string | null>;
-  unlock(key: string, token: string): Promise<void>;
-  sleep(ms: number): Promise<void>;
+  /** 付け直したカードの ID の控え（KV。設定が無ければ null＝書かない） */
+  cardRefs: CardRefStore | null;
   log(line: string): void;
 }
 
@@ -274,11 +229,7 @@ export async function handleTaskPostbackEvent(
     reserve: over.reserve ?? reserveEvent,
     complete: over.complete ?? completeEvent,
     reply: over.reply ?? replyTextAndCard,
-    setMessageIds: over.setMessageIds ?? setTaskMessageIds,
-    readMessageIds: over.readMessageIds ?? readTaskMessageIds,
-    lock: over.lock ?? acquireLock,
-    unlock: over.unlock ?? releaseLock,
-    sleep: over.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+    cardRefs: "cardRefs" in over ? (over.cardRefs ?? null) : defaultCardRefStore(),
     log: over.log ?? ((line) => console.log(line)),
   };
   const op = parseButtonData(data)?.op ?? "invalid";
@@ -343,15 +294,9 @@ export async function handleTaskPostbackEvent(
     const code = r.retryable ? "unconfirmed" : r.changed ? "changed" : "no-change";
     io.log(`[task-buttons] ${op} ${code}`);
     const sent = await send(r.text, r.card, code);
-    // 付け直したカードの ID を控える（確認待ち中に再掲カードを引用した回答も結び付ける）
-    if (r.card && r.pageId && (sent.textId || sent.cardId)) {
-      const ws = await rememberResentIds(
-        event.source.groupId,
-        r.pageId,
-        [sent.textId ?? "", sent.cardId ?? ""].filter(Boolean),
-        io,
-      );
-      for (const w of ws) io.log(`[task-buttons] ${w}`);
+    // 付け直したカード（と text）の ID を控える（単発の SET。確認への回答・引用での完了が引く）
+    if (r.card && r.pageId) {
+      await saveCardRefs([sent.textId, sent.cardId], r.pageId, io.cardRefs, io.log);
     }
   } finally {
     // タスクを確認できなかったときは完了印を付けない（予約は付けたまま）
