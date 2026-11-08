@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import type { ParsedTask } from "./claude";
+import type { QuickReply } from "./task-buttons";
 
 const ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN!;
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET!;
@@ -17,9 +18,11 @@ export function verifyLineSignature(
 }
 
 // LINEメッセージ送信。送ったメッセージのID（引用リプライの照合に使う）を返す。
+// quickReply（タスクのボタン。task-buttons.ts）を渡さなければ、送る中身は今までと同じ。
 export async function sendLineMessage(
   replyToken: string,
-  text: string
+  text: string,
+  quickReply?: QuickReply
 ): Promise<string | null> {
   const res = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
@@ -29,7 +32,7 @@ export async function sendLineMessage(
     },
     body: JSON.stringify({
       replyToken,
-      messages: [{ type: "text", text }],
+      messages: [quickReply ? { type: "text", text, quickReply } : { type: "text", text }],
     }),
   });
   if (!res.ok) return null;

@@ -131,6 +131,27 @@ async function main() {
   respond = json(400, {});
   ok("sendLineMessage は 400 で null を返す（今どおり）", (await sendLineMessage("rt", "x")) === null);
 
+  // ── ボタン（クイックリプライ）：渡さなければ送る中身は今と同じバイト ──
+  respond = json(200, { sentMessages: [{ id: "m9" }] });
+  calls.length = 0;
+  await sendLineMessage("rt", "受付");
+  await sendLineMessage("rt", "受付", undefined);
+  const plain = JSON.stringify({ replyToken: "rt", messages: [{ type: "text", text: "受付" }] });
+  ok(
+    "quickReply なしは今と同じ body",
+    JSON.stringify(calls[0].body) === plain && JSON.stringify(calls[1].body) === plain,
+    JSON.stringify(calls.map((c) => c.body))
+  );
+  const qr = {
+    items: [
+      { type: "action" as const, action: { type: "postback" as const, label: "済", data: "v1|done|x", displayText: "済" } },
+    ],
+  };
+  const id9 = await sendLineMessage("rt", "受付", qr);
+  const sent = calls[2].body as { messages: Array<Record<string, unknown>> };
+  ok("quickReply を付けると message に載る", JSON.stringify(sent.messages[0].quickReply) === JSON.stringify(qr));
+  ok("quickReply つきでも送った ID を返す", id9 === "m9");
+
   console.log(fail === 0 ? "\n🎉 全て通過" : `\n⚠️ ${fail}件 失敗`);
   process.exit(fail ? 1 : 0);
 }
