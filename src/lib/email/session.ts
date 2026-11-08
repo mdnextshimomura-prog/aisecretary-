@@ -392,6 +392,8 @@ export interface PendingTaskConfirm {
   botMessageId?: string | null;
   /** 同じ返事の2通目（タスクのカード。TASK_BUTTONS=1 のときだけ）の ID。カードを引用した回答も結び付ける */
   cardMessageId?: string | null;
+  /** ボタンを押したあとに付け直した返事（text・カード）の ID。これを引用した回答も結び付ける（新しい順に最大 20） */
+  moreMessageIds?: string[];
   createdAt: number;
 }
 
@@ -494,11 +496,18 @@ export async function savePendingTaskConfirm(
 
 /** 引用先がこの確認の Bot の返事（1通目の text か、2通目のカード）か */
 export function confirmQuoteMatches(
-  p: Pick<PendingTaskConfirm, "botMessageId" | "cardMessageId"> | null | undefined,
+  p:
+    | Pick<PendingTaskConfirm, "botMessageId" | "cardMessageId" | "moreMessageIds">
+    | null
+    | undefined,
   quotedMessageId: string | null | undefined
 ): boolean {
   if (!p || !quotedMessageId) return false;
-  return p.botMessageId === quotedMessageId || p.cardMessageId === quotedMessageId;
+  return (
+    p.botMessageId === quotedMessageId ||
+    p.cardMessageId === quotedMessageId ||
+    (p.moreMessageIds ?? []).includes(quotedMessageId)
+  );
 }
 
 /**

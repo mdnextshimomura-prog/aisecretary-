@@ -111,10 +111,11 @@ async function main() {
       (await statusForConfirmComplete(true, async () => "要確認")) === "未着手",
     );
     ok(
-      "on で読めなければ今までどおり未着手（エラーにしない）",
+      // 2026-11-08 再レビューで変更：読めなければ書かない（待ちの進行中・完了を戻さないため。要確認のまま残るのは許容）
+      "on で読めなければステータスを書かない（エラーにもしない）",
       (await statusForConfirmComplete(true, async () => {
         throw new Error("notion down");
-      })) === "未着手",
+      })) === null,
     );
   }
 

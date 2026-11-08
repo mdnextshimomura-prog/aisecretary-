@@ -5,9 +5,9 @@
  * ログに出すのは操作の名前と結果だけ（本文・題名・LINE の ID・pageId は出さない）。
  */
 import { Client } from "@notionhq/client";
-import { sendLineMessage } from "./line";
+import { replyTextAndCard } from "./line";
 import { loadMembers } from "./members";
-import { completeTask, updateTaskAssignee } from "./notion";
+import { completeTask, setTaskMessageIds, updateTaskAssignee } from "./notion";
 import {
   completeEvent,
   deletePendingTaskConfirm,
@@ -30,6 +30,7 @@ import {
   MSG_PAUSED,
   parseButtonData,
   type ButtonDeps,
+  appendMessageIds,
   type ButtonTask,
   type FlexMessage,
 } from "./task-buttons";
@@ -71,6 +72,11 @@ export async function getButtonTask(
     closed: isClosedPage(page),
     assigneeId: richText(props, "担当者ID"),
     requesterId: richText(props, "依頼者ID"),
+    // 今のメッセージID（付け直したカードの ID を後ろに足すため。同じ1回の読み込みから）
+    messageIds: (richText(props, "メッセージID") ?? "")
+      .split(",")
+      .map((v) => v.trim())
+      .filter(Boolean),
     // カードに出す期日・担当（同じ1回の読み込みから。無ければカードに「未定」）
     due:
       (props["期日"] as { date?: { start?: string } | null } | undefined)?.date
@@ -133,6 +139,42 @@ export function buttonDeps(groupId?: string): ButtonDeps {
   };
 }
 
+export interface SentIds {
+  textId: string | null;
+  cardId: string | null;
+}
+
+/**
+ * 付け直したカード（と text）の ID を控える：確認セッションが残っていれば照合の対象に足し、
+ * タスクの メッセージID にも足す（引用で引けるように）。どちらかが失敗しても止めない（印を返す）。
+ */
+async function rememberResentIds(
+  groupId: string | undefined,
+  pageId: string,
+  existing: string[],
+  ids: string[],
+  setIds: PostbackIo["setMessageIds"],
+): Promise<string[]> {
+  const warnings: string[] = [];
+  try {
+    const p = await getPendingTaskConfirm(groupId, null, pageId);
+    if (p && p.pageId === pageId) {
+      p.moreMessageIds = [...ids, ...(p.moreMessageIds ?? [])]
+        .filter((v, i, a) => v && a.indexOf(v) === i)
+        .slice(0, 20);
+      await savePendingTaskConfirm(groupId, p);
+    }
+  } catch {
+    warnings.push("session-ids-failed");
+  }
+  try {
+    await setIds(pageId, appendMessageIds(existing, ids));
+  } catch {
+    warnings.push("ids-failed");
+  }
+  return warnings;
+}
+
 export const MSG_BUSY =
   "いま操作を受け付けられません。少し待ってからもう一度押してください";
 
@@ -149,9 +191,17 @@ export interface PostbackIo {
   deps: ButtonDeps;
   reserve(key: string): Promise<{ proceed: boolean }>;
   complete(key: string): Promise<void>;
-  /** 送ったメッセージの ID。送れなければ null */
-  /** text を1通目、card があれば2通目に足して送る（sendLineMessage） */
-  reply(replyToken: string, text: string, card?: FlexMessage): Promise<string | null>;
+  /**
+   * text を1通目、card があれば2通目に足して送る（replyTextAndCard）。送ったメッセージの ID
+   * （文字列なら text の ID だけ）。送れなければ null か両方 null
+   */
+  reply(
+    replyToken: string,
+    text: string,
+    card?: FlexMessage,
+  ): Promise<SentIds | string | null>;
+  /** タスクの メッセージID を書く（setTaskMessageIds） */
+  setMessageIds(pageId: string, ids: string[]): Promise<void>;
   log(line: string): void;
 }
 
@@ -172,20 +222,30 @@ export async function handleTaskPostbackEvent(
     deps: over.deps ?? buttonDeps(event.source.groupId),
     reserve: over.reserve ?? reserveEvent,
     complete: over.complete ?? completeEvent,
-    reply: over.reply ?? sendLineMessage,
+    reply: over.reply ?? replyTextAndCard,
+    setMessageIds: over.setMessageIds ?? setTaskMessageIds,
     log: over.log ?? ((line) => console.log(line)),
   };
   const op = parseButtonData(data)?.op ?? "invalid";
 
-  const send = async (text: string, card: FlexMessage | undefined, code: string) => {
-    let id: string | null = null;
+  const send = async (
+    text: string,
+    card: FlexMessage | undefined,
+    code: string,
+  ): Promise<SentIds> => {
+    let got: SentIds | string | null = null;
     try {
-      id = await io.reply(replyToken, text, card);
+      got = await io.reply(replyToken, text, card);
     } catch {
       io.log(`[task-buttons] reply-failed ${op} ${code} exception`);
-      return;
+      return { textId: null, cardId: null };
     }
-    if (id === null) io.log(`[task-buttons] reply-failed ${op} ${code}`);
+    const ids: SentIds =
+      got === null || typeof got === "string"
+        ? { textId: got, cardId: null }
+        : got;
+    if (ids.textId === null) io.log(`[task-buttons] reply-failed ${op} ${code}`);
+    return ids;
   };
 
   if (!buttonsActive()) {
@@ -227,7 +287,18 @@ export async function handleTaskPostbackEvent(
     for (const w of r.warnings ?? []) io.log(`[task-buttons] ${w}`);
     const code = r.retryable ? "unconfirmed" : r.changed ? "changed" : "no-change";
     io.log(`[task-buttons] ${op} ${code}`);
-    await send(r.text, r.card, code);
+    const sent = await send(r.text, r.card, code);
+    // 付け直したカードの ID を控える（確認待ち中に再掲カードを引用した回答も結び付ける）
+    if (r.card && r.pageId && (sent.textId || sent.cardId)) {
+      const ws = await rememberResentIds(
+        event.source.groupId,
+        r.pageId,
+        r.messageIds ?? [],
+        [sent.textId ?? "", sent.cardId ?? ""].filter(Boolean),
+        io.setMessageIds,
+      );
+      for (const w of ws) io.log(`[task-buttons] ${w}`);
+    }
   } finally {
     // タスクを確認できなかったときは完了印を付けない（予約は付けたまま）
     if (key && !r?.retryable) {

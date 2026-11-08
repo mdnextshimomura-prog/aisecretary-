@@ -71,8 +71,9 @@ export async function readTaskStatusName(
 /**
  * 初動確認の回答で条件がそろったときに書くステータス（route.ts の persist）。null なら書かない。
  * ボタン（TASK_BUTTONS）が off なら読まずに「未着手」（今と同じ動き・追加の Notion 読み取りなし）。
- * on のときは今のステータスを読み、進行中・完了なら書かない。読めなければ今までどおり「未着手」
- * （回答の反映をエラーにしない）。
+ * on のときは今のステータスを読み、進行中・完了なら書かない。読めなければ書かない
+ * （今の値のまま残す。待ちの進行中を戻したり、完了を開き直したりしないため。要確認のまま残るのは許容。
+ * 回答の反映はエラーにしない）。
  */
 export async function statusForConfirmComplete(
   buttonsOn: boolean,
@@ -83,7 +84,7 @@ export async function statusForConfirmComplete(
   try {
     current = await readStatus();
   } catch {
-    return "未着手";
+    return null;
   }
   return statusAfterConfirm(current);
 }

@@ -268,6 +268,26 @@ export interface ButtonTask {
   due?: string | null;
   /** カードに出す担当者の名前（Notion の 担当者）。分からなければ null・省略 */
   assignee?: string | null;
+  /** Notion の メッセージID（カンマ区切り）を分けたもの。付け直したカードの ID を後ろに足すのに使う */
+  messageIds?: string[];
+}
+
+/** Notion の メッセージID は rich_text 1 本（2000 字まで）。余裕を見てこの長さで切る */
+const MAX_MESSAGE_IDS_CHARS = 1900;
+/** 先頭から残す数：元の発言・最初の返事（text）・最初のカード */
+const KEEP_HEAD_IDS = 3;
+
+/**
+ * 付け直した返事の ID を、今のメッセージID の後ろに足す（同じ ID・空は足さない）。
+ * 長くなったら、先頭の 3 つを残して古い再掲から落とす。
+ */
+export function appendMessageIds(existing: string[], add: string[]): string[] {
+  const out = existing.filter(Boolean);
+  for (const id of add) if (id && !out.includes(id)) out.push(id);
+  while (out.join(",").length > MAX_MESSAGE_IDS_CHARS && out.length > KEEP_HEAD_IDS) {
+    out.splice(KEEP_HEAD_IDS, 1);
+  }
+  return out;
 }
 
 export interface ButtonDeps {
@@ -293,6 +313,9 @@ export interface ButtonReply {
   text: string;
   /** 2通目に付けるカード（済・不要で閉じたとき・押せないときは無し） */
   card?: FlexMessage;
+  /** カードを付けたときだけ：対象のタスクと今のメッセージID（入口が再掲の ID を足す） */
+  pageId?: string;
+  messageIds?: string[];
   /** Notion に書いたか */
   changed: boolean;
   /** true なら入口はイベントの完了印を付けない（タスクを確認できなかった） */
@@ -368,89 +391,97 @@ export async function handleTaskButton(
     assignee: task.assignee ?? null,
   };
   const again = taskCard(info);
-  switch (op) {
-    case "done": {
-      // Notion が先。書けなければ例外で抜け、確認セッション（回答先）は残す。
-      // 書けたらセッションを消す（残すと、後の回答で「未着手」に戻る）
-      await deps.complete(task.id);
-      const warnings = await clearSessionAfter(deps, task.id);
-      return {
-        text: `☑️ 完了にしました\n📋 ${task.title}`,
-        changed: true,
-        ...(warnings ? { warnings } : {}),
-      };
-    }
-    case "wait": {
-      const text = await applyStatusToTask(
-        { kind: "wait", note: "", date: null },
-        task,
-        deps.status,
-      );
-      return { text, card: again, changed: true };
-    }
-    case "drop": {
-      const text = await applyStatusToTask({ kind: "drop" }, task, deps.status);
-      const warnings = await clearSessionAfter(deps, task.id);
-      return { text, changed: true, ...(warnings ? { warnings } : {}) };
-    }
-    case "pmenu": {
-      return {
-        text: `📅 いつに延期しますか？\n📋 ${task.title}`,
-        card: postponeCard(info, deps.today()),
-        changed: false,
-      };
-    }
-    case "pp": {
-      const date = resolvePostponeKey(extra as string, deps.today());
-      if (!date) {
+  const t: ButtonTask = task;
+  const runOp = async (): Promise<ButtonReply> => {
+    switch (op) {
+      case "done": {
+        // Notion が先。書けなければ例外で抜け、確認セッション（回答先）は残す。
+        // 書けたらセッションを消す（残すと、後の回答で「未着手」に戻る）
+        await deps.complete(task.id);
+        const warnings = await clearSessionAfter(deps, task.id);
         return {
-          text: `⚠️ その日はもう過ぎています。日を選び直してください\n📋 ${task.title}`,
+          text: `☑️ 完了にしました\n📋 ${task.title}`,
+          changed: true,
+          ...(warnings ? { warnings } : {}),
+        };
+      }
+      case "wait": {
+        const text = await applyStatusToTask(
+          { kind: "wait", note: "", date: null },
+          task,
+          deps.status,
+        );
+        return { text, card: again, changed: true };
+      }
+      case "drop": {
+        const text = await applyStatusToTask({ kind: "drop" }, task, deps.status);
+        const warnings = await clearSessionAfter(deps, task.id);
+        return { text, changed: true, ...(warnings ? { warnings } : {}) };
+      }
+      case "pmenu": {
+        return {
+          text: `📅 いつに延期しますか？\n📋 ${task.title}`,
           card: postponeCard(info, deps.today()),
           changed: false,
         };
       }
-      const text = await applyStatusToTask(
-        { kind: "postpone", date },
-        task,
-        deps.status,
-      );
-      // 期日が変わったので、新しい期日でカードを付け直す
-      return { text, card: taskCard({ ...info, due: date }), changed: true };
-    }
-    case "amenu": {
-      const buttons = assigneeButtons(task.id, members);
-      if (buttons.length === 0) {
-        return { text: "⚠️ 名簿に替えられる人がいません", changed: false };
+      case "pp": {
+        const date = resolvePostponeKey(extra as string, deps.today());
+        if (!date) {
+          return {
+            text: `⚠️ その日はもう過ぎています。日を選び直してください\n📋 ${task.title}`,
+            card: postponeCard(info, deps.today()),
+            changed: false,
+          };
+        }
+        const text = await applyStatusToTask(
+          { kind: "postpone", date },
+          task,
+          deps.status,
+        );
+        // 期日が変わったので、新しい期日でカードを付け直す
+        return { text, card: taskCard({ ...info, due: date }), changed: true };
       }
-      return {
-        text: `👤 誰に替えますか？\n📋 ${task.title}`,
-        card: assigneeCard(info, members),
-        changed: false,
-      };
-    }
-    case "as": {
-      const m = assignableMembers(members).find((x) =>
-        x.userIds.includes(extra as string),
-      );
-      if (!m) {
-        return { text: "⚠️ 名簿にいない人には替えられません", changed: false };
+      case "amenu": {
+        const buttons = assigneeButtons(task.id, members);
+        if (buttons.length === 0) {
+          return { text: "⚠️ 名簿に替えられる人がいません", changed: false };
+        }
+        return {
+          text: `👤 誰に替えますか？\n📋 ${task.title}`,
+          card: assigneeCard(info, members),
+          changed: false,
+        };
       }
-      // Notion が先。書けなければ例外で抜け、確認セッションの担当は変えない（済・不要と同じ考え方）。
-      // 書けたら確認セッションの担当も合わせる（残すと、確認が済んだとき旧担当へ渡る）。
-      // 合わせられなくても返事は成功のまま（印だけ返す）
-      await deps.setAssignee(task.id, m.name, extra as string);
-      let warnings: string[] | undefined;
-      try {
-        await deps.session.syncAssignee(task.id, m.name, extra as string);
-      } catch {
-        warnings = ["session-sync-failed"];
+      case "as": {
+        const m = assignableMembers(members).find((x) =>
+          x.userIds.includes(extra as string),
+        );
+        if (!m) {
+          return { text: "⚠️ 名簿にいない人には替えられません", changed: false };
+        }
+        // Notion が先。書けなければ例外で抜け、確認セッションの担当は変えない（済・不要と同じ考え方）。
+        // 書けたら確認セッションの担当も合わせる（残すと、確認が済んだとき旧担当へ渡る）。
+        // 合わせられなくても返事は成功のまま（印だけ返す）
+        await deps.setAssignee(task.id, m.name, extra as string);
+        let warnings: string[] | undefined;
+        try {
+          await deps.session.syncAssignee(task.id, m.name, extra as string);
+        } catch {
+          warnings = ["session-sync-failed"];
+        }
+        return {
+          ...(warnings ? { warnings } : {}),
+          text: `👤 担当者を ${m.name} さんに設定しました\n📋 ${task.title}`,
+          card: taskCard({ ...info, assignee: m.name }),
+          changed: true,
+        };
       }
-      return {
-        ...(warnings ? { warnings } : {}),
-        text: `👤 担当者を ${m.name} さんに設定しました\n📋 ${task.title}`,
-        card: taskCard({ ...info, assignee: m.name }),
-        changed: true,
-      };
     }
-  }
+  };
+  const r = await runOp();
+  // カードを付けたときだけ、入口が再掲カードの ID を足せるようにタスクの情報を添える
+  return r.card
+    ? { ...r, pageId: t.id, messageIds: t.messageIds ?? [] }
+    : r;
 }

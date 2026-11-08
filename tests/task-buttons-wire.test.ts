@@ -532,6 +532,86 @@ async function main() {
     ok("流れ（off）：今までどおり未着手で、読まない", offNext === "未着手" && reads === 0);
   }
 
+  // ── 確認待ち → 待ちボタン → 再掲カードを引用して回答 → 確認に結び付く（入口の本物の経路） ──
+  {
+    process.env.TASK_BUTTONS = "1";
+    process.env.TASK_FOLLOWUP = "1";
+    await savePendingTaskConfirm("G5", { ...base, botMessageId: "T1", cardMessageId: "C1" });
+    let status = "要確認";
+    const idWrites: string[][] = [];
+    const t5: ButtonTask = {
+      id: PAGE, title: "重説", closed: false, assigneeId: U2, requesterId: null,
+      due: null, assignee: "田中 一郎", messageIds: ["SRC", "T1", "C1"],
+    };
+    const d5: ButtonDeps = {
+      ...deps,
+      getTask: async () => t5,
+      status: {
+        update: async (_id, props) => {
+          const st = (props as { ステータス?: { select?: { name?: string } } }).ステータス?.select?.name;
+          if (st) status = st;
+        },
+        defaultCheckDate: async () => "2026-11-12",
+      },
+      session: sessionDeps("G5"),
+    };
+    reset();
+    await handleTaskPostbackEvent({ ...ev(`v1|wait|${PAGE}`, "RC1"), source: { userId: U2, groupId: "G5" } }, io({
+      deps: d5,
+      reply: async (_rt, text, card) => {
+        replies.push({ text, card });
+        return { textId: "T2", cardId: "C2" };
+      },
+      setMessageIds: async (_pageId, ids) => {
+        idWrites.push(ids);
+      },
+    }));
+    ok(
+      "再掲：タスクのメッセージID に text とカードの ID を足す（元発言・最初の返事は保つ）",
+      idWrites.length === 1 && idWrites[0].join(",") === "SRC,T1,C1,T2,C2",
+      JSON.stringify(idWrites),
+    );
+    const viaCard = await getPendingTaskConfirm("G5", "C2", null, U4);
+    ok("再掲カードを引用した回答が確認に結び付く（確認セッションの照合）", viaCard?.pageId === PAGE, JSON.stringify(viaCard));
+    const viaText = await getPendingTaskConfirm("G5", "T2", null, U4);
+    ok("再掲の text を引用した回答も結び付く", viaText?.pageId === PAGE);
+    ok("最初のカードの引用も今までどおり", (await getPendingTaskConfirm("G5", "C1", null, U4))?.pageId === PAGE);
+    ok("confirmQuoteMatches でも再掲の ID を受ける", confirmQuoteMatches(viaCard, "C2"));
+    // 条件がそろった → 進行中のまま（今のステータスを読む）
+    ok("再掲：待ちで進行中", status === "進行中");
+    ok("回答時：進行中は書かない", (await statusForConfirmComplete(true, async () => status)) === null);
+    ok(
+      "回答時：読めなければ書かない",
+      (await statusForConfirmComplete(true, async () => {
+        throw new Error("down");
+      })) === null,
+    );
+    ok("ログに ID を出さない", !logs.some((l) => /T2|C2|SRC/.test(l)), logs.join(" / "));
+
+    // ID の保存に失敗しても返事・完了印は成功のまま（種別だけログ）
+    reset();
+    await handleTaskPostbackEvent({ ...ev(`v1|wait|${PAGE}`, "RC2"), source: { userId: U2, groupId: "G5" } }, io({
+      deps: d5,
+      reply: async () => ({ textId: "T3", cardId: "C3" }),
+      setMessageIds: async () => {
+        throw new Error("notion down");
+      },
+    }));
+    ok("ID の保存の失敗は ids-failed を出す", logs.includes("[task-buttons] ids-failed"), logs.join(" / "));
+    ok("ID の保存の失敗でも完了印は付ける", completed.join() === "pb:RC2");
+    ok("Notion に書けなくても確認セッションには足す", (await getPendingTaskConfirm("G5", "C3", null, U4))?.pageId === PAGE);
+
+    // 確認セッションが無ければ作らない
+    await deletePendingTaskConfirm("G5", PAGE);
+    reset();
+    await handleTaskPostbackEvent({ ...ev(`v1|wait|${PAGE}`, "RC3"), source: { userId: U2, groupId: "G5" } }, io({
+      deps: d5,
+      reply: async () => ({ textId: "T4", cardId: "C4" }),
+      setMessageIds: async () => undefined,
+    }));
+    ok("確認セッションが無ければ作らない", (await getPendingTaskConfirm("G5", null, PAGE)) === null);
+  }
+
   if (fail > 0) {
     console.log(`\n${fail} 件失敗`);
     process.exit(1);
