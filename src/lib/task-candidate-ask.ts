@@ -16,7 +16,11 @@ import {
   isDigestTime,
   type Candidate,
 } from "./task-candidate";
-import { claimDailyAsk, numberCandidates } from "./task-candidate-store";
+import {
+  claimDailyAsk,
+  heldIds,
+  numberCandidates,
+} from "./task-candidate-store";
 import { digestWithCards, nameResolver } from "./candidate-card";
 import { menuActive } from "./task-menu";
 import type { FlexMessage } from "./task-card";
@@ -32,6 +36,8 @@ export interface AskDeps {
   push(to: string, text: string, card?: FlexMessage): Promise<boolean>;
   /** 名簿（カードの依頼者・宛先の名前。TASK_MENU on のときだけ読む） */
   members?(): Promise<Member[]>;
+  /** 保留中の候補 ID（TASK_MENU on のときだけ読む。17 時より後に保留したものは次の 17 時まで出さない） */
+  held?(ids: string[], nowMs: number): Promise<Set<string>>;
 }
 
 export type AskResult =
@@ -49,6 +55,7 @@ const realDeps: AskDeps = {
   push: (to, text, card) =>
     card ? pushTextAndCard(to, text, card) : pushLineMessage(to, text),
   members: loadMembers,
+  held: heldIds,
 };
 
 /**
@@ -82,13 +89,15 @@ export async function askCandidatesIfDue(
   const askOne = async (g: string): Promise<AskResult> => {
     if (!(await deps.claim(todayJst, g))) return "already";
     const numbered: Array<Candidate | null> = await deps.number(nowMs, g);
-    // 17 時は保留の印が切れる時刻なので、保留は見ない（全部出す）
+    // 保留中は出さない（17:10 に保留したものは翌日の 17 時まで。17 時前の保留は 17 時で切れている）
+    const ids = numbered.filter((c): c is Candidate => c !== null).map((c) => c.id);
+    const held = deps.held ? await deps.held(ids, nowMs) : new Set<string>();
     if (members === null) {
       members = await (deps.members ?? (async () => []))().catch(
         () => [] as Member[],
       );
     }
-    const r = digestWithCards(numbered, new Set(), nameResolver(members));
+    const r = digestWithCards(numbered, held, nameResolver(members));
     if (!r.text) return "empty";
     return (await deps.push(g, r.text, r.card)) ? "sent" : "send-failed";
   };

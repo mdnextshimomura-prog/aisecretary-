@@ -316,9 +316,18 @@ function isCandidate(v: unknown): v is Candidate {
   );
 }
 
-/** 古い形（taskcand:items・taskcand:numbered）が残っていれば新しい形へ移す。何度呼んでも同じ結果 */
+/**
+ * 古い形（taskcand:items・taskcand:numbered）が残っていれば新しい形へ移す。
+ * 移行の元は GETDEL で原子的に1回だけ取り出す（取り出せた側だけが移す）。並行した2つの移行の片方が
+ * 古い控え（スナップショット）から、もう片方が移したあとに消した候補を作り直さないため。
+ * 取り出したあとで移しきれずに落ちた分は失われる（候補は補助。元の発言は LINE に残る）。
+ */
 async function migrateLegacy(k: CandKv, nowMs: number): Promise<void> {
-  const old = await read<Candidate[]>(ITEMS_KEY);
+  const old = await takeLegacy<Candidate[]>(ITEMS_KEY);
+  // 番号も同じく1回だけ取り出す（items を取れなかった側は numbered も触らない）
+  const oldNum = Array.isArray(old)
+    ? await takeLegacy<Array<Candidate | null>>(NUMBERED_KEY)
+    : null;
   if (!Array.isArray(old)) return;
   for (const c of pruneExpired(old.filter(isCandidate), nowMs)) {
     const ttl = itemTtl(c, nowMs);
@@ -334,21 +343,20 @@ async function migrateLegacy(k: CandKv, nowMs: number): Promise<void> {
   await k.expire(INDEX_KEY, TTL_SECONDS);
   // 営業部の番号を引き継ぐ（新しい番号の並びがまだ無いときだけ）
   const g = mainGroup();
-  const oldNum = await read<Array<Candidate | null>>(NUMBERED_KEY);
   if (g && Array.isArray(oldNum)) {
     const ids = oldNum.map((c) => (c && isCandidate(c) ? c.id : null));
     await k.set(`${NUM_PREFIX}${g}`, ids, { ex: TTL_SECONDS, nx: true });
   }
-  await delLegacy(ITEMS_KEY);
-  await delLegacy(NUMBERED_KEY);
 }
 
-async function delLegacy(key: string): Promise<void> {
+/** 今までの置き場から1つ取り出して消す（KV は GETDEL。メモリは同じ同期の中で読んで消す＝原子的） */
+async function takeLegacy<T>(key: string): Promise<T | null> {
   if (!kvEnabled()) {
+    const v = mem.get(key) as T | undefined;
     mem.delete(key);
-    return;
+    return v ?? null;
   }
-  await kv.del(key);
+  return ((await kv.getdel<T>(key)) ?? null) as T | null;
 }
 
 /** 目次の全件（期限切れ・中身の消えたものは目次からも外す）。控えた順 */

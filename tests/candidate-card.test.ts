@@ -809,6 +809,73 @@ const setEnv = (on: { menu?: boolean; cand?: boolean }) => {
     s._setKvForTest(null);
   }
 
+  // ── 移行が並行しても、途中で消した候補を古い控えから作り直さない ──
+  {
+    setEnv({ menu: false });
+    s._resetMemoryForTest();
+    await s.addCandidate(cand("v2", { groupId: undefined, mentionedUserIds: undefined }), NOW);
+    await s.addCandidate(cand("v1", { groupId: undefined, mentionedUserIds: undefined }), NOW + 1);
+    await s.numberCandidates(NOW);
+    setEnv({ menu: true });
+    const f = fakeKv();
+    // 2つ目の移行の「v1 を作る」書き込みを、途中の削除のあとまで止める
+    let v1Sets = 0;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const gated: CandKv = {
+      ...f.kv,
+      set: async (key, value, opts) => {
+        if (key === "taskcand:c:v1" && opts.nx && ++v1Sets === 2) await gate;
+        return f.kv.set(key, value, opts);
+      },
+    };
+    s._setKvForTest(gated);
+    const pA = s.listCandidates(NOW + 2, G1);
+    const pB = s.listCandidates(NOW + 2, G1);
+    // 先に移した側が移し終える（v1 と営業部の番号ができる）まで待つ
+    for (let i = 0; i < 1000 && !(f.data.has("taskcand:c:v1") && f.data.has(`taskcand:num:${G1}`)); i++) await tick();
+    await s.removeCandidateById("v1"); // 移したあとで［いらない］
+    release();
+    await Promise.all([pA, pB]);
+    ok("並行した移行：途中で消した候補が復活しない", (await s.getCandidate("v1", NOW + 2)) === null, Array.from(f.data.keys()).join());
+    ok("並行した移行：ほかの候補は移る", (await s.getCandidate("v2", NOW + 2))?.id === "v2");
+    ok("並行した移行：古い番号は引き継ぐ（2番＝v1 は片付き済み）", (await s.peekCandidate(1, NOW + 2, G1))?.id === "v2" && (await s.peekCandidate(2, NOW + 2, G1)) === null);
+    s._setKvForTest(null);
+  }
+
+  // ── 17 時の配信でも保留中は出さない ──
+  {
+    setEnv({ menu: true });
+    const f = fakeKv();
+    s._setKvForTest(f.kv);
+    await s.addCandidate(cand("s1"), NOW);
+    await s.addCandidate(cand("s2"), NOW + 1);
+    const AT_1710 = Date.UTC(2026, 10, 8, 8, 10);
+    const AT_1711 = Date.UTC(2026, 10, 8, 8, 11);
+    await s.holdCandidate("s1", cc.nextDigestTimeMs(AT_1710), AT_1710);
+    const pushed: Array<{ text: string; card?: FlexMessage }> = [];
+    const r = await ask.askCandidatesIfDue(
+      AT_1711,
+      {
+        claim: (d, g) => s.claimDailyAsk(d, g),
+        number: (n, g) => s.numberCandidates(n, g),
+        held: (ids, n) => s.heldIds(ids, n),
+        push: async (_to, text, card) => {
+          pushed.push({ text, card });
+          return true;
+        },
+        members: async () => members,
+      },
+      G1,
+      "2026-11-08",
+    );
+    const json = JSON.stringify(pushed[0]?.card ?? {});
+    ok("17時：保留中（17:10 に保留）は 17:11 の配信に出ない", r === "sent" && !pushed[0].text.includes("s1 の題名") && !json.includes("v1|cr|s1") && json.includes("v1|cr|s2"), pushed[0]?.text);
+    s._setKvForTest(null);
+  }
+
   // ── 17 時：文字＋カードを1回の push で（off は今と同じ）──
   {
     const AT_17 = Date.UTC(2026, 10, 8, 8, 5);
