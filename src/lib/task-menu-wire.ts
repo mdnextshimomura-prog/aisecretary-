@@ -8,11 +8,12 @@ import { Client } from "@notionhq/client";
 import { loadMembers } from "./members";
 import { jstDateStr } from "./notion";
 import { addDaysStr } from "./task-status-command";
+import { MENU_OFFSET_MAX } from "./task-buttons";
 import type { MenuDeps, MenuTask } from "./task-menu";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const PAGE_SIZE = 100;
-const MAX_TASKS = 500;
+const MAX_TASKS = MENU_OFFSET_MAX;
 const LINE_USER_ID_RE = /^U[0-9a-f]{32}$/;
 
 const notDone = { property: "ステータス", select: { does_not_equal: "完了" } };
@@ -34,6 +35,14 @@ export function toMenuTask(page: Record<string, unknown>): MenuTask {
       (props["担当者"] as { select?: { name?: string } | null } | undefined)
         ?.select?.name ?? null,
     nextCheck: date("次に確認する日"),
+    origin:
+      (
+        (props["発生元"] as { rich_text?: Array<{ plain_text: string }> } | undefined)
+          ?.rich_text ?? []
+      )
+        .map((t) => t.plain_text)
+        .join("")
+        .trim() || null,
     closed:
       Boolean(page.archived || page.in_trash) ||
       (props["ステータス"] as { select?: { name?: string } | null } | undefined)
@@ -59,13 +68,19 @@ async function queryAll(filter: Record<string, unknown>): Promise<MenuTask[]> {
   return out;
 }
 
+/** 押したグループの発生元だけ（1対1＝groupId なしは全体）。発生元が空の古いタスクは equals に当たらず出ない */
+function originFilter(groupId: string | null): Record<string, unknown>[] {
+  return groupId ? [{ property: "発生元", rich_text: { equals: groupId } }] : [];
+}
+
 export function menuDeps(): MenuDeps {
   return {
     // 期日は「明日以前」で広めに取り（日時つきの期日の取りこぼしを避ける）、今日以前かは手元で見る
-    listToday: (today) =>
+    listToday: (today, groupId) =>
       queryAll({
         and: [
           notDone,
+          ...originFilter(groupId),
           {
             or: [
               {
@@ -77,10 +92,11 @@ export function menuDeps(): MenuDeps {
           },
         ],
       }),
-    listMine: (ids) =>
+    listMine: (ids, groupId) =>
       queryAll({
         and: [
           notDone,
+          ...originFilter(groupId),
           {
             or: ids.map((id) => ({
               property: "担当者ID",

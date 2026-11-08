@@ -314,7 +314,13 @@ export async function handleTaskPostbackEvent(
   if (menuActive()) {
     const action = parseMenuData(data);
     if (action) {
-      await handleMenuPostback(action, event.source.userId, replyToken, io);
+      await handleMenuPostback(
+        action,
+        event.source.userId,
+        event.source.groupId,
+        replyToken,
+        io,
+      );
       return;
     }
   }
@@ -375,13 +381,14 @@ export async function handleTaskPostbackEvent(
 async function handleMenuPostback(
   action: MenuAction,
   actorId: string | undefined,
+  groupId: string | undefined,
   replyToken: string,
   io: PostbackIo,
 ): Promise<void> {
   const deps = io.menu ?? menuDeps();
   let r;
   try {
-    r = await handleMenuAction(action, actorId, deps);
+    r = await handleMenuAction(action, actorId, groupId, deps);
   } catch {
     io.log(`[task-menu] ${action.op} read-failed`);
     try {

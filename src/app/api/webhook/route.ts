@@ -122,7 +122,7 @@ import {
   taskStatusName,
 } from "@/lib/task-buttons-wire";
 import { statusForConfirmComplete } from "@/lib/task-closed";
-import { isMenuWord, menuActive } from "@/lib/task-menu";
+import { bareMentionMenu, menuWordEntry } from "@/lib/task-menu";
 import {
   recordAfterCreate,
   recordAssigneeChange,
@@ -785,10 +785,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // B1 メニュー（TASK_MENU=1 のときだけ。off なら何もしない）。グループの「@秘書 メニュー」は
     // 下書き・初動確認への回答などより先に受ける（「メニュー」を回答や修正の指示に読ませない）
     if (
-      menuActive() &&
-      source.groupId &&
-      taskMentionState(event.message.mention?.mentionees, BOT_USER_ID).mentionsBot &&
-      isMenuWord(stripMentions(event.message))
+      menuWordEntry({
+        isGroup: Boolean(source.groupId),
+        mentionsBot: taskMentionState(event.message.mention?.mentionees, BOT_USER_ID)
+          .mentionsBot,
+        text: stripMentions(event.message),
+      })
     ) {
       await replyMenu(replyToken).catch(() =>
         console.error("[task-menu] reply-failed menu")
@@ -1459,7 +1461,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // 作らない。対象と作業を1回で答えられる短い質問だけ返す。
     // B1 メニュー（TASK_MENU=1 のときだけ）：「@秘書」だけで直前の資料も無いなら、聞き返しの代わりにメニュー。
     // 資料つきの「@秘書」だけ（写真→@秘書）は今までどおり下でタスクとして受ける
-    if (attachments.length === 0 && !text && menuActive() && source.groupId) {
+    if (
+      bareMentionMenu({
+        isGroup: Boolean(source.groupId),
+        text,
+        attachments: attachments.length,
+      })
+    ) {
       await replyMenu(replyToken).catch(() =>
         console.error("[task-menu] reply-failed menu")
       );

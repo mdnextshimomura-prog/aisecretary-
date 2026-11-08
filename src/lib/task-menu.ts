@@ -67,6 +67,27 @@ export function isMenuWord(text: string): boolean {
   return t === "メニュー" || t.toLowerCase() === "menu";
 }
 
+/** route.ts の入口①：グループの「@秘書 メニュー」でメニューを返すか（off なら false＝今の流れのまま） */
+export function menuWordEntry(o: {
+  isGroup: boolean;
+  mentionsBot: boolean;
+  text: string;
+}): boolean {
+  return menuActive() && o.isGroup && o.mentionsBot && isMenuWord(o.text);
+}
+
+/**
+ * route.ts の入口②：「@秘書」だけで直前の資料も無いとき、聞き返し（「どの案件について…」）の代わりに
+ * メニューを返すか（off なら false＝今までどおり聞き返し。資料つきは受付のまま）
+ */
+export function bareMentionMenu(o: {
+  isGroup: boolean;
+  text: string;
+  attachments: number;
+}): boolean {
+  return menuActive() && o.isGroup && !o.text && o.attachments === 0;
+}
+
 function button(
   label: string,
   data: string,
@@ -118,19 +139,25 @@ export interface MenuTask {
   due: string | null;
   assignee: string | null;
   nextCheck: string | null;
+  /** 発生元（登録したグループの ID）。空なら null */
+  origin?: string | null;
   /** ステータスが完了なら true（問い合わせで外すが、念のため手元でも外す） */
   closed?: boolean;
 }
 
 const day = (d: string | null | undefined) => (d ? d.slice(0, 10) : null);
 
-/** 今日・期限切れ：未完了で、期日（JST の日付）が今日以前か、次に確認する日が今日以前 */
+/**
+ * 今日・期限切れ：未完了で、期日（JST の日付）が今日以前か、次に確認する日が今日以前。
+ * 次に確認する日が今日より先（待ち）のものは、期限切れでも出さない（朝のリマインド remind-select.ts と同じ考え方）。
+ */
 export function selectToday(tasks: MenuTask[], todayJst: string): MenuTask[] {
   return sortByDue(
     tasks.filter((t) => {
       if (t.closed) return false;
       const due = day(t.due);
       const check = day(t.nextCheck);
+      if (check !== null && check > todayJst) return false;
       return (
         (due !== null && due <= todayJst) ||
         (check !== null && check <= todayJst)
@@ -250,21 +277,28 @@ export function buildListPage(
 }
 
 export interface MenuDeps {
-  /** 今日・期限切れの候補（未完了。手元で selectToday をかけ直す） */
-  listToday(todayJst: string): Promise<MenuTask[]>;
-  /** 担当者ID がどれかの userId の未完了タスク */
-  listMine(userIds: string[]): Promise<MenuTask[]>;
+  /** 今日・期限切れの候補（未完了。groupId があれば発生元がそのグループのものだけ。手元で selectToday をかけ直す） */
+  listToday(todayJst: string, groupId: string | null): Promise<MenuTask[]>;
+  /** 担当者ID がどれかの userId の未完了タスク（groupId があれば発生元がそのグループのものだけ） */
+  listMine(userIds: string[], groupId: string | null): Promise<MenuTask[]>;
   /** 名簿で同じ人の別アカウントも含めた userId（分からなければ本人だけ） */
   aliasIds(userId: string): Promise<string[]>;
   today(): string;
 }
 
 /** メニューのボタン（postback）が押されたとき。Notion を読めなければ例外のまま返す。 */
+/**
+ * groupId：押したグループ（1対1なら undefined＝全体）。グループから押したときは、発生元がそのグループの
+ * タスクだけを出す（発生元が空の古いタスクは出ない。安全優先）。問い合わせで絞り、手元でも絞り直す。
+ */
 export async function handleMenuAction(
   action: MenuAction,
   actorId: string | undefined,
+  groupId: string | undefined,
   deps: MenuDeps,
 ): Promise<ListPage> {
+  const g = groupId ?? null;
+  const inGroup = (t: MenuTask) => !g || t.origin === g;
   switch (action.op) {
     case "menu":
       return { text: MENU_TEXT, card: menuCard(), pageIds: [] };
@@ -273,7 +307,10 @@ export async function handleMenuAction(
       return { text: MSG_PREPARING, pageIds: [] };
     case "lt": {
       const today = deps.today();
-      const tasks = selectToday(await deps.listToday(today), today);
+      const tasks = selectToday(
+        (await deps.listToday(today, g)).filter(inGroup),
+        today,
+      );
       return buildListPage("lt", tasks, action.offset, MSG_TODAY_EMPTY);
     }
     case "lm": {
@@ -281,7 +318,9 @@ export async function handleMenuAction(
       const ids = await deps.aliasIds(actorId).catch(() => [actorId]);
       const set = new Set(ids.length > 0 ? ids : [actorId]);
       const tasks = sortByDue(
-        (await deps.listMine(Array.from(set))).filter((t) => !t.closed),
+        (await deps.listMine(Array.from(set), g)).filter(
+          (t) => !t.closed && inGroup(t),
+        ),
       );
       return buildListPage("lm", tasks, action.offset, MSG_MINE_EMPTY);
     }

@@ -139,7 +139,8 @@ export function parseButtonData(
 }
 
 // ── メニュー・一覧のボタン（B1。task-menu.ts。TASK_MENU=1 のときだけ出す・扱う）──
-// data は `v1|操作|オフセット`。オフセットは一覧の何件目から出すか（0, 10, 20…）。表示番号ではない。
+// data は `v1|操作|オフセット`。オフセットは一覧の何件目から出すか（ふつう 0, 10, 20…。JSON を 30KB に
+// 収めるために件数を減らしたページの続きは 7 などになる）。表示番号ではない。
 // menu＝メニュー／lt＝今日・期限切れ／lm＝自分の未完了／lc＝候補／ld＝案件
 export type MenuOp = "menu" | "lt" | "lm" | "lc" | "ld";
 const MENU_OPS: MenuOp[] = ["menu", "lt", "lm", "lc", "ld"];
@@ -149,7 +150,8 @@ export interface MenuAction {
 }
 /** 一覧の1ページの件数（カルーセルは［次の10件］を足して最大11枚） */
 export const MENU_PAGE_SIZE = 10;
-const MENU_OFFSET_MAX = 500;
+/** 一覧で読む件数の上限（task-menu-wire.ts の MAX_TASKS と同じ） */
+export const MENU_OFFSET_MAX = 500;
 
 export function encodeMenuData(op: MenuOp, offset = 0): string {
   return ["v1", op, String(offset)].join("|");
@@ -164,7 +166,7 @@ export function parseMenuData(data: string): MenuAction | null {
   if (!MENU_OPS.includes(op)) return null;
   if (!/^(0|[1-9][0-9]{0,2})$/.test(parts[2])) return null;
   const offset = Number(parts[2]);
-  if (offset > MENU_OFFSET_MAX || offset % MENU_PAGE_SIZE !== 0) return null;
+  if (offset > MENU_OFFSET_MAX) return null;
   return { op, offset };
 }
 
