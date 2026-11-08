@@ -5,8 +5,8 @@
  *
  * - 入口：グループで「@秘書 メニュー」、または「@秘書」だけの発言（直前の資料が無いとき。
  *   資料つきの「@秘書」だけは今までどおりタスクの受付）。→ メニューのカード。
- * - メニューのボタン：［今日・期限切れ］［自分の未完了］［候補］［案件］。候補・案件は Task 2・3 で中身を作る
- *   （今は「準備中です」）。
+ * - メニューのボタン：［今日・期限切れ］［自分の未完了］［候補］［案件］。候補は Task 2（candidate-card.ts）、
+ *   案件は Task 3 で中身を作る（今は「準備中です」）。
  * - 一覧はタスク1件＝今のタスクカード（task-buttons.ts の taskCard）1枚。最大10枚＋［次の10件］。
  *   続きの目印はオフセット（data に Notion の start_cursor は入れない。押されたら引き直す）。
  *   一覧のカードのボタンは今のボタン処理（handleTaskButton）にそのままつながる。
@@ -180,7 +180,12 @@ export function sortByDue(tasks: MenuTask[]): MenuTask[] {
     .map((x) => x.t);
 }
 
-function nextBubble(op: "lt" | "lm", nextOffset: number, rest: number) {
+/** ［次の10件］のカード（一覧・候補で共通。data は `v1|操作|オフセット`） */
+export function nextBubble(
+  op: MenuAction["op"],
+  nextOffset: number,
+  rest: number,
+) {
   return {
     type: "bubble",
     body: {
@@ -217,6 +222,8 @@ export interface ListPage {
   card?: FlexMessage;
   /** カルーセルに載せたタスクの ID（載せた順） */
   pageIds: string[];
+  /** ログに出す件数（候補のカードなど、タスクの ID を持たない一覧のとき） */
+  shown?: number;
 }
 
 const LIST_NAME: Record<"lt" | "lm", string> = {
@@ -284,6 +291,15 @@ export interface MenuDeps {
   /** 名簿で同じ人の別アカウントも含めた userId（分からなければ本人だけ） */
   aliasIds(userId: string): Promise<string[]>;
   today(): string;
+  /**
+   * ［候補］（B1 Task 2）：押したグループの候補のカード。省けば「準備中です」
+   * （本物は task-menu-wire.ts → candidate-card.ts）
+   */
+  candidates?(
+    offset: number,
+    actorId: string | undefined,
+    groupId: string | undefined,
+  ): Promise<ListPage>;
 }
 
 /** メニューのボタン（postback）が押されたとき。Notion を読めなければ例外のまま返す。 */
@@ -303,6 +319,9 @@ export async function handleMenuAction(
     case "menu":
       return { text: MENU_TEXT, card: menuCard(), pageIds: [] };
     case "lc":
+      return deps.candidates
+        ? deps.candidates(action.offset, actorId, groupId)
+        : { text: MSG_PREPARING, pageIds: [] };
     case "ld":
       return { text: MSG_PREPARING, pageIds: [] };
     case "lt": {

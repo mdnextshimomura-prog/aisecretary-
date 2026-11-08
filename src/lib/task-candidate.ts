@@ -10,6 +10,7 @@
  */
 
 import { isContextlessRequest } from "./task-intake";
+import { menuActive } from "./task-menu";
 
 /** 候補の機能を使うか。外せば今までどおり（メンションの無い発言は何もしない）。 */
 export function candidatesEnabled(): boolean {
@@ -39,6 +40,33 @@ export interface Candidate {
   senderId: string | null;
   /** 控えた時刻（ミリ秒） */
   createdAt: number;
+  /**
+   * 控えたグループの ID（B1 Task 2。TASK_MENU on のあいだに控えたものだけ。無ければ LINE_GROUP_ID とみなす）。
+   * 別のグループからは見えない・押せない
+   */
+  groupId?: string | null;
+  /** Bot 以外にメンションされた人（B1 Task 2。候補のボタンを押せる人に入る） */
+  mentionedUserIds?: string[];
+}
+
+/**
+ * 候補を受け付けるグループ。LINE_GROUP_ID（営業部）に、TASK_MENU on のときだけ
+ * TASK_CANDIDATE_GROUP_IDS（カンマ区切り）を足す。未設定・TASK_MENU off なら今と同じ（営業部だけ）。
+ */
+export function candidateGroupIds(): string[] {
+  const main = (process.env.LINE_GROUP_ID ?? "").trim();
+  const extra = menuActive()
+    ? (process.env.TASK_CANDIDATE_GROUP_IDS ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+  return [main, ...extra].filter((v, i, a) => v && a.indexOf(v) === i);
+}
+
+/** 候補を受け付けるグループか（TASK_MENU off なら groupId === LINE_GROUP_ID と同じ） */
+export function isCandidateGroup(groupId: string | undefined | null): boolean {
+  return Boolean(groupId) && candidateGroupIds().includes(groupId as string);
 }
 
 const MIN_LENGTH = 6;
@@ -60,13 +88,18 @@ export function shouldCapture(opts: {
   groupId: string | undefined;
   /** 候補を集めるグループ（会社グループ）。そこ以外の発言は控えない */
   mainGroupId: string | undefined;
+  /** 候補を集めるほかのグループ（TASK_CANDIDATE_GROUP_IDS。TASK_MENU off なら空） */
+  extraGroupIds?: string[];
   senderId: string | undefined;
   /** Bot 以外にメンションされた人 */
   mentionedUserIds: string[];
   text: string;
   pilot: string[];
 }): boolean {
-  if (!opts.groupId || !opts.mainGroupId || opts.groupId !== opts.mainGroupId) {
+  const inMain = Boolean(opts.mainGroupId) && opts.groupId === opts.mainGroupId;
+  const inExtra =
+    Boolean(opts.groupId) && (opts.extraGroupIds ?? []).includes(opts.groupId as string);
+  if (!opts.groupId || (!inMain && !inExtra)) {
     return false;
   }
   if (opts.pilot.length === 0) return false;

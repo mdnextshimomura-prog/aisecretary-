@@ -10,6 +10,10 @@ import { jstDateStr } from "./notion";
 import { addDaysStr } from "./task-status-command";
 import { MENU_OFFSET_MAX } from "./task-buttons";
 import type { MenuDeps, MenuTask } from "./task-menu";
+import {
+  candidateListPage,
+  defaultCandidateListDeps,
+} from "./candidate-card";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const PAGE_SIZE = 100;
@@ -112,5 +116,8 @@ export function menuDeps(): MenuDeps {
       return ids.includes(userId) ? ids : [userId, ...ids];
     },
     today: () => jstDateStr(0),
+    // ［候補］（B1 Task 2）：TASK_CANDIDATES も on のときだけ中身。off なら「いま候補の機能は止めています」
+    candidates: (offset, _actorId, groupId) =>
+      candidateListPage(offset, groupId, defaultCandidateListDeps()),
   };
 }

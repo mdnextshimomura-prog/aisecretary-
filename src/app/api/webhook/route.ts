@@ -129,7 +129,9 @@ import {
 } from "@/lib/task-record-wire";
 import {
   buildDigest,
+  candidateGroupIds,
   candidatesEnabled,
+  isCandidateGroup,
   isCandidateListRequest,
   parseCandidateCommand,
   pilotUserIds,
@@ -137,10 +139,18 @@ import {
 } from "@/lib/task-candidate";
 import {
   addCandidate,
+  claimRegister,
   numberCandidates,
   peekCandidate,
+  releaseRegister,
   removeCandidate,
 } from "@/lib/task-candidate-store";
+import {
+  candidateCardsActive,
+  MSG_CAND_BUSY,
+  replyCandidateCard,
+  replyCandidateList,
+} from "@/lib/candidate-card";
 import { dispatchObiEvents, type ObiEventDeps } from "@/lib/obi/webhook-event";
 import { getObiStore } from "@/lib/obi/memo";
 
@@ -708,7 +718,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // 受付の返事のボタン（TASK_BUTTONS=1 のときだけ。off なら今までどおり何もしない）
     if (event.type === "postback") {
-      await handleTaskPostbackEvent(event).catch(() => undefined);
+      // 候補の［登録する］は、文字の「1 登録」と同じ登録（registerTaskFromText）に回す（B1 Task 2）
+      await handleTaskPostbackEvent(event, {
+        candidates: {
+          register: (c, token, groupId) =>
+            registerTaskFromText(c.text, token, groupId, c.id, c.senderId ?? undefined, {
+              assignee: c.assignee,
+              assigneeUserId: c.assigneeUserId,
+              baseMs: c.createdAt,
+              buttons: true,
+            }),
+        },
+      }).catch(() => undefined);
       continue;
     }
     if (event.type !== "message" || !event.message) continue;
@@ -1089,11 +1110,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // ②'' 候補への返事（「1 登録」「2 なし」）と、候補の一覧の頼み（「@AI秘書 候補」）。
     // スイッチが off のあいだは何もしない。会社グループの中だけで受ける
     // （候補は会社グループの発言から作るので、別のトークから題名を見たり消したりできないようにする）。
+    // （B1 Task 2：TASK_MENU on なら TASK_CANDIDATE_GROUP_IDS のグループでも受け、番号はグループごと。off なら営業部だけ）
     if (
       candidatesEnabled() &&
       source.groupId &&
-      source.groupId === process.env.LINE_GROUP_ID
+      isCandidateGroup(source.groupId)
     ) {
+      const candGroup = source.groupId;
       const stripped = stripMentions(event.message);
       const candCmd = parseCandidateCommand(stripped);
       // 聞き返しメニュー（「② タスクとして登録」「④ なし」）への返事と形が重なる。
@@ -1115,12 +1138,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               continue;
             }
             const n = candCmd.numbers[0];
-            const c = await peekCandidate(n);
+            const c = await peekCandidate(n, Date.now(), candGroup);
             if (!c) {
               await sendLineMessage(
                 replyToken,
                 `⚠️ ${n}番の候補は見つかりませんでした（登録済みか、消えています）`
               );
+              continue;
+            }
+            // TASK_MENU on：ボタンの［登録する］と同じ予約（SET NX）を通す（文字とボタンが同時でも1回）
+            const regClaimed = candidateCardsActive()
+              ? await claimRegister(c.id)
+              : true;
+            if (!regClaimed) {
+              await sendLineMessage(replyToken, MSG_CAND_BUSY);
               continue;
             }
             // 元の発言の ID を鍵にする（同じ依頼を 2 度登録しない）。
@@ -1138,11 +1169,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
                 buttons: true,
               }
             );
+            if (candidateCardsActive() && r !== "ok" && r !== "duplicate") {
+              await releaseRegister(c.id).catch(() => undefined);
+            }
             if (r === "ok") {
-              await removeCandidate(n);
+              await removeCandidate(n, candGroup);
               markCommitted();
             } else if (r === "duplicate") {
-              await removeCandidate(n);
+              await removeCandidate(n, candGroup);
               markCommitted();
               await sendLineMessage(
                 replyToken,
@@ -1160,9 +1194,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             const dropped: string[] = [];
             const notFound: number[] = [];
             for (const n of candCmd.numbers) {
-              const c = await peekCandidate(n);
+              const c = await peekCandidate(n, Date.now(), candGroup);
               if (c) {
-                await removeCandidate(n);
+                await removeCandidate(n, candGroup);
                 dropped.push(`${n}. ${c.title}`);
               } else notFound.push(n);
             }
@@ -1192,6 +1226,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           .mentionsBot
       ) {
         try {
+          if (candidateCardsActive()) {
+            // TASK_MENU on：メニューの［候補］と同じ（文字の一覧＋カード。保留中は出さない）
+            await replyCandidateList(replyToken, candGroup);
+            continue;
+          }
           const digest = buildDigest(await numberCandidates());
           await sendLineMessage(
             replyToken,
@@ -1410,6 +1449,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         shouldCapture({
           groupId: source.groupId,
           mainGroupId: process.env.LINE_GROUP_ID,
+          extraGroupIds: candidateGroupIds(),
           senderId: source.userId,
           mentionedUserIds: mentioned.map((m) => m.userId as string),
           text,
@@ -1440,6 +1480,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               assigneeUserId,
               senderId: source.userId ?? null,
               createdAt: Date.now(),
+              // B1 Task 2（TASK_MENU off のあいだは置き場が書かない）
+              groupId: source.groupId ?? null,
+              mentionedUserIds: mentioned.map((x) => x.userId as string),
             });
             markCommitted();
           }
@@ -1599,9 +1642,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // 対象者が設定されていないあいだは、誰の発言も控えない
         pilotUserIds().length > 0 &&
         source.groupId &&
-        source.groupId === process.env.LINE_GROUP_ID
+        isCandidateGroup(source.groupId)
       ) {
-        await addCandidate({
+        const cand = {
           id: event.message.id,
           text,
           title: parsed.title,
@@ -1609,7 +1652,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           assigneeUserId: parsed.assigneeUserId ?? null,
           senderId: source.userId ?? null,
           createdAt: Date.now(),
-        }).catch((err) => console.error("候補の控えに失敗（何もしない）:", err));
+          // B1 Task 2（TASK_MENU off のあいだは置き場が書かない）
+          groupId: source.groupId,
+          mentionedUserIds: (event.message.mention?.mentionees ?? [])
+            .filter((m) => m.type === "user" && m.userId && m.userId !== BOT_USER_ID)
+            .map((m) => m.userId as string),
+        };
+        const added = await addCandidate(cand).catch((err) => {
+          console.error("候補の控えに失敗（何もしない）:", err);
+          return false;
+        });
+        // TASK_MENU on：その場の返事で候補カード1枚（off なら今までどおり返事はしない）
+        if (added && candidateCardsActive()) {
+          await replyCandidateCard(replyToken, cand).catch(() =>
+            console.error("[task-candidate] reply-failed asked-card")
+          );
+        }
       }
       continue;
     }

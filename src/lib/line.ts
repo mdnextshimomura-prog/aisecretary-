@@ -99,6 +99,33 @@ export async function pushLineMessage(
   return true;
 }
 
+// 文字とカードを1回の push で（2通・1リクエスト。B1 の 17 時の候補）。card が無ければ pushLineMessage と同じ。
+// pushLineMessage は変えていない（呼んでいる所の送る中身を1バイトも変えないため）。
+export async function pushTextAndCard(
+  to: string,
+  text: string,
+  card?: FlexMessage
+): Promise<boolean> {
+  if (!card) return pushLineMessage(to, text);
+  const res = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${ACCESS_TOKEN}`,
+    },
+    body: JSON.stringify({
+      to,
+      messages: [{ type: "text", text }, card],
+    }),
+  });
+  if (!res.ok) {
+    // 本文・宛先は出さない（状態の番号だけ）
+    console.error("LINE push失敗:", res.status);
+    return false;
+  }
+  return true;
+}
+
 // LINEメンション付きPush送信（textV2形式）。
 // 通常の text メッセージに mention を付けても送信時は無視される（受信専用の仕様）ため、
 // 本物のメンション（相手に通知が飛び、青くハイライトされる）には textV2 の

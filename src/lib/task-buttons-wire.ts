@@ -31,6 +31,13 @@ import {
   type MenuDeps,
 } from "./task-menu";
 import { menuDeps } from "./task-menu-wire";
+import {
+  candidateCardsActive,
+  defaultCandidateActionDeps,
+  handleCandidateAction,
+  parseCandidateData,
+  type CandidateActionDeps,
+} from "./candidate-card";
 import { statusDeps } from "./task-status-wire";
 import { jstDateStr } from "./notion";
 import {
@@ -258,6 +265,11 @@ export interface PostbackIo {
   log(line: string): void;
   /** メニュー・一覧の読み込み（TASK_MENU=1 のときだけ使う。省けば本物の Notion） */
   menu?: MenuDeps;
+  /**
+   * 候補のボタン（B1 Task 2。TASK_MENU=1 かつ TASK_CANDIDATES=1 のときだけ使う）。
+   * register は route.ts が渡す（registerTaskFromText）。省いた部品は本物（KV・名簿）
+   */
+  candidates?: Partial<CandidateActionDeps>;
 }
 
 /**
@@ -281,6 +293,7 @@ export async function handleTaskPostbackEvent(
     cardRefs: "cardRefs" in over ? (over.cardRefs ?? null) : defaultCardRefStore(),
     log: over.log ?? ((line) => console.log(line)),
     menu: over.menu,
+    candidates: over.candidates,
   };
   const op = parseButtonData(data)?.op ?? "invalid";
 
@@ -320,6 +333,39 @@ export async function handleTaskPostbackEvent(
         event.source.groupId,
         replyToken,
         io,
+      );
+      return;
+    }
+  }
+
+  // 候補のボタン（TASK_MENU=1 かつ TASK_CANDIDATES=1 のときだけ。off なら下のタスクのボタンへ＝「使えません」）。
+  // 二重押しは候補ごとの登録の予約（SET NX）で止める
+  if (candidateCardsActive()) {
+    const action = parseCandidateData(data);
+    if (action) {
+      const c = io.candidates ?? {};
+      await handleCandidateAction(
+        action,
+        event.source.userId,
+        event.source.groupId,
+        replyToken,
+        {
+          ...defaultCandidateActionDeps({
+            register: async () => "failed",
+            reply: (t, text) => io.reply(t, text),
+            log: io.log,
+          }),
+          ...c,
+          ...(c.register
+            ? {}
+            : {
+                // 登録の部品が渡されていない（入口の作り違い）。登録せず知らせる
+                register: async (_c, t) => {
+                  await io.reply(t, "⚠️ 候補を処理できませんでした。もう一度お試しください。");
+                  return "failed" as const;
+                },
+              }),
+        },
       );
       return;
     }
@@ -398,7 +444,7 @@ async function handleMenuPostback(
     }
     return;
   }
-  io.log(`[task-menu] ${action.op} shown ${r.pageIds.length}`);
+  io.log(`[task-menu] ${action.op} shown ${r.shown ?? r.pageIds.length}`);
   let got: SentIds | string | null = null;
   try {
     got = await io.reply(replyToken, r.text, r.card);
