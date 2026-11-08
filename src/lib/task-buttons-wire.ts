@@ -8,16 +8,24 @@ import { Client } from "@notionhq/client";
 import { sendLineMessage } from "./line";
 import { loadMembers } from "./members";
 import { completeTask, updateTaskAssignee } from "./notion";
-import { completeEvent, reserveEvent } from "./email/session";
+import {
+  completeEvent,
+  deletePendingTaskConfirm,
+  getPendingTaskConfirm,
+  reserveEvent,
+  savePendingTaskConfirm,
+} from "./email/session";
 import { recordAssigneeChange } from "./task-record-wire";
 import { statusDeps } from "./task-status-wire";
 import { jstDateStr } from "./notion";
 import {
-  buttonsEnabled,
+  buttonsActive,
   handleTaskButton,
+  MSG_PAUSED,
   parseButtonData,
   type ButtonDeps,
   type ButtonTask,
+  type QuickReply,
 } from "./task-buttons";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
@@ -64,7 +72,24 @@ export async function getButtonTask(
   };
 }
 
-export function buttonDeps(): ButtonDeps {
+/** 初動確認のセッション（KV）。route.ts の確認の流れと同じ関数で読み書きする。 */
+export function sessionDeps(groupId: string | undefined): ButtonDeps["session"] {
+  return {
+    clear: async (pageId) => {
+      const p = await getPendingTaskConfirm(groupId, null, pageId);
+      if (p) await deletePendingTaskConfirm(groupId, pageId);
+    },
+    syncAssignee: async (pageId, name, userId) => {
+      const p = await getPendingTaskConfirm(groupId, null, pageId);
+      if (!p || p.pageId !== pageId) return;
+      p.assignee = name;
+      p.assigneeUserId = userId;
+      await savePendingTaskConfirm(groupId, p);
+    },
+  };
+}
+
+export function buttonDeps(groupId?: string): ButtonDeps {
   const s = statusDeps();
   return {
     getTask: getButtonTask,
@@ -77,54 +102,103 @@ export function buttonDeps(): ButtonDeps {
       await recordAssigneeChange(pageId, name, userId);
     },
     today: () => jstDateStr(0),
+    session: sessionDeps(groupId),
   };
 }
+
+export const MSG_BUSY =
+  "いま操作を受け付けられません。少し待ってからもう一度押してください";
 
 export interface PostbackEventLike {
   type: string;
   replyToken?: string;
   webhookEventId?: string;
-  source: { userId?: string };
+  source: { userId?: string; groupId?: string };
   postback?: { data?: string };
 }
 
+/** 差し替えられる部品（テスト用）。省いたものは本物を使う。 */
+export interface PostbackIo {
+  deps: ButtonDeps;
+  reserve(key: string): Promise<{ proceed: boolean }>;
+  complete(key: string): Promise<void>;
+  /** 送ったメッセージの ID。送れなければ null */
+  reply(replyToken: string, text: string, quickReply?: QuickReply): Promise<string | null>;
+  log(line: string): void;
+}
+
 /**
- * postback イベント（ボタンが押された）を扱う。スイッチが off、またはこのボタンの data
- * （v1|…）でなければ何もしない。例外は投げない（返事で知らせる）。
+ * postback イベント（ボタンが押された）を扱う。このボタンの data（v1|…）でなければ何もしない。
+ * TASK_BUTTONS・TASK_FOLLOWUP のどちらかが off なら、書かずに「止めています」と返す。
+ * 例外は投げない（返事で知らせる）。ログは操作名と結果の符号だけ。
  */
 export async function handleTaskPostbackEvent(
   event: PostbackEventLike,
-  deps: ButtonDeps = buttonDeps(),
+  over: Partial<PostbackIo> = {},
 ): Promise<void> {
-  if (!buttonsEnabled()) return;
   const data = event.postback?.data ?? "";
   if (!data.startsWith("v1|")) return;
   const replyToken = event.replyToken;
   if (!replyToken) return;
+  const io: PostbackIo = {
+    deps: over.deps ?? buttonDeps(event.source.groupId),
+    reserve: over.reserve ?? reserveEvent,
+    complete: over.complete ?? completeEvent,
+    reply: over.reply ?? sendLineMessage,
+    log: over.log ?? ((line) => console.log(line)),
+  };
   const op = parseButtonData(data)?.op ?? "invalid";
 
-  // 同じイベントの再送で二重に書かない（KV が使えないときは、そのまま進める）
+  const send = async (text: string, quickReply: QuickReply | undefined, code: string) => {
+    let id: string | null = null;
+    try {
+      id = await io.reply(replyToken, text, quickReply);
+    } catch {
+      io.log(`[task-buttons] reply-failed ${op} ${code} exception`);
+      return;
+    }
+    if (id === null) io.log(`[task-buttons] reply-failed ${op} ${code}`);
+  };
+
+  if (!buttonsActive()) {
+    await send(MSG_PAUSED, undefined, "paused");
+    return;
+  }
+
+  // 同じイベントの再送で二重に書かない。予約できない（KV の障害）なら書かない
   const key = event.webhookEventId ? `pb:${event.webhookEventId}` : null;
   if (key) {
-    const claim = await reserveEvent(key).catch(() => ({ proceed: true }));
+    let claim: { proceed: boolean };
+    try {
+      claim = await io.reserve(key);
+    } catch {
+      io.log(`[task-buttons] reserve-failed ${op}`);
+      await send(MSG_BUSY, undefined, "busy");
+      return;
+    }
     if (!claim.proceed) return;
   }
   try {
-    const r = await handleTaskButton(data, event.source.userId, deps);
-    if (!r) {
-      console.warn("[task-buttons] data の形式が違う");
-      await sendLineMessage(replyToken, "⚠️ このボタンは使えません");
+    let r;
+    try {
+      r = await handleTaskButton(data, event.source.userId, io.deps);
+    } catch {
+      io.log(`[task-buttons] ${op} failed`);
+      await send("⚠️ 書き込めませんでした。もう一度お試しください。", undefined, "error");
       return;
     }
-    console.log(`[task-buttons] ${op} ${r.changed ? "changed" : "no-change"}`);
-    await sendLineMessage(replyToken, r.text, r.quickReply);
-  } catch {
-    console.error(`[task-buttons] ${op} failed`);
-    await sendLineMessage(
-      replyToken,
-      "⚠️ 書き込めませんでした。もう一度お試しください。",
-    ).catch(() => undefined);
+    if (!r) {
+      io.log("[task-buttons] invalid-data");
+      await send("⚠️ このボタンは使えません", undefined, "invalid");
+      return;
+    }
+    const code = r.changed ? "changed" : "no-change";
+    io.log(`[task-buttons] ${op} ${code}`);
+    await send(r.text, r.quickReply, code);
   } finally {
-    if (key) await completeEvent(key).catch(() => undefined);
+    // Notion は書けているので、返事が送れなくても完了印は付ける（再適用を防ぐ）
+    if (key) {
+      await io.complete(key).catch(() => io.log("[task-buttons] mark-failed"));
+    }
   }
 }

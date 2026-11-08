@@ -500,6 +500,8 @@ async function registerTaskFromText(
     assigneeUserId?: string | null;
     /** 依頼のあった時刻（ミリ秒）。「明日までに」を、登録と返した日ではなく依頼の日から数える */
     baseMs?: number;
+    /** 受付の返事にボタンを付けるか（候補の「1 登録」だけ。聞き返しメニューからの登録には付けない） */
+    buttons?: boolean;
   } = {}
 ): Promise<"ok" | "retry" | "failed" | "duplicate"> {
   // 通常経路と同じ予約を通す。ここを素通しにすると、同時到達で
@@ -599,7 +601,14 @@ async function registerTaskFromText(
         `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
     }
   }
-  const botMsgId = await sendLineMessage(replyToken, reply, registeredQuickReply(pageId));
+  // ボタンは確定した受付の返事だけ（初動確認の質問を返したときは付けない）
+  const botMsgId = await sendLineMessage(
+    replyToken,
+    reply,
+    opts.buttons
+      ? registeredQuickReply(pageId, reply === buildTaskRegisteredMessage(parsed))
+      : undefined
+  );
   // 元の発言の ID も残す（Bot の返信の ID だけで上書きすると、二重登録の確認と
   // 「元の発言を引用して完了」が効かなくなる。通常の登録と同じ形）
   await setTaskMessageIds(
@@ -1052,6 +1061,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
                 assignee: c.assignee,
                 assigneeUserId: c.assigneeUserId,
                 baseMs: c.createdAt,
+                buttons: true,
               }
             );
             if (r === "ok") {
@@ -1666,7 +1676,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const botMsgId = await sendLineMessage(
         replyToken,
         reply,
-        registeredQuickReply(pageId)
+        // ボタンは確定した受付の返事だけ（初動確認の質問・確認失敗の返事には付けない）
+        registeredQuickReply(pageId, reply === buildTaskRegisteredMessage(parsed))
       ).catch((e) => {
         console.error("返信に失敗（登録は完了）:", e);
         return null;

@@ -14,6 +14,7 @@ import {
   handleTaskButton,
   MSG_FORBIDDEN,
   MSG_CLOSED,
+  buttonsActive,
   type ButtonDeps,
   type ButtonTask,
 } from "../src/lib/task-buttons";
@@ -50,7 +51,16 @@ const TODAY = "2026-11-09";
 
 function makeDeps(task: ButtonTask | null, members: Member[]) {
   const log: string[] = [];
+  const slog: string[] = [];
   const deps: ButtonDeps = {
+    session: {
+      clear: async (id) => {
+        slog.push(`clear:${id}`);
+      },
+      syncAssignee: async (id, name, userId) => {
+        slog.push(`assign:${id}:${name}:${userId}`);
+      },
+    },
     getTask: async () => task,
     members: async () => members,
     complete: async (id) => {
@@ -67,7 +77,7 @@ function makeDeps(task: ButtonTask | null, members: Member[]) {
     },
     today: () => TODAY,
   };
-  return { deps, log };
+  return { deps, log, slog };
 }
 
 const shimo = member("下村 亮太", [U(1)]);
@@ -86,16 +96,30 @@ const openTask: ButtonTask = {
 async function main() {
   // ── スイッチ ──
   delete process.env.TASK_BUTTONS;
-  ok("未設定は off", !buttonsEnabled());
+  process.env.TASK_FOLLOWUP = "1";
+  ok("未設定は off", !buttonsEnabled() && !buttonsActive());
   ok(
     "off なら受付の返事にボタンを付けない",
-    registeredQuickReply(PAGE) === undefined,
+    registeredQuickReply(PAGE, true) === undefined,
   );
   process.env.TASK_BUTTONS = "0";
-  ok("0 は off", registeredQuickReply(PAGE) === undefined);
+  ok("0 は off", registeredQuickReply(PAGE, true) === undefined);
   process.env.TASK_BUTTONS = "1";
-  const qr = registeredQuickReply(PAGE);
-  ok("on なら受付の返事にボタンを付ける", qr !== undefined);
+  delete process.env.TASK_FOLLOWUP;
+  ok(
+    "TASK_FOLLOWUP が off ならボタンを付けない",
+    !buttonsActive() && registeredQuickReply(PAGE, true) === undefined,
+  );
+  process.env.TASK_FOLLOWUP = "0";
+  ok("TASK_FOLLOWUP=0 も付けない", registeredQuickReply(PAGE, true) === undefined);
+  process.env.TASK_FOLLOWUP = "1";
+  ok("両方 on で動く", buttonsActive());
+  ok(
+    "確定前（初動確認・聞き返しの返事）には付けない",
+    registeredQuickReply(PAGE, false) === undefined,
+  );
+  const qr = registeredQuickReply(PAGE, true);
+  ok("on なら確定した受付の返事にボタンを付ける", qr !== undefined);
   const labels = qr!.items.map((i) => i.action.label);
   ok(
     "ボタンの順と文言",
@@ -363,10 +387,12 @@ async function main() {
   }
 
   // ── 押せる人 ──
+  process.env.TASK_BUTTONS_ADMIN_IDS = ` ${U(1)} , ${U(50)}`;
   for (const [who, id] of [
     ["担当者", U(2)],
     ["依頼者", U(3)],
-    ["下村さん", U(1)],
+    ["特権者（TASK_BUTTONS_ADMIN_IDS）", U(1)],
+    ["特権者の2人目（名簿にいなくてよい）", U(50)],
   ] as const) {
     const { deps, log } = makeDeps(openTask, roster);
     await handleTaskButton(`v1|done|${PAGE}`, id, deps);
@@ -412,10 +438,84 @@ async function main() {
   {
     const { deps, log } = makeDeps(openTask, []);
     await handleTaskButton(`v1|done|${PAGE}`, U(1), deps);
+    ok("特権者は名簿が引けなくても押せる", log.length === 1);
+  }
+  {
+    // 名前での判定はしない：名簿の「下村」でも、特権者の ID に無ければ押せない
+    process.env.TASK_BUTTONS_ADMIN_IDS = "";
+    const { deps, log } = makeDeps(openTask, roster);
+    const r = await handleTaskButton(`v1|done|${PAGE}`, U(1), deps);
     ok(
-      "名簿が引けないと下村さんでも ID が一致しなければ押せない",
-      log.length === 0,
+      "特権者が未設定なら、名簿の下村さんでも押せない",
+      log.length === 0 && r?.text === MSG_FORBIDDEN,
     );
+    const shimo2 = member("下村 太郎", [U(60)]);
+    const r2 = await handleTaskButton(`v1|done|${PAGE}`, U(60), {
+      ...makeDeps(openTask, [...roster, shimo2]).deps,
+    });
+    ok("姓の前方一致では押せない", r2?.text === MSG_FORBIDDEN);
+    process.env.TASK_BUTTONS_ADMIN_IDS = U(1);
+  }
+  {
+    // 依頼者ID が空（TASK_RECORD=0 の間に登録したタスク）
+    const noReq = { ...openTask, requesterId: null };
+    const a = makeDeps(noReq, roster);
+    await handleTaskButton(`v1|done|${PAGE}`, U(2), a.deps);
+    ok("依頼者ID が空でも担当者は押せる", a.log.length === 1);
+    const b = makeDeps(noReq, roster);
+    await handleTaskButton(`v1|done|${PAGE}`, U(1), b.deps);
+    ok("依頼者ID が空でも特権者は押せる", b.log.length === 1);
+    const c = makeDeps(noReq, roster);
+    const r = await handleTaskButton(`v1|done|${PAGE}`, U(3), c.deps);
+    ok(
+      "依頼者ID が空なら、頼んだ人でも押せない",
+      c.log.length === 0 && r?.text === MSG_FORBIDDEN,
+    );
+  }
+
+  // ── 初動確認のセッション ──
+  {
+    const { deps, log, slog } = makeDeps(openTask, roster);
+    await handleTaskButton(`v1|done|${PAGE}`, U(2), deps);
+    ok("済：残っている確認セッションを消す", slog.join() === `clear:${PAGE}`, slog.join());
+    ok("済：完了も書く", log.join() === `complete:${PAGE}`);
+  }
+  {
+    const { deps, slog } = makeDeps(openTask, roster);
+    await handleTaskButton(`v1|drop|${PAGE}`, U(2), deps);
+    ok("不要：確認セッションを消す", slog.join() === `clear:${PAGE}`, slog.join());
+  }
+  {
+    const { deps, slog } = makeDeps(openTask, roster);
+    await handleTaskButton(`v1|wait|${PAGE}`, U(2), deps);
+    ok("待ち：確認セッションには触らない", slog.length === 0);
+  }
+  {
+    const { deps, slog } = makeDeps(openTask, roster);
+    await handleTaskButton(`v1|as|${PAGE}|${U(4)}`, U(3), deps);
+    ok(
+      "担当変更：確認セッションの担当も合わせる",
+      slog.join() === `assign:${PAGE}:鈴木 次郎:${U(4)}`,
+      slog.join(),
+    );
+  }
+  {
+    const { deps, log } = makeDeps(openTask, roster);
+    let threw = false;
+    try {
+      await handleTaskButton(`v1|done|${PAGE}`, U(2), {
+        ...deps,
+        session: {
+          ...deps.session,
+          clear: async () => {
+            throw new Error("kv down");
+          },
+        },
+      });
+    } catch {
+      threw = true;
+    }
+    ok("セッションを消せなければ完了も書かない（先に消す）", threw && log.length === 0);
   }
 
   // ── 処理済み・見つからない ──
