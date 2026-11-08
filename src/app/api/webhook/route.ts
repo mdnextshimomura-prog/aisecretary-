@@ -116,6 +116,7 @@ import {
 import {
   findQuotedTaskReal,
   handleTaskPostbackEvent,
+  sendConfirmAnswerReply,
   taskState,
   taskStatusName,
 } from "@/lib/task-buttons-wire";
@@ -908,9 +909,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             const r = applyApproval(state);
             await persist(r, []);
             markCommitted();
-            await sendLineMessage(
+            // TASK_BUTTONS=1 ならタスクのカードを2通目に付ける（off なら今と同じ1通）
+            await sendConfirmAnswerReply(
               replyToken,
-              buildAnswerAppliedMessage(pending.title, r.applied, [], null, r.remaining)
+              buildAnswerAppliedMessage(pending.title, r.applied, [], null, r.remaining),
+              pending
             );
             if (r.complete) {
               await handoffToAssignee(source.groupId, pending);
@@ -974,7 +977,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
                 `\n\n※ このタスクへのご指示として扱いました。` +
                 `別のご依頼でしたら、もう一度そのままお送りください。`;
             }
-            await sendLineMessage(replyToken, msg);
+            // TASK_BUTTONS=1 ならタスクのカードを2通目に付ける（off なら今と同じ1通）
+            await sendConfirmAnswerReply(replyToken, msg, pending);
             if (r.complete) {
               await handoffToAssignee(source.groupId, pending);
             }

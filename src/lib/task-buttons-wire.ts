@@ -5,7 +5,7 @@
  * ログに出すのは操作の名前と結果だけ（本文・題名・LINE の ID・pageId は出さない）。
  */
 import { Client } from "@notionhq/client";
-import { replyTextAndCard } from "./line";
+import { replyTextAndCard, sendLineMessage } from "./line";
 import { loadMembers } from "./members";
 import { completeTask, findTaskByMessageId, updateTaskAssignee } from "./notion";
 import {
@@ -33,6 +33,7 @@ import {
 import {
   buttonsActive,
   handleTaskButton,
+  registeredCard,
   MSG_PAUSED,
   parseButtonData,
   type ButtonDeps,
@@ -179,6 +180,41 @@ export function findQuotedTaskReal(
     readTask: readTaskRef,
     log: (line) => console.log(line),
   });
+}
+
+/**
+ * 初動確認への回答の返事（route.ts の「(a) 提案をそのまま承認」「(b) 具体的な回答」）。
+ * TASK_BUTTONS が on なら、文の返事を1通目のまま、そのタスクのカードを2通目に付ける（返事に毎回付ける）。
+ * タスク名は確認の題名、担当は確認の担当、期日は確認に無いので「未定」（Notion の追加読み取りはしない）。
+ * 送れた ID は cardref に控える（再掲と同じ。失敗はログだけ）。off なら sendLineMessage と同じ1通。
+ * 送信の例外はそのまま投げる（呼び出し側の「⚠️ 反映に失敗」の扱いを変えない）。返すのは text の ID。
+ */
+export async function sendConfirmAnswerReply(
+  replyToken: string,
+  text: string,
+  pending: { pageId: string; title: string; assignee?: string | null },
+  over: Partial<Pick<PostbackIo, "reply" | "cardRefs" | "log">> = {},
+): Promise<string | null> {
+  const card = registeredCard({
+    pageId: pending.pageId,
+    title: pending.title,
+    due: null,
+    assignee: pending.assignee ?? null,
+  });
+  if (!card) {
+    const got = await (over.reply ?? sendLineMessage)(replyToken, text);
+    return got === null || typeof got === "string" ? got : got.textId;
+  }
+  const got = await (over.reply ?? replyTextAndCard)(replyToken, text, card);
+  const ids: SentIds =
+    got === null || typeof got === "string" ? { textId: got, cardId: null } : got;
+  await saveCardRefs(
+    [ids.textId, ids.cardId],
+    pending.pageId,
+    "cardRefs" in over ? (over.cardRefs ?? null) : defaultCardRefStore(),
+    over.log ?? ((line) => console.log(line)),
+  );
+  return ids.textId;
 }
 
 export const MSG_BUSY =

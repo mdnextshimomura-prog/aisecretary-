@@ -3,6 +3,7 @@
  * LINE の返事・KV の予約は差し替え、Notion・名簿も差し替える。セッションは KV 未設定のメモリで動かす。
  */
 import {
+  sendConfirmAnswerReply,
   handleTaskPostbackEvent,
   sessionDeps,
   MSG_BUSY,
@@ -706,6 +707,92 @@ async function main() {
     process.env.TASK_BUTTONS = "1";
     await deletePendingTaskConfirm("G5", PAGE);
   }
+  // ── 初動確認への回答の返事（承認・具体的な回答）にもカードを付ける ──
+  {
+    const kv2 = new Map<string, string>();
+    const store: CardRefStore = {
+      set: async (k, v) => { kv2.set(k, v); },
+      get: async (k) => kv2.get(k) ?? null,
+    };
+    const pend = { pageId: PAGE, title: "重説の作成", assignee: "田中 一郎" };
+    const sentCalls: Array<{ text: string; card?: FlexMessage }> = [];
+    const aio = (over: Record<string, unknown> = {}) => ({
+      reply: async (_rt: string, text: string, card?: FlexMessage) => {
+        sentCalls.push({ text, card });
+        return card ? { textId: "AT1", cardId: "AC1" } : "AT1";
+      },
+      cardRefs: store,
+      log: (l: string) => logs.push(l),
+      ...over,
+    });
+    process.env.TASK_BUTTONS = "1";
+    process.env.TASK_FOLLOWUP = "1";
+    for (const [name, text] of [
+      ["承認の返事", "✅ 提案どおりで確定しました\n📋 重説の作成"],
+      ["具体的な回答の返事", "✅ 反映しました：手付 300万円\n📋 重説の作成"],
+    ] as const) {
+      sentCalls.length = 0;
+      kv2.clear();
+      const id = await sendConfirmAnswerReply("rt", text, pend, aio());
+      ok(`${name}：1通目の文はそのまま、2通目にカード`, sentCalls.length === 1 && sentCalls[0].text === text && sentCalls[0].card?.type === "flex");
+      const j = JSON.stringify(sentCalls[0].card);
+      ok(`${name}：カードはタスク名・担当（期日は未定）・5ボタン`, j.includes("重説の作成") && j.includes("田中 一郎") && j.includes("未定") && cardActions(sentCalls[0].card!).length === 5);
+      ok(`${name}：返す ID は text`, id === "AT1");
+      ok(`${name}：cardref を控える`, kv2.get("cardref:AT1") === PAGE && kv2.get("cardref:AC1") === PAGE);
+    }
+    {
+      sentCalls.length = 0;
+      await sendConfirmAnswerReply("rt", "x", { pageId: PAGE, title: "t", assignee: null }, aio());
+      ok("担当が分からなければ「未定」", (JSON.stringify(sentCalls[0].card).match(/"未定"/g) ?? []).length === 2);
+    }
+    {
+      // cardref の失敗は返事を変えない
+      sentCalls.length = 0;
+      logs = [];
+      const id = await sendConfirmAnswerReply("rt", "ok", pend, aio({
+        cardRefs: { set: async () => { throw new Error("kv down"); }, get: async () => null },
+      }));
+      ok("cardref 失敗：返事は同じ・cardref-failed だけ", id === "AT1" && sentCalls[0].card !== undefined && logs.join() === "[task-buttons] cardref-failed", logs.join());
+    }
+    {
+      // 送信の例外はそのまま投げる（呼び出し側の「⚠️ 反映に失敗」へ。今と同じ）
+      let threw = false;
+      try {
+        await sendConfirmAnswerReply("rt", "ok", pend, aio({ reply: async () => { throw new Error("net"); } }));
+      } catch {
+        threw = true;
+      }
+      ok("送信の例外は投げる（今と同じ扱い）", threw);
+    }
+    {
+      // off：カードなしで今と同じ（sendLineMessage と同じ1通）、cardref に触らない
+      process.env.TASK_BUTTONS = "0";
+      sentCalls.length = 0;
+      kv2.clear();
+      const id = await sendConfirmAnswerReply("rt", "ok", pend, aio());
+      ok("off：カードを付けない・cardref に触らない", sentCalls.length === 1 && sentCalls[0].card === undefined && kv2.size === 0 && id === "AT1");
+      process.env.TASK_BUTTONS = "1";
+    }
+  }
+
+  {
+    // 入口（route.ts）の使い方：カードを付けるのは回答の反映の2か所だけ。止める系・失敗系の返事は今までどおり文だけ
+    const src = (await import("fs")).readFileSync(
+      new URL("../src/app/api/webhook/route.ts", import.meta.url),
+      "utf8",
+    );
+    ok("回答の返事2か所でカードつきの送信を使う", (src.match(/await sendConfirmAnswerReply\(/g) ?? []).length === 2);
+    ok(
+      "処理済み・確認できない返事は文だけ",
+      /sendLineMessage\(replyToken, MSG_UNCONFIRMED\)/.test(src) && /sendLineMessage\(replyToken, MSG_CLOSED\)/.test(src),
+    );
+    for (const t of ["⚠️ 確認内容の反映に失敗しました", "⚠️ ご回答の反映に失敗しました"]) {
+      const i = src.indexOf(t);
+      const call = src.lastIndexOf("await ", i);
+      ok(`失敗の返事は文だけ：${t}`, i > 0 && src.slice(call, i).startsWith("await sendLineMessage(") && !src.slice(call, i).includes("Card"));
+    }
+  }
+
   ok("このテストは外部へ通信しない", fetchCalls === 0, String(fetchCalls));
 
   if (fail > 0) {
