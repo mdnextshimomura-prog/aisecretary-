@@ -98,7 +98,7 @@ const POSTPONE_LABEL: Record<PostponeKey, string> = {
   nextfri: "来週金曜",
 };
 
-const PAGE_ID_RE =
+export const PAGE_ID_RE =
   /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
 const LINE_USER_ID_RE = /^U[0-9a-f]{32}$/;
 const MAX_DATA = 300;

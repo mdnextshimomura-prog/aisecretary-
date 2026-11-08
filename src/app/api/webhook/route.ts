@@ -116,6 +116,7 @@ import {
 import {
   findQuotedTaskReal,
   handleTaskPostbackEvent,
+  replyDealList,
   replyMenu,
   sendConfirmAnswerReply,
   taskState,
@@ -123,6 +124,8 @@ import {
 } from "@/lib/task-buttons-wire";
 import { statusForConfirmComplete } from "@/lib/task-closed";
 import { bareMentionMenu, menuWordEntry } from "@/lib/task-menu";
+import { dealWordEntry } from "@/lib/deal-card";
+import { recordAfterCreateWithPick } from "@/lib/deal-card-wire";
 import {
   recordAfterCreate,
   recordAssigneeChange,
@@ -531,6 +534,8 @@ async function registerTaskFromText(
     baseMs?: number;
     /** 受付の返事にボタンを付けるか（候補の「1 登録」だけ。聞き返しメニューからの登録には付けない） */
     buttons?: boolean;
+    /** 発言者の［タスクを足す］の印を使うか（B1 Task 3。その人の @秘書 の依頼の登録＝聞き返しメニューからだけ） */
+    dealPick?: boolean;
   } = {}
 ): Promise<"ok" | "retry" | "failed" | "duplicate"> {
   // 通常経路と同じ予約を通す。ここを素通しにすると、同時到達で
@@ -600,7 +605,8 @@ async function registerTaskFromText(
   }
   await completeMessage(sourceMessageId, pageId).catch(() => undefined);
   // 誰が頼んだか・どこから来たか・どの案件か（スイッチが off なら何もしない。失敗しても止めない）
-  await recordAfterCreate(pageId, {
+  // ［タスクを足す］の印（B1 Task 3）は、その人の依頼の登録（聞き返しメニューから）だけで使う
+  await (opts.dealPick ? recordAfterCreateWithPick : recordAfterCreate)(pageId, {
     senderId,
     groupId,
     assignee: parsed.assignee,
@@ -814,6 +820,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     ) {
       await replyMenu(replyToken).catch(() =>
         console.error("[task-menu] reply-failed menu")
+      );
+      continue;
+    }
+    // B1 案件（TASK_MENU=1 のときだけ）：グループの「@秘書 案件」で進行中の案件のカード（メニューの［案件］と同じ）
+    if (
+      dealWordEntry({
+        isGroup: Boolean(source.groupId),
+        mentionsBot: taskMentionState(event.message.mention?.mentionees, BOT_USER_ID)
+          .mentionsBot,
+        text: stripMentions(event.message),
+      })
+    ) {
+      await replyDealList(replyToken, source.groupId).catch(() =>
+        console.error("[task-menu] reply-failed ld")
       );
       continue;
     }
@@ -1398,7 +1418,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               replyToken,
               source.groupId,
               event.message.id,
-              source.userId
+              source.userId,
+              { dealPick: true }
             );
             if (r === "retry") {
               requestRetry();
@@ -1612,7 +1633,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               `・内容を人の目で確認し、種別・担当・期日を設定してください。`,
             ]).catch(() => undefined);
             await completeMessage(event.message.id, pageId).catch(() => undefined);
-            await recordAfterCreate(pageId, {
+            // @秘書 あての依頼なら［タスクを足す］の印も使う（B1 Task 3。添付だけの発言は使わない）
+            await (mentionState.mentionsBot ? recordAfterCreateWithPick : recordAfterCreate)(pageId, {
               senderId: source.userId,
               groupId: source.groupId,
               assignee: null,
@@ -1793,7 +1815,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       await completeMessage(event.message.id, pageId).catch(() => undefined);
       markCommitted();
       // 誰が頼んだか・どこから来たか・どの案件か（スイッチが off なら何もしない。失敗しても止めない）
-      await recordAfterCreate(pageId, {
+      // ［タスクを足す］の印があれば案件を「確定」で入れて印を消す（B1 Task 3。TASK_MENU off なら今と同じ）
+      await recordAfterCreateWithPick(pageId, {
         senderId: source.userId,
         groupId: source.groupId,
         assignee: parsed.assignee,

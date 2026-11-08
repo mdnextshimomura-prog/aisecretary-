@@ -14,6 +14,8 @@ import {
   candidateListPage,
   defaultCandidateListDeps,
 } from "./candidate-card";
+import { dealListPage } from "./deal-card";
+import { dealDeps } from "./deal-card-wire";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const PAGE_SIZE = 100;
@@ -119,5 +121,7 @@ export function menuDeps(): MenuDeps {
     // ［候補］（B1 Task 2）：TASK_CANDIDATES も on のときだけ中身。off なら「いま候補の機能は止めています」
     candidates: (offset, _actorId, groupId) =>
       candidateListPage(offset, groupId, defaultCandidateListDeps()),
+    // ［案件］（B1 Task 3）：進行中の CRM_案件 のカード（残りタスク数は押したグループの発生元で数える）
+    deals: (offset, groupId) => dealListPage(offset, groupId, dealDeps()),
   };
 }

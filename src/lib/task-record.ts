@@ -18,9 +18,12 @@ export function recordEnabled(): boolean {
 export interface DealRef {
   id: string;
   name: string;
+  /** CRM_案件 のフェーズ（B1 の案件カードに出す。照合には使わない） */
+  phase?: string | null;
 }
 
-export type DealState = "候補あり" | "未割当" | "案件なし";
+/** 「確定」は人が選んだとき（B1 の［タスクを足す］）だけ。秘書の照合では付けない */
+export type DealState = "候補あり" | "未割当" | "案件なし" | "確定";
 
 export interface DealMatch {
   state: DealState;
@@ -98,6 +101,11 @@ export interface RecordInfo {
   assigneeNotionUserId: string | null;
   /** タスクの物件の鍵（表記ゆれを吸収したもの） */
   propertyKey: string | null;
+  /**
+   * 人が案件を選んである（B1 の［タスクを足す］の印）。true なら案件の照合・書き込みはここでせず、
+   * 呼び出し側（deal-card-wire.ts の applyDealPick）が「確定」で書く
+   */
+  dealPicked?: boolean;
 }
 
 const text = (s: string) => ({ rich_text: [{ text: { content: s } }] });
@@ -150,8 +158,8 @@ export async function enrichTask(
   pageId: string,
   info: RecordInfo,
   deps: RecordDeps
-): Promise<{ origin: boolean; assignee: boolean; deal: DealState | "failed" }> {
-  const done: { origin: boolean; assignee: boolean; deal: DealState | "failed" } =
+): Promise<{ origin: boolean; assignee: boolean; deal: DealState | "failed" | "picked" }> {
+  const done: { origin: boolean; assignee: boolean; deal: DealState | "failed" | "picked" } =
     { origin: false, assignee: false, deal: "failed" };
 
   const origin = originProps(info);
@@ -171,6 +179,12 @@ export async function enrichTask(
     } catch {
       deps.warn("assignee");
     }
+  }
+
+  // 人が選んだ案件があるときは照合しない（自動の「候補あり」で上書きしない）
+  if (info.dealPicked) {
+    done.deal = "picked";
+    return done;
   }
 
   let match: DealMatch;

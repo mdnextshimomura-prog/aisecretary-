@@ -6,7 +6,7 @@
  * - 入口：グループで「@秘書 メニュー」、または「@秘書」だけの発言（直前の資料が無いとき。
  *   資料つきの「@秘書」だけは今までどおりタスクの受付）。→ メニューのカード。
  * - メニューのボタン：［今日・期限切れ］［自分の未完了］［候補］［案件］。候補は Task 2（candidate-card.ts）、
- *   案件は Task 3 で中身を作る（今は「準備中です」）。
+ *   案件は Task 3（deal-card.ts）。
  * - 一覧はタスク1件＝今のタスクカード（task-buttons.ts の taskCard）1枚。最大10枚＋［次の10件］。
  *   続きの目印はオフセット（data に Notion の start_cursor は入れない。押されたら引き直す）。
  *   一覧のカードのボタンは今のボタン処理（handleTaskButton）にそのままつながる。
@@ -185,6 +185,8 @@ export function nextBubble(
   op: MenuAction["op"],
   nextOffset: number,
   rest: number,
+  /** 続きの data（省けば `v1|op|オフセット`。案件のタスク一覧は `v1|dt|案件ID|オフセット`） */
+  nextData?: string,
 ) {
   return {
     type: "bubble",
@@ -208,7 +210,7 @@ export function nextBubble(
       contents: [
         button(
           "次の10件",
-          encodeMenuData(op, nextOffset),
+          nextData ?? encodeMenuData(op, nextOffset),
           "（ボタン）次の10件",
           true,
         ),
@@ -240,7 +242,10 @@ export function buildListPage(
   tasks: MenuTask[],
   offset: number,
   emptyText: string,
+  /** 案件のタスク一覧（B1 Task 3）：一覧の名前と、続きの data の作り方を差し替える */
+  opts: { name?: string; nextData?: (offset: number) => string } = {},
 ): ListPage {
+  const listName = opts.name ?? LIST_NAME[op];
   const total = tasks.length;
   if (total === 0) return { text: emptyText, pageIds: [] };
   if (offset >= total) {
@@ -259,11 +264,12 @@ export function buildListPage(
         }).contents,
     );
     const end = offset + count;
-    if (end < total) bubbles.push(nextBubble(op, end, total - end));
+    if (end < total)
+      bubbles.push(nextBubble(op, end, total - end, opts.nextData?.(end)));
     const card: FlexMessage = {
       type: "flex",
       altText: cut(
-        `【${LIST_NAME[op]}】${total}件（${offset + 1}〜${end}件目）`,
+        `【${listName}】${total}件（${offset + 1}〜${end}件目）`,
         ALT_TEXT_MAX,
       ),
       contents: { type: "carousel", contents: bubbles },
@@ -274,7 +280,7 @@ export function buildListPage(
       count === 1
     ) {
       return {
-        text: `📋 ${LIST_NAME[op]}（${total}件中 ${offset + 1}〜${end}件目）`,
+        text: `📋 ${listName}（${total}件中 ${offset + 1}〜${end}件目）`,
         card,
         pageIds: shown.map((t) => t.id),
       };
@@ -300,6 +306,11 @@ export interface MenuDeps {
     actorId: string | undefined,
     groupId: string | undefined,
   ): Promise<ListPage>;
+  /**
+   * ［案件］（B1 Task 3）：進行中の案件のカード。省けば「準備中です」
+   * （本物は task-menu-wire.ts → deal-card.ts）
+   */
+  deals?(offset: number, groupId: string | undefined): Promise<ListPage>;
 }
 
 /** メニューのボタン（postback）が押されたとき。Notion を読めなければ例外のまま返す。 */
@@ -323,7 +334,9 @@ export async function handleMenuAction(
         ? deps.candidates(action.offset, actorId, groupId)
         : { text: MSG_PREPARING, pageIds: [] };
     case "ld":
-      return { text: MSG_PREPARING, pageIds: [] };
+      return deps.deals
+        ? deps.deals(action.offset, groupId)
+        : { text: MSG_PREPARING, pageIds: [] };
     case "lt": {
       const today = deps.today();
       const tasks = selectToday(

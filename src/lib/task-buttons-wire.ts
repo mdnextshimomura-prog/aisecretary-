@@ -32,6 +32,14 @@ import {
 } from "./task-menu";
 import { menuDeps } from "./task-menu-wire";
 import {
+  dealListPage,
+  handleDealAction,
+  parseDealData,
+  type DealDeps,
+} from "./deal-card";
+import { dealDeps } from "./deal-card-wire";
+import type { ListPage } from "./task-menu";
+import {
   candidateCardsActive,
   defaultCandidateActionDeps,
   handleCandidateAction,
@@ -265,6 +273,8 @@ export interface PostbackIo {
   log(line: string): void;
   /** メニュー・一覧の読み込み（TASK_MENU=1 のときだけ使う。省けば本物の Notion） */
   menu?: MenuDeps;
+  /** 案件のボタン（B1 Task 3。TASK_MENU=1 のときだけ使う。省けば本物の Notion・KV） */
+  deal?: DealDeps;
   /**
    * 候補のボタン（B1 Task 2。TASK_MENU=1 かつ TASK_CANDIDATES=1 のときだけ使う）。
    * register は route.ts が渡す（registerTaskFromText）。省いた部品は本物（KV・名簿）
@@ -293,6 +303,7 @@ export async function handleTaskPostbackEvent(
     cardRefs: "cardRefs" in over ? (over.cardRefs ?? null) : defaultCardRefStore(),
     log: over.log ?? ((line) => console.log(line)),
     menu: over.menu,
+    deal: over.deal,
     candidates: over.candidates,
   };
   const op = parseButtonData(data)?.op ?? "invalid";
@@ -331,6 +342,23 @@ export async function handleTaskPostbackEvent(
         action,
         event.source.userId,
         event.source.groupId,
+        replyToken,
+        io,
+      );
+      return;
+    }
+    // 案件のボタン（B1 Task 3。［タスクを見る］＝読むだけ、［タスクを足す］＝KV の印だけ）
+    const deal = parseDealData(data);
+    if (deal) {
+      await replyListResult(
+        deal.op,
+        () =>
+          handleDealAction(
+            deal,
+            event.source.userId,
+            event.source.groupId,
+            io.deal ?? dealDeps(),
+          ),
         replyToken,
         io,
       );
@@ -432,9 +460,28 @@ async function handleMenuPostback(
   io: PostbackIo,
 ): Promise<void> {
   const deps = io.menu ?? menuDeps();
+  await replyListResult(
+    action.op,
+    () => handleMenuAction(action, actorId, groupId, deps),
+    replyToken,
+    io,
+  );
+}
+
+/**
+ * 一覧（メニュー・案件）の返事の共通部分。読めなければ「タスクを読み込めませんでした」。
+ * 載せたタスクが1件のときだけ cardref に控える。例外は投げない。
+ */
+async function replyListResult(
+  op: string,
+  run: () => Promise<ListPage>,
+  replyToken: string,
+  io: PostbackIo,
+): Promise<void> {
+  const action = { op };
   let r;
   try {
-    r = await handleMenuAction(action, actorId, groupId, deps);
+    r = await run();
   } catch {
     io.log(`[task-menu] ${action.op} read-failed`);
     try {
@@ -470,4 +517,26 @@ export async function replyMenu(
 ): Promise<void> {
   await (over.reply ?? replyTextAndCard)(replyToken, MENU_TEXT, menuCard());
   (over.log ?? ((line) => console.log(line)))("[task-menu] menu shown 0");
+}
+
+/**
+ * 「@秘書 案件」への返事（route.ts の入口。TASK_MENU が off なら呼ばれない）。メニューの［案件］と同じ。
+ * 送信の例外はそのまま投げる。
+ */
+export async function replyDealList(
+  replyToken: string,
+  groupId: string | undefined,
+  over: Partial<Pick<PostbackIo, "reply" | "log" | "deal">> = {},
+): Promise<void> {
+  const log = over.log ?? ((line: string) => console.log(line));
+  let r: ListPage;
+  try {
+    r = await dealListPage(0, groupId, over.deal ?? dealDeps());
+  } catch {
+    log("[task-menu] ld read-failed");
+    await (over.reply ?? replyTextAndCard)(replyToken, MSG_READ_FAILED);
+    return;
+  }
+  log(`[task-menu] ld shown ${r.shown ?? 0}`);
+  await (over.reply ?? replyTextAndCard)(replyToken, r.text, r.card);
 }

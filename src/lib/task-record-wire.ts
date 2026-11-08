@@ -50,7 +50,10 @@ export async function loadActiveDeals(): Promise<DealRef[]> {
       )
         .map((t) => t.plain_text)
         .join("");
-      if (name) deals.push({ id: page.id, name });
+      const phase =
+        (props["フェーズ"] as { select?: { name?: string } | null } | undefined)
+          ?.select?.name ?? null;
+      if (name) deals.push({ id: page.id, name, phase });
     }
     cursor = res.has_more ? res.next_cursor ?? undefined : undefined;
   } while (cursor);
@@ -81,6 +84,8 @@ export async function recordAfterCreate(
     assignee: string | null | undefined;
     assigneeUserId: string | null | undefined;
     propertyKey: string | null | undefined;
+    /** 人が選んだ案件がある（B1 の［タスクを足す］）。案件の照合・書き込みは飛ばす（呼び出し側が「確定」で書く） */
+    dealPicked?: boolean;
   }
 ): Promise<void> {
   if (!recordEnabled()) return;
@@ -100,6 +105,7 @@ export async function recordAfterCreate(
         groupId: opts.groupId ?? null,
         assigneeNotionUserId: assignee?.notionUserId ?? null,
         propertyKey: opts.propertyKey ?? null,
+        dealPicked: opts.dealPicked === true,
       },
       deps()
     );
