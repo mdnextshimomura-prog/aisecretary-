@@ -139,3 +139,10 @@ npm run db:studio    # DB確認
 - 失敗時はLINEにエラー文を返し、`console.error` に記録する（webhook/route.ts）。
 
 （期限前の通知・2026-10-13）「⏰ まもなく期限です」は `src/lib/remind-due.ts`。起こすのは毎分の見回り `/api/obi/cloud-tick` への相乗りで、**スイッチは `DUE_REMIND_TICK=1`（既定 off）**。10 分に 1 回（KV の枠）。`/api/remind-due` を外から叩く仕組みは無い。詳しくは `docs/運用.md`。
+
+## 送り主の制限（2026-11-08 セキュリティ点検）
+- webhook は帯替えの判定のあと、各イベントの先頭で送り主を確かめ、許可していない送り主のイベントは何もせず飛ばす（200 のまま、ログには種類と理由だけ）。受付ボタンの postback もこの後ろにある。
+- グループ：`LINE_GROUP_ID`（営業部）か `SECRETARY_ALLOWED_GROUP_IDS`（カンマ区切り。業務指示グループ `Cd5fda3261e9bdd012e598884b2e6a696` など）のどれかと一致するときだけ通す。両方空なら全グループ拒否。
+- 1対1：`SECRETARY_ALLOWED_USER_IDS`（カンマ区切り）の人だけ。空なら `TASK_BUTTONS_ADMIN_IDS` の人だけ。両方空なら全員拒否。複数人トーク（room）は常に拒否。
+- Cron（remind・remind-due・report・candidates-ask）は `CRON_SECRET` 必須。未設定なら 401。
+- 新しいグループで Bot を使い始めるときは `SECRETARY_ALLOWED_GROUP_IDS` に足す（Vercel ログの「送り主の制限で読み飛ばし: group group-mismatch」が手がかり）。

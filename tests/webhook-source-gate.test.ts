@@ -52,6 +52,18 @@ ok("許可リストが空文字でも拒否", !checkSecretarySource({ type: "use
 const r2 = checkSecretarySource({ type: "group", groupId: G }, { SECRETARY_ALLOWED_USER_IDS: SHIMO });
 ok("LINE_GROUP_ID 未設定ならグループは拒否", !r2.ok && r2.reason === "group-not-configured");
 ok("LINE_GROUP_ID が空文字でもグループは拒否", !checkSecretarySource({ type: "group", groupId: "" }, { LINE_GROUP_ID: "" }).ok);
+// 1対1 の許可リストが空なら TASK_BUTTONS_ADMIN_IDS を使う（2026-11-08 追加）
+ok("許可リストが空なら管理者は通す", checkSecretarySource({ type: "user", userId: SHIMO }, { TASK_BUTTONS_ADMIN_IDS: SHIMO }).ok);
+ok("許可リストが空でも管理者以外は拒否", !checkSecretarySource({ type: "user", userId: OUTSIDER }, { TASK_BUTTONS_ADMIN_IDS: SHIMO }).ok);
+ok("許可リストがあれば管理者リストは使わない", !checkSecretarySource({ type: "user", userId: SHIMO }, { SECRETARY_ALLOWED_USER_IDS: OUTSIDER, TASK_BUTTONS_ADMIN_IDS: SHIMO }).ok);
+ok("どちらも空なら 1対1 は拒否", !checkSecretarySource({ type: "user", userId: SHIMO }, {}).ok);
+// 業務指示グループなど、LINE_GROUP_ID 以外のグループ（2026-11-08 追加）
+const G_TASK = "Ctaskgroup00000000000000000000000";
+ok("SECRETARY_ALLOWED_GROUP_IDS のグループは通す", checkSecretarySource({ type: "group", groupId: G_TASK }, { LINE_GROUP_ID: G, SECRETARY_ALLOWED_GROUP_IDS: ` ${G_TASK} , ` }).ok);
+ok("追加の一覧だけでも通す（LINE_GROUP_ID 未設定）", checkSecretarySource({ type: "group", groupId: G_TASK }, { SECRETARY_ALLOWED_GROUP_IDS: G_TASK }).ok);
+ok("追加の一覧があっても LINE_GROUP_ID のグループは通す", checkSecretarySource({ type: "group", groupId: G }, { LINE_GROUP_ID: G, SECRETARY_ALLOWED_GROUP_IDS: G_TASK }).ok);
+ok("どちらにも無いグループは拒否", !checkSecretarySource({ type: "group", groupId: G_OTHER }, { LINE_GROUP_ID: G, SECRETARY_ALLOWED_GROUP_IDS: G_TASK }).ok);
+ok("一覧の部分一致では通さない", !checkSecretarySource({ type: "group", groupId: G_TASK.slice(0, 10) }, { SECRETARY_ALLOWED_GROUP_IDS: G_TASK }).ok);
 
 // ---- 2) route.ts を通しで ----
 const SECRET = "test-channel-secret";
