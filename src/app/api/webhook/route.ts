@@ -104,8 +104,8 @@ import {
   followupEnabled,
 } from "@/lib/task-status";
 import { statusDeps } from "@/lib/task-status-wire";
-import { registeredQuickReply } from "@/lib/task-buttons";
-import { handleTaskPostbackEvent } from "@/lib/task-buttons-wire";
+import { MSG_CLOSED, registeredQuickReply } from "@/lib/task-buttons";
+import { handleTaskPostbackEvent, isTaskClosed } from "@/lib/task-buttons-wire";
 import {
   recordAfterCreate,
   recordAssigneeChange,
@@ -829,6 +829,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           }
         };
 
+        // 回答で Notion を更新する直前の安全網：もう完了・不要（終わり方あり）・消されたタスクなら
+        // 更新せず（「未着手」に戻さない）、確認だけ消して知らせる。読めなければ例外＝失敗の返事
+        const stopIfClosed = async (): Promise<boolean> => {
+          if (!(await isTaskClosed(pending.pageId))) return false;
+          await deletePendingTaskConfirm(source.groupId, pending.pageId).catch(
+            () => undefined
+          );
+          await sendLineMessage(replyToken, MSG_CLOSED);
+          return true;
+        };
+
         // 元の依頼者が「何もしなくてよい」と返したら、確認待ちを放置しない。
         // 引用がない場合も createdByUserId で同一人物と確認済みなので、
         // この時点で安全に取り消せる。
@@ -854,6 +865,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // (a) 提案をそのまま承認
         if (isApproval(body)) {
           try {
+            if (await stopIfClosed()) continue;
             const r = applyApproval(state);
             await persist(r, []);
             markCommitted();
@@ -900,6 +912,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
         if (relatesToTask) {
           try {
+            if (await stopIfClosed()) continue;
             const r = applyAnswer(state, ans.updates);
             const overridden = ans.overrides
               .map((k) => pending.fields.find((f) => f.key === k)?.label ?? k);

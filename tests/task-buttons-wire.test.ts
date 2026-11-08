@@ -10,6 +10,8 @@ import {
 } from "../src/lib/task-buttons-wire";
 import { MSG_PAUSED, type ButtonDeps } from "../src/lib/task-buttons";
 import {
+  completeEvent,
+  reserveEvent,
   getPendingTaskConfirm,
   savePendingTaskConfirm,
 } from "../src/lib/email/session";
@@ -272,6 +274,26 @@ async function main() {
   }));
   ok("Notion 失敗：セッションが残る", (await getPendingTaskConfirm("G1", null, PAGE)) !== null);
   ok("Notion 失敗：完了印を付けない", completed.length === 0, completed.join());
+  // 本物の予約（メモリ）で：Notion 失敗のあとも予約は付けたまま（外すと、古いイベントの再実行で上書きしうる）
+  reset();
+  await handleTaskPostbackEvent(ev(`v1|done|${PAGE}`, "E8b"), {
+    ...io({
+      deps: {
+        ...deps,
+        complete: async () => {
+          throw new Error("notion down");
+        },
+      },
+    }),
+    reserve: reserveEvent,
+    complete: completeEvent,
+  });
+  const again = await reserveEvent("pb:E8b");
+  ok(
+    "Notion 失敗：予約は外さず、完了印も付けない（処理中のまま）",
+    !again.proceed && Boolean((again as { inProgress?: boolean }).inProgress),
+    JSON.stringify(again),
+  );
   ok("Notion 失敗：もう一度の返事", String(replies[0]?.text).startsWith("⚠️ 書き込めませんでした"));
   // 成功ならセッションが消える
   reset();

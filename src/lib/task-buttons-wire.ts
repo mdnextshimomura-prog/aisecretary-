@@ -12,13 +12,13 @@ import {
   completeEvent,
   deletePendingTaskConfirm,
   getPendingTaskConfirm,
-  releaseEvent,
   reserveEvent,
   savePendingTaskConfirm,
 } from "./email/session";
 import { recordAssigneeChange } from "./task-record-wire";
 import { statusDeps } from "./task-status-wire";
 import { jstDateStr } from "./notion";
+import { isClosedPage, readTaskClosed } from "./task-closed";
 import {
   buttonsActive,
   handleTaskButton,
@@ -60,20 +60,25 @@ export async function getButtonTask(
   const title =
     (props["名前"] as { title?: Array<{ plain_text: string }> } | undefined)
       ?.title?.[0]?.plain_text ?? "（無題）";
-  const status =
-    (props["ステータス"] as { select?: { name: string } | null } | undefined)
-      ?.select?.name ?? null;
   return {
     id: String(page.id),
     title,
-    closed:
-      Boolean(page.archived) || Boolean(page.in_trash) || status === "完了",
+    closed: isClosedPage(page),
     assigneeId: richText(props, "担当者ID"),
     requesterId: richText(props, "依頼者ID"),
   };
 }
 
 /** 初動確認のセッション（KV）。route.ts の確認の流れと同じ関数で読み書きする。 */
+/** 初動確認への回答の前に見る：そのタスクがもう処理済みか（route.ts の安全網） */
+export function isTaskClosed(pageId: string): Promise<boolean> {
+  return readTaskClosed(
+    pageId,
+    async (id) =>
+      (await notion.pages.retrieve({ page_id: id })) as unknown as Record<string, unknown>,
+  );
+}
+
 export function sessionDeps(groupId: string | undefined): ButtonDeps["session"] {
   return {
     clear: async (pageId) => {
@@ -123,8 +128,6 @@ export interface PostbackIo {
   deps: ButtonDeps;
   reserve(key: string): Promise<{ proceed: boolean }>;
   complete(key: string): Promise<void>;
-  /** Notion に書けなかったとき、予約を外す */
-  release(key: string): Promise<void>;
   /** 送ったメッセージの ID。送れなければ null */
   reply(replyToken: string, text: string, quickReply?: QuickReply): Promise<string | null>;
   log(line: string): void;
@@ -147,7 +150,6 @@ export async function handleTaskPostbackEvent(
     deps: over.deps ?? buttonDeps(event.source.groupId),
     reserve: over.reserve ?? reserveEvent,
     complete: over.complete ?? completeEvent,
-    release: over.release ?? releaseEvent,
     reply: over.reply ?? sendLineMessage,
     log: over.log ?? ((line) => console.log(line)),
   };
@@ -187,9 +189,9 @@ export async function handleTaskPostbackEvent(
     r = await handleTaskButton(data, event.source.userId, io.deps);
   } catch {
     // Notion に書けなかった（または読めなかった）。何も消さず、完了印も付けない。
-    // 予約は外す（再送が来ればやり直せる。押し直しは別のイベントになる）
+    // 予約は外さない：本番は LINE の再送が無効なので外しても回復せず、「Notion には反映されたが
+    // 応答が取れなかった」ときに古いイベントの再実行で上書きしうる。押し直しは新しいイベント ID で通る
     io.log(`[task-buttons] ${op} failed`);
-    if (key) await io.release(key).catch(() => io.log("[task-buttons] release-failed"));
     await send("⚠️ 書き込めませんでした。もう一度お試しください。", undefined, "error");
     return;
   }
