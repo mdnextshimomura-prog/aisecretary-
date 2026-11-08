@@ -1,7 +1,10 @@
 /**
- * 業務指示グループ：タスクの受付の返事に付けるボタン（LINE のクイックリプライ）。
+ * 業務指示グループ：タスクの返事に付けるボタン（2026-11-08 からは LINE の Flex Message のカード）。
  * スイッチは TASK_BUTTONS（"1" かつ TASK_FOLLOWUP=1 のときだけ動く。既定 off。off なら返事は今と同じバイト）。
- * ボタンを付けるのは確定した受付の返事だけ（初動確認・聞き返しの質問には付けない）。
+ * 送り方：文字の返事（text）は1文字も変えずに1通目、カードを2通目に足す（line.ts の sendLineMessage）。
+ * 返す ID は1通目（text）のまま（引用での回答・二重登録の確認・rememberConfirmMessage がこの ID を使う）。
+ * カードを付けるのは受付の返事（確定・初動確認の聞き返し・確認失敗のどれでも。下村さん指示）と、
+ * ボタンを押したあとの返事のうち続くタスク（待ち・延期・担当変更）。済・不要で閉じたら付けない。
  * 押せるのは担当者・依頼者（依頼者ID）・特権者（TASK_BUTTONS_ADMIN_IDS の LINE userId）。
  *
  * ボタン：［済］［待ち（3日後に確認）］［延期］［不要］［担当を変える］
@@ -9,18 +12,26 @@
  * 同じ関数を呼ぶ（completeTask・applyStatusToTask・updateTaskAssignee＋recordAssigneeChange）。
  * Notion・名簿は deps で受け取る（本物へのつなぎは task-buttons-wire.ts）。
  *
- * ── displayText を付けるかの確認（2026-11-08、公式を読んで決めた）──
- * 出典：Messaging API reference「Postback action」「Postback event」「Quick reply」
+ * ── クイックリプライからカードに替えた理由と公式の記述（2026-11-08 に読んで確かめた）──
+ * - クイックリプライは「Android版とiOS版のLINEでサポート」（PC 版では出ない）。押す・誰かが発言すると消える：
+ *   https://developers.line.biz/ja/docs/messaging-api/using-quick-reply/
+ * - Flex Message は「すべてのバージョンのLINEでサポート」（動作環境の表に PC版LINE（macOS版、Windows版）の列。
+ *   ここで使う機能はその表の対象外＝全バージョン）。トークに残る：
+ *   https://developers.line.biz/ja/docs/messaging-api/using-flex-messages/
+ *   https://developers.line.biz/en/reference/messaging-api/#flex-message
+ * - Flex の button コンポーネントの action にポストバックアクションを付けられる。ラベルの上限は
+ *   「Flex Message Button: 40」（クイックリプライは 20）。data・displayText は 300 字：
+ *   https://developers.line.biz/en/reference/messaging-api/#postback-action
+ * - 未確認：PC 版でカードのボタンを押したときに postback が届くこと（PC を除く記述は無いが、明記も無い）。
+ *
+ * ── displayText を付けるかの確認（2026-11-08、公式を読んで決めた。カードでも同じ）──
+ * 出典：Messaging API reference「Postback action」「Postback event」
  *   https://developers.line.biz/en/reference/messaging-api/#postback-action
  *   https://developers.line.biz/en/reference/messaging-api/#postback-event
- *   https://developers.line.biz/en/reference/messaging-api/#quick-reply
- *   https://developers.line.biz/en/docs/messaging-api/using-quick-reply/
- *   （グループでも使える。ボタンは、押したとき・誰かが次の発言をしたときに消える）
  * - displayText：「Text displayed on the LINE chat screen as a message sent by the user when the
  *   action is performed」（最大 300 字）。画面に出るだけで、webhook には postback イベントだけが届く。
- * - text（非推奨）のほうが「Returned from the server through a webhook」＝メッセージとして届く。
- *   しかも「shouldn't be used with quick reply buttons」。→ text は使わない。
- * - data は postback.data で返る（最大 300 字）。クイックリプライのボタンは最大 13 個。
+ * - text（非推奨）のほうが「Returned from the server through a webhook」＝メッセージとして届く。→ text は使わない。
+ * - data は postback.data で返る（最大 300 字）。担当の候補は最大 13 人（今までと同じ）。
  * 判断：displayText を付ける（グループの皆に「誰が何を押したか」が見える）。追加の message イベントは
  * 来ないので、文字コマンド・依頼の判定に二重に入ることはない。念のため、表示の文は番号も
  * @メンションも依頼の言い回しも含まない形にしてある（万一メッセージとして届いても、番号の
@@ -33,6 +44,16 @@ import {
   type StatusDeps,
 } from "./task-status";
 import { addDaysStr, resolveDateToken } from "./task-status-command";
+import {
+  buildTaskCard,
+  cardButton,
+  dueFromParsed,
+  type CardButton,
+  type CardInfo,
+  type FlexMessage,
+} from "./task-card";
+
+export type { FlexMessage, CardInfo } from "./task-card";
 
 export function buttonsEnabled(): boolean {
   return process.env.TASK_BUTTONS === "1";
@@ -55,16 +76,6 @@ export const MSG_CLOSED = "このタスクはもう処理済みです";
 /** タスクを読めなかった（見つからない＝削除・共有外・権限喪失のどれか分からない） */
 export const MSG_UNCONFIRMED =
   "このタスクを確認できませんでした。少し時間をおいてもう一度お試しください";
-
-export interface PostbackAction {
-  type: "postback";
-  label: string;
-  data: string;
-  displayText: string;
-}
-export interface QuickReply {
-  items: Array<{ type: "action"; action: PostbackAction }>;
-}
 
 export type ButtonOp =
   "done" | "wait" | "pmenu" | "pp" | "drop" | "amenu" | "as";
@@ -90,7 +101,7 @@ const PAGE_ID_RE =
   /^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$/i;
 const LINE_USER_ID_RE = /^U[0-9a-f]{32}$/;
 const MAX_DATA = 300;
-const MAX_LABEL = 20;
+/** 担当の候補の人数（クイックリプライのときの上限 13 をそのまま使う） */
 const MAX_ITEMS = 13;
 
 export function encodeButtonData(
@@ -126,51 +137,56 @@ export function parseButtonData(
   return null;
 }
 
-const cut = (s: string, n: number) => Array.from(s).slice(0, n).join("");
-
-function button(label: string, data: string, displayText: string) {
-  return {
-    type: "action" as const,
-    action: {
-      type: "postback" as const,
-      label: cut(label, MAX_LABEL),
-      data,
-      displayText: cut(displayText, MAX_DATA),
-    },
-  };
+/** タスクの 5 つのボタン（data・displayText は今までと同じ）。 */
+function taskButtons(pageId: string): CardButton[] {
+  return [
+    cardButton("済", encodeButtonData("done", pageId), "（ボタン）済にする", true),
+    cardButton(
+      "待ち（3日後に確認）",
+      encodeButtonData("wait", pageId),
+      "（ボタン）待ちにする",
+    ),
+    cardButton("延期", encodeButtonData("pmenu", pageId), "（ボタン）延期する"),
+    cardButton("不要", encodeButtonData("drop", pageId), "（ボタン）不要にする"),
+    cardButton(
+      "担当を変える",
+      encodeButtonData("amenu", pageId),
+      "（ボタン）担当を変える",
+    ),
+  ];
 }
 
-/** タスクの 5 つのボタン。 */
-export function taskQuickReply(pageId: string): QuickReply {
-  return {
-    items: [
-      button("済", encodeButtonData("done", pageId), "（ボタン）済にする"),
-      button(
-        "待ち（3日後に確認）",
-        encodeButtonData("wait", pageId),
-        "（ボタン）待ちにする",
-      ),
-      button("延期", encodeButtonData("pmenu", pageId), "（ボタン）延期する"),
-      button("不要", encodeButtonData("drop", pageId), "（ボタン）不要にする"),
-      button(
-        "担当を変える",
-        encodeButtonData("amenu", pageId),
-        "（ボタン）担当を変える",
-      ),
-    ],
-  };
+/** タスクのカード（5 つのボタンつき）。 */
+export function taskCard(info: CardInfo): FlexMessage {
+  return buildTaskCard(info, taskButtons(info.pageId));
 }
 
-/** 受付の返事に付けるボタン。スイッチが off なら undefined（今の返事のまま）。 */
 /**
- * @param confirmed 登録が確定した受付の返事か。初動確認・聞き返し（確定前）の返事は false
- *   （確認への答えでタスクが「未着手」に戻ったり旧担当へ渡ったりしないよう、ボタンを付けない）
+ * 受付の返事に付けるカード。スイッチが off なら undefined（今の返事のまま）。
+ * 2026-11-08 から、確定した受付だけでなく初動確認の聞き返し・確認失敗の返事にも付ける（下村さん指示）。
+ * 聞き返し中に押されたときの安全：済・不要は確認セッションを消す／担当変更はセッションの担当も合わせる／
+ * 回答の前に処理済みか確かめる（route.ts の stopIfClosed）。
  */
-export function registeredQuickReply(
+export function registeredCard(info: CardInfo): FlexMessage | undefined {
+  return buttonsActive() ? taskCard(info) : undefined;
+}
+
+/** 受付の解析結果（ParsedTask）から：期日・担当は分かる範囲で（無ければカードに「未定」） */
+export function registeredCardFor(
   pageId: string,
-  confirmed: boolean,
-): QuickReply | undefined {
-  return buttonsActive() && confirmed ? taskQuickReply(pageId) : undefined;
+  parsed: {
+    title: string;
+    dueDate: string | null;
+    dueTime: string | null;
+    assignee: string | null;
+  },
+): FlexMessage | undefined {
+  return registeredCard({
+    pageId,
+    title: parsed.title,
+    due: dueFromParsed(parsed),
+    assignee: parsed.assignee,
+  });
 }
 
 /** 延期の日付。今日より後でなければ null（金曜〜日曜の「今週金曜」など）。 */
@@ -191,21 +207,19 @@ export function resolvePostponeKey(
   return d && d > todayJst ? d : null;
 }
 
-export function postponeQuickReply(
-  pageId: string,
-  todayJst: string,
-): QuickReply {
-  return {
-    items: POSTPONE_KEYS.filter(
-      (k) => resolvePostponeKey(k, todayJst) !== null,
-    ).map((k) =>
-      button(
-        POSTPONE_LABEL[k],
-        encodeButtonData("pp", pageId, k),
-        `（ボタン）延期：${POSTPONE_LABEL[k]}`,
-      ),
+export function postponeCard(info: CardInfo, todayJst: string): FlexMessage {
+  return buildTaskCard(
+    info,
+    POSTPONE_KEYS.filter((k) => resolvePostponeKey(k, todayJst) !== null).map(
+      (k) =>
+        cardButton(
+          POSTPONE_LABEL[k],
+          encodeButtonData("pp", info.pageId, k),
+          `（ボタン）延期：${POSTPONE_LABEL[k]}`,
+        ),
     ),
-  };
+    "いつに延期しますか？",
+  );
 }
 
 /** 担当にできる人：在籍・社内・LINE userId あり。名前順に最大 13 人。 */
@@ -221,23 +235,26 @@ export function assignableMembers(members: Member[]): Member[] {
     .slice(0, MAX_ITEMS);
 }
 
-export function assigneeQuickReply(
-  pageId: string,
-  members: Member[],
-): QuickReply {
-  return {
-    items: assignableMembers(members).map((m) =>
-      button(
-        m.name,
-        encodeButtonData(
-          "as",
-          pageId,
-          m.userIds.find((id) => LINE_USER_ID_RE.test(id)),
-        ),
-        `（ボタン）担当を変える：${m.name}`,
+function assigneeButtons(pageId: string, members: Member[]): CardButton[] {
+  return assignableMembers(members).map((m) =>
+    cardButton(
+      m.name,
+      encodeButtonData(
+        "as",
+        pageId,
+        m.userIds.find((id) => LINE_USER_ID_RE.test(id)),
       ),
+      `（ボタン）担当を変える：${m.name}`,
     ),
-  };
+  );
+}
+
+export function assigneeCard(info: CardInfo, members: Member[]): FlexMessage {
+  return buildTaskCard(
+    info,
+    assigneeButtons(info.pageId, members),
+    "誰に替えますか？",
+  );
 }
 
 export interface ButtonTask {
@@ -247,6 +264,10 @@ export interface ButtonTask {
   closed: boolean;
   assigneeId: string | null;
   requesterId: string | null;
+  /** カードに出す期日（Notion の 期日 の date.start）。分からなければ null・省略 */
+  due?: string | null;
+  /** カードに出す担当者の名前（Notion の 担当者）。分からなければ null・省略 */
+  assignee?: string | null;
 }
 
 export interface ButtonDeps {
@@ -270,7 +291,8 @@ export interface ButtonDeps {
 
 export interface ButtonReply {
   text: string;
-  quickReply?: QuickReply;
+  /** 2通目に付けるカード（済・不要で閉じたとき・押せないときは無し） */
+  card?: FlexMessage;
   /** Notion に書いたか */
   changed: boolean;
   /** true なら入口はイベントの完了印を付けない（タスクを確認できなかった） */
@@ -339,7 +361,13 @@ export async function handleTaskButton(
   if (!canOperate(actorId, task, members))
     return { text: MSG_FORBIDDEN, changed: false };
 
-  const again = taskQuickReply(task.id);
+  const info: CardInfo = {
+    pageId: task.id,
+    title: task.title,
+    due: task.due ?? null,
+    assignee: task.assignee ?? null,
+  };
+  const again = taskCard(info);
   switch (op) {
     case "done": {
       // Notion が先。書けなければ例外で抜け、確認セッション（回答先）は残す。
@@ -358,7 +386,7 @@ export async function handleTaskButton(
         task,
         deps.status,
       );
-      return { text, quickReply: again, changed: true };
+      return { text, card: again, changed: true };
     }
     case "drop": {
       const text = await applyStatusToTask({ kind: "drop" }, task, deps.status);
@@ -366,10 +394,9 @@ export async function handleTaskButton(
       return { text, changed: true, ...(warnings ? { warnings } : {}) };
     }
     case "pmenu": {
-      const quickReply = postponeQuickReply(task.id, deps.today());
       return {
         text: `📅 いつに延期しますか？\n📋 ${task.title}`,
-        quickReply,
+        card: postponeCard(info, deps.today()),
         changed: false,
       };
     }
@@ -378,7 +405,7 @@ export async function handleTaskButton(
       if (!date) {
         return {
           text: `⚠️ その日はもう過ぎています。日を選び直してください\n📋 ${task.title}`,
-          quickReply: postponeQuickReply(task.id, deps.today()),
+          card: postponeCard(info, deps.today()),
           changed: false,
         };
       }
@@ -387,16 +414,17 @@ export async function handleTaskButton(
         task,
         deps.status,
       );
-      return { text, quickReply: again, changed: true };
+      // 期日が変わったので、新しい期日でカードを付け直す
+      return { text, card: taskCard({ ...info, due: date }), changed: true };
     }
     case "amenu": {
-      const quickReply = assigneeQuickReply(task.id, members);
-      if (quickReply.items.length === 0) {
+      const buttons = assigneeButtons(task.id, members);
+      if (buttons.length === 0) {
         return { text: "⚠️ 名簿に替えられる人がいません", changed: false };
       }
       return {
         text: `👤 誰に替えますか？\n📋 ${task.title}`,
-        quickReply,
+        card: assigneeCard(info, members),
         changed: false,
       };
     }
@@ -412,7 +440,7 @@ export async function handleTaskButton(
       await deps.setAssignee(task.id, m.name, extra as string);
       return {
         text: `👤 担当者を ${m.name} さんに設定しました\n📋 ${task.title}`,
-        quickReply: again,
+        card: taskCard({ ...info, assignee: m.name }),
         changed: true,
       };
     }

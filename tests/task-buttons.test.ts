@@ -5,10 +5,11 @@ import {
   buttonsEnabled,
   encodeButtonData,
   parseButtonData,
-  registeredQuickReply,
-  taskQuickReply,
-  postponeQuickReply,
-  assigneeQuickReply,
+  registeredCard,
+  registeredCardFor,
+  taskCard,
+  postponeCard,
+  assigneeCard,
   assignableMembers,
   resolvePostponeKey,
   handleTaskButton,
@@ -20,6 +21,10 @@ import {
   type ButtonTask,
 } from "../src/lib/task-buttons";
 import type { Member } from "../src/lib/members";
+import { cardActions, type CardInfo, type FlexMessage } from "../src/lib/task-card";
+
+const INFO: CardInfo = { pageId: "1234abcd-1234-1234-1234-1234567890ab", title: "重説の作成", due: null, assignee: null };
+const acts = (c: FlexMessage | undefined) => (c ? cardActions(c) : []);
 
 let fail = 0;
 const ok = (name: string, cond: boolean, d = "") => {
@@ -101,27 +106,25 @@ async function main() {
   ok("未設定は off", !buttonsEnabled() && !buttonsActive());
   ok(
     "off なら受付の返事にボタンを付けない",
-    registeredQuickReply(PAGE, true) === undefined,
+    registeredCard(INFO) === undefined,
   );
   process.env.TASK_BUTTONS = "0";
-  ok("0 は off", registeredQuickReply(PAGE, true) === undefined);
+  ok("0 は off", registeredCard(INFO) === undefined);
   process.env.TASK_BUTTONS = "1";
   delete process.env.TASK_FOLLOWUP;
   ok(
     "TASK_FOLLOWUP が off ならボタンを付けない",
-    !buttonsActive() && registeredQuickReply(PAGE, true) === undefined,
+    !buttonsActive() && registeredCard(INFO) === undefined,
   );
   process.env.TASK_FOLLOWUP = "0";
-  ok("TASK_FOLLOWUP=0 も付けない", registeredQuickReply(PAGE, true) === undefined);
+  ok("TASK_FOLLOWUP=0 も付けない", registeredCard(INFO) === undefined);
   process.env.TASK_FOLLOWUP = "1";
   ok("両方 on で動く", buttonsActive());
-  ok(
-    "確定前（初動確認・聞き返しの返事）には付けない",
-    registeredQuickReply(PAGE, false) === undefined,
-  );
-  const qr = registeredQuickReply(PAGE, true);
-  ok("on なら確定した受付の返事にボタンを付ける", qr !== undefined);
-  const labels = qr!.items.map((i) => i.action.label);
+  // 2026-11-08 下村さん指示：確定前（初動確認の聞き返し・確認失敗）の返事にも毎回付ける。
+  // 旧テスト「確定前には付けない」は要件の変更で外した（confirmed の引数ごと無くした）
+  const qr = registeredCard(INFO);
+  ok("on なら受付の返事にカードを付ける", qr !== undefined && qr.type === "flex");
+  const labels = acts(qr).map((a) => a.label);
   ok(
     "ボタンの順と文言",
     JSON.stringify(labels) ===
@@ -135,30 +138,65 @@ async function main() {
     JSON.stringify(labels),
   );
   ok(
-    "ラベルは20字以内",
-    labels.every((l) => Array.from(l).length <= 20),
+    "ラベルは40字以内（Flex のボタンの上限）",
+    labels.every((l) => Array.from(l).length <= 40),
   );
   ok(
     "postback で、data は v1| で始まり 300 字以内",
-    qr!.items.every(
-      (i) =>
-        i.action.type === "postback" &&
-        i.action.data.startsWith("v1|") &&
-        i.action.data.length <= 300,
+    acts(qr).every(
+      (a) =>
+        a.type === "postback" &&
+        a.data.startsWith("v1|") &&
+        a.data.length <= 300,
     ),
   );
   ok(
     "displayText を付ける（押したことが皆に見える）",
-    qr!.items.every(
-      (i) =>
-        typeof i.action.displayText === "string" &&
-        i.action.displayText.length > 0,
+    acts(qr).every(
+      (a) => typeof a.displayText === "string" && a.displayText.length > 0,
     ),
   );
   ok(
-    "taskQuickReply は同じボタン",
-    JSON.stringify(taskQuickReply(PAGE)) === JSON.stringify(qr),
+    "displayText・data は今の形のまま",
+    JSON.stringify(acts(qr).map((a) => [a.data, a.displayText])) ===
+      JSON.stringify([
+        [`v1|done|${PAGE}`, "（ボタン）済にする"],
+        [`v1|wait|${PAGE}`, "（ボタン）待ちにする"],
+        [`v1|pmenu|${PAGE}`, "（ボタン）延期する"],
+        [`v1|drop|${PAGE}`, "（ボタン）不要にする"],
+        [`v1|amenu|${PAGE}`, "（ボタン）担当を変える"],
+      ]),
   );
+  ok(
+    "taskCard は同じカード",
+    JSON.stringify(taskCard(INFO)) === JSON.stringify(qr),
+  );
+  ok("altText は【タスク】＋タスク名", qr!.altText === "【タスク】重説の作成", qr!.altText);
+  {
+    const long = registeredCard({ ...INFO, title: "あ".repeat(500) })!;
+    ok("altText は 400 字以内", Array.from(long.altText).length === 400, String(long.altText.length));
+    const first = (long.contents.body as { contents: Array<{ text?: string }> }).contents[0].text;
+    ok("長いタスク名は1行目で切る（40字）", first === "あ".repeat(39) + "…", first);
+  }
+  {
+    const j = JSON.stringify(qr);
+    ok("期日・担当が分からなければ「未定」", (j.match(/"未定"/g) ?? []).length === 2, j);
+    ok("クイックリプライは付けない", !j.includes("quickReply"));
+    const c2 = registeredCardFor(PAGE, {
+      title: "査定書",
+      dueDate: "2026-11-20",
+      dueTime: "17:00",
+      assignee: "田中 一郎",
+    })!;
+    const j2 = JSON.stringify(c2);
+    ok(
+      "登録時は解析結果の期日・担当を出す",
+      j2.includes("11月20日(金) 17:00") && j2.includes("田中 一郎") && !j2.includes("未定"),
+      j2,
+    );
+    const c3 = registeredCardFor(PAGE, { title: "査定書", dueDate: "2026-11-20", dueTime: null, assignee: null })!;
+    ok("時刻なしの期日・担当なし", JSON.stringify(c3).includes("11月20日(金)") && JSON.stringify(c3).includes("未定"));
+  }
 
   // ── data の形式 ──
   ok("encode", encodeButtonData("done", PAGE) === `v1|done|${PAGE}`);
@@ -204,16 +242,16 @@ async function main() {
     "日曜の来週月曜は翌日",
     resolvePostponeKey("nextmon", "2026-11-15") === "2026-11-16",
   );
-  const pq = postponeQuickReply(PAGE, TODAY);
+  const pq = postponeCard(INFO, TODAY);
   ok(
-    "延期の候補の順と文言",
-    JSON.stringify(pq.items.map((i) => i.action.label)) ===
+    "延期の候補の順と文言（カードのボタン）",
+    JSON.stringify(acts(pq).map((a) => a.label)) ===
       JSON.stringify(["明日", "明後日", "今週金曜", "来週月曜", "来週金曜"]),
   );
   ok(
     "金曜には今週金曜を出さない",
-    !postponeQuickReply(PAGE, "2026-11-13").items.some(
-      (i) => i.action.label === "今週金曜",
+    !acts(postponeCard(INFO, "2026-11-13")).some(
+      (a) => a.label === "今週金曜",
     ),
   );
 
@@ -237,15 +275,22 @@ async function main() {
     "名前順",
     assignable[0].name === "社員00" && assignable[12].name === "社員12",
   );
-  const aq = assigneeQuickReply(PAGE, roster);
+  const aq = assigneeCard(INFO, roster);
   ok(
-    "担当の候補は postback",
-    aq.items.every((i) => i.action.data.startsWith(`v1|as|${PAGE}|U`)),
+    "担当の候補はカードの postback",
+    aq.type === "flex" && acts(aq).length === 4 &&
+      acts(aq).every((a) => a.data.startsWith(`v1|as|${PAGE}|U`)),
   );
   ok(
     "担当の候補 13 個以内",
-    assigneeQuickReply(PAGE, many).items.length === 13,
+    acts(assigneeCard(INFO, many)).length === 13,
   );
+  {
+    const longName = member("長".repeat(60), [U(300)]);
+    const a = acts(assigneeCard(INFO, [longName]));
+    ok("担当の名前のラベルは40字で切る", Array.from(a[0].label).length === 40);
+    ok("担当のカードの data も 300 字以内", a.every((x) => x.data.length <= 300));
+  }
 
   // ── 各ボタンが既存の処理を呼ぶ ──
   {
@@ -257,7 +302,7 @@ async function main() {
       r?.text === "☑️ 完了にしました\n📋 重説の作成",
       r?.text,
     );
-    ok("済：ボタンは付け直さない", r?.quickReply === undefined);
+    ok("済：カードは付けない（閉じた）", r?.card === undefined);
   }
   {
     const { deps, log } = makeDeps(openTask, roster);
@@ -278,8 +323,8 @@ async function main() {
       r?.text,
     );
     ok(
-      "待ち：ボタンを付け直す",
-      JSON.stringify(r?.quickReply) === JSON.stringify(taskQuickReply(PAGE)),
+      "待ち：同じカードを付け直す",
+      JSON.stringify(r?.card) === JSON.stringify(taskCard(INFO)),
     );
   }
   {
@@ -299,7 +344,7 @@ async function main() {
       r?.text === "🗑 不要にしました（1件。記録は残ります）\n📋 重説の作成",
       r?.text,
     );
-    ok("不要：ボタンは付けない", r?.quickReply === undefined);
+    ok("不要：カードは付けない（閉じた）", r?.card === undefined);
   }
   {
     const { deps, log } = makeDeps(openTask, roster);
@@ -307,8 +352,7 @@ async function main() {
     ok("延期：まだ何も書かない", log.length === 0);
     ok(
       "延期：日付の候補を返す",
-      JSON.stringify(r?.quickReply) ===
-        JSON.stringify(postponeQuickReply(PAGE, TODAY)),
+      JSON.stringify(r?.card) === JSON.stringify(postponeCard(INFO, TODAY)),
     );
   }
   {
@@ -326,8 +370,9 @@ async function main() {
       r?.text,
     );
     ok(
-      "延期を選ぶ：ボタンを付け直す",
-      JSON.stringify(r?.quickReply) === JSON.stringify(taskQuickReply(PAGE)),
+      "延期を選ぶ：新しい期日でカードを付け直す",
+      JSON.stringify(r?.card) ===
+        JSON.stringify(taskCard({ ...INFO, due: "2026-11-20" })),
     );
   }
   {
@@ -347,7 +392,7 @@ async function main() {
     const r = await handleTaskButton(`v1|amenu|${PAGE}`, U(3), deps);
     ok(
       "担当を変える：候補を返す",
-      log.length === 0 && r?.quickReply?.items.length === 4,
+      log.length === 0 && acts(r?.card).length === 4,
     );
   }
   {
@@ -363,7 +408,11 @@ async function main() {
       r?.text === "👤 担当者を 鈴木 次郎 さんに設定しました\n📋 重説の作成",
       r?.text,
     );
-    ok("担当を選ぶ：ボタンを付け直す", r?.quickReply !== undefined);
+    ok(
+      "担当を選ぶ：新しい担当でカードを付け直す",
+      JSON.stringify(r?.card) ===
+        JSON.stringify(taskCard({ ...INFO, assignee: "鈴木 次郎" })),
+    );
   }
   {
     const { deps, log } = makeDeps(openTask, roster);

@@ -108,7 +108,7 @@ import { statusDeps } from "@/lib/task-status-wire";
 import {
   MSG_CLOSED,
   MSG_UNCONFIRMED,
-  registeredQuickReply,
+  registeredCardFor,
 } from "@/lib/task-buttons";
 import { handleTaskPostbackEvent, taskState } from "@/lib/task-buttons-wire";
 import {
@@ -254,7 +254,7 @@ interface LineWebhookEvent {
   source: { userId: string; type: string; groupId?: string };
   message?: LineMessage;
   webhookEventId?: string;
-  postback?: { data?: string }; // ボタン（クイックリプライ）が押された（task-buttons.ts）
+  postback?: { data?: string }; // ボタン（カード）が押された（task-buttons.ts）
 }
 
 interface LineWebhookBody {
@@ -606,13 +606,11 @@ async function registerTaskFromText(
         `⚠️ 条件の自動確認ができませんでした。内容をご確認ください。`;
     }
   }
-  // ボタンは確定した受付の返事だけ（初動確認の質問を返したときは付けない）
+  // カードは受付の返事に毎回付ける（初動確認の聞き返し・確認失敗の返事も。2通目に足す。ID は1通目）
   const botMsgId = await sendLineMessage(
     replyToken,
     reply,
-    opts.buttons
-      ? registeredQuickReply(pageId, reply === buildTaskRegisteredMessage(parsed))
-      : undefined
+    opts.buttons ? registeredCardFor(pageId, parsed) : undefined
   );
   // 元の発言の ID も残す（Bot の返信の ID だけで上書きすると、二重登録の確認と
   // 「元の発言を引用して完了」が効かなくなる。通常の登録と同じ形）
@@ -1711,8 +1709,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const botMsgId = await sendLineMessage(
         replyToken,
         reply,
-        // ボタンは確定した受付の返事だけ（初動確認の質問・確認失敗の返事には付けない）
-        registeredQuickReply(pageId, reply === buildTaskRegisteredMessage(parsed))
+        // カードは受付の返事に毎回付ける（初動確認の聞き返し・確認失敗の返事も。2通目に足す。ID は1通目）
+        registeredCardFor(pageId, parsed)
       ).catch((e) => {
         console.error("返信に失敗（登録は完了）:", e);
         return null;

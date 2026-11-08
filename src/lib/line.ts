@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import type { ParsedTask } from "./claude";
 import { timingSafeEqualStr } from "./secure-compare";
-import type { QuickReply } from "./task-buttons";
+import type { FlexMessage } from "./task-card";
 
 const ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN!;
 const CHANNEL_SECRET = process.env.LINE_CHANNEL_SECRET!;
@@ -20,11 +20,13 @@ export function verifyLineSignature(
 }
 
 // LINEメッセージ送信。送ったメッセージのID（引用リプライの照合に使う）を返す。
-// quickReply（タスクのボタン。task-buttons.ts）を渡さなければ、送る中身は今までと同じ。
+// card（タスクのカード。task-card.ts）を渡すと、text を1通目のまま、カードを2通目に足す
+// （Reply API は1回で最大5通）。返す ID は今までどおり sentMessages[0]＝1通目（text）。
+// card を渡さなければ、送る中身は今までと同じ1通。
 export async function sendLineMessage(
   replyToken: string,
   text: string,
-  quickReply?: QuickReply
+  card?: FlexMessage
 ): Promise<string | null> {
   const res = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
@@ -34,7 +36,7 @@ export async function sendLineMessage(
     },
     body: JSON.stringify({
       replyToken,
-      messages: [quickReply ? { type: "text", text, quickReply } : { type: "text", text }],
+      messages: card ? [{ type: "text", text }, card] : [{ type: "text", text }],
     }),
   });
   if (!res.ok) return null;

@@ -8,7 +8,8 @@ import {
   MSG_BUSY,
   type PostbackIo,
 } from "../src/lib/task-buttons-wire";
-import { MSG_PAUSED, type ButtonDeps } from "../src/lib/task-buttons";
+import { MSG_CLOSED, MSG_PAUSED, type ButtonDeps, type ButtonTask } from "../src/lib/task-buttons";
+import { cardActions, type FlexMessage } from "../src/lib/task-card";
 import {
   completeEvent,
   reserveEvent,
@@ -30,7 +31,7 @@ const U2 = `U${"2".padStart(32, "0")}`;
 const U4 = `U${"4".padStart(32, "0")}`;
 
 let writes: string[] = [];
-let replies: Array<{ text: string; quickReply?: unknown }> = [];
+let replies: Array<{ text: string; card?: FlexMessage }> = [];
 let logs: string[] = [];
 let completed: string[] = [];
 
@@ -78,8 +79,8 @@ function io(over: Partial<PostbackIo> = {}): Partial<PostbackIo> {
     complete: async (key) => {
       completed.push(key);
     },
-    reply: async (_rt, text, quickReply) => {
-      replies.push({ text, quickReply });
+    reply: async (_rt, text, card) => {
+      replies.push({ text, card });
       return "m1";
     },
     log: (line) => logs.push(line),
@@ -130,7 +131,11 @@ async function main() {
   reset();
   await handleTaskPostbackEvent(ev(`v1|wait|${PAGE}`, "E1"), io());
   ok("待ち：書いて返す", writes.join() === "update" && replies.length === 1);
-  ok("待ち：ボタンを付け直す", Boolean(replies[0]?.quickReply));
+  ok(
+    "待ち：カードを付け直す（2通目のカード）",
+    replies[0]?.card?.type === "flex" && cardActions(replies[0].card).length === 5,
+  );
+  ok("待ち：1通目の文は今の文面のまま", replies[0]?.text.startsWith("⏸ 待ちにしました"), replies[0]?.text);
   ok("完了印を付ける", completed.join() === "pb:E1");
 
   reset();
@@ -342,6 +347,106 @@ async function main() {
     "セッションが無ければ何もしない（作らない）",
     (await getPendingTaskConfirm("G1", null, PAGE)) === null,
   );
+
+  // ── 聞き返し中（初動確認のセッションが残っている）にボタンが押されても壊れない ──
+  {
+    process.env.TASK_BUTTONS = "1";
+    process.env.TASK_FOLLOWUP = "1";
+    await savePendingTaskConfirm("G2", { ...base });
+    let task: ButtonTask = {
+      id: PAGE,
+      title: "重説",
+      closed: false,
+      assigneeId: U2,
+      requesterId: null,
+      due: "2026-11-20",
+      assignee: "田中 一郎",
+    };
+    const live: ButtonDeps = {
+      ...deps,
+      getTask: async () => task,
+      members: async () => [
+        { name: "鈴木 次郎", userIds: [U4], aliases: [], email: null, active: true, external: false, notionUserId: null },
+      ],
+      complete: async () => {
+        writes.push("complete");
+        task = { ...task, closed: true };
+      },
+      session: sessionDeps("G2"),
+    };
+    reset();
+    await handleTaskPostbackEvent(ev(`v1|wait|${PAGE}`, "C1"), io({ deps: live }));
+    const s1 = await getPendingTaskConfirm("G2", null, PAGE);
+    ok(
+      "聞き返し中：待ちを押しても確認セッションはそのまま（回答を待つ）",
+      s1 !== null && JSON.stringify(s1.awaitingKeys) === JSON.stringify(["x"]) && writes.join() === "update",
+      JSON.stringify(s1),
+    );
+    ok("聞き返し中：待ちの返事にカード", replies[0]?.card?.type === "flex");
+    reset();
+    await handleTaskPostbackEvent(ev(`v1|pmenu|${PAGE}`, "C2"), io({ deps: live }));
+    ok(
+      "聞き返し中：延期の候補はカードのボタン（書かない）",
+      writes.length === 0 &&
+        JSON.stringify(cardActions(replies[0]!.card!).map((a) => a.label)) ===
+          JSON.stringify(["明日", "明後日", "今週金曜", "来週月曜", "来週金曜"]),
+    );
+    reset();
+    await handleTaskPostbackEvent(ev(`v1|amenu|${PAGE}`, "C3"), io({ deps: live }));
+    ok(
+      "聞き返し中：担当の候補もカードのボタン",
+      cardActions(replies[0]!.card!).map((a) => a.label).join() === "鈴木 次郎",
+    );
+    reset();
+    await handleTaskPostbackEvent(ev(`v1|as|${PAGE}|${U4}`, "C4"), io({ deps: live }));
+    const s2 = await getPendingTaskConfirm("G2", null, PAGE);
+    ok(
+      "聞き返し中：担当を替えたら、確認セッションの担当も合わせる（確認が済んでも旧担当へ渡らない）",
+      s2?.assignee === "鈴木 次郎" && s2?.assigneeUserId === U4,
+      JSON.stringify(s2),
+    );
+    ok(
+      "聞き返し中：担当変更の返事のカードは新しい担当",
+      JSON.stringify(replies[0]?.card).includes("鈴木 次郎") &&
+        JSON.stringify(replies[0]?.card).includes("11月20日(金)"),
+    );
+    reset();
+    await handleTaskPostbackEvent(ev(`v1|done|${PAGE}`, "C5"), io({ deps: live }));
+    ok(
+      "聞き返し中：済を押したら確認セッションを消す（後の回答で未着手に戻さない）",
+      (await getPendingTaskConfirm("G2", null, PAGE)) === null,
+    );
+    ok("聞き返し中：済の返事にカードは付けない", replies[0]?.card === undefined && replies[0]?.text.startsWith("☑️"));
+    reset();
+    await handleTaskPostbackEvent(ev(`v1|wait|${PAGE}`, "C6"), io({ deps: live }));
+    ok(
+      "閉じたあとのボタンは処理済み（書かない・カードなし）",
+      writes.length === 0 && replies[0]?.text === MSG_CLOSED && replies[0]?.card === undefined,
+    );
+    reset();
+    await handleTaskPostbackEvent(ev(`v1|done|${PAGE}`, "C7"), {
+      ...io({ deps: live }),
+    });
+    ok("閉じたあとの済も処理済み（二重に完了しない）", writes.length === 0 && replies[0]?.text === MSG_CLOSED);
+    ok(
+      "ログに本文・ID・名前を出さない",
+      !logs.some((l) => l.includes(U2) || l.includes(U4) || l.includes(PAGE) || l.includes("重説") || l.includes("鈴木")),
+      logs.join(" / "),
+    );
+  }
+  {
+    // 押せない人：書かず、カードも付けない
+    reset();
+    await handleTaskPostbackEvent(
+      { ...ev(`v1|wait|${PAGE}`, "F1"), source: { userId: U4, groupId: "G1" } },
+      io(),
+    );
+    ok(
+      "押せない人：書かない・カードなし",
+      writes.length === 0 && replies[0]?.card === undefined && /操作できるのは/.test(replies[0]?.text ?? ""),
+      replies[0]?.text,
+    );
+  }
 
   if (fail > 0) {
     console.log(`\n${fail} 件失敗`);

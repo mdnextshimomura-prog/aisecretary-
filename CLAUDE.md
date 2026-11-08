@@ -122,7 +122,7 @@ Notion「LINEタスク」へ `依頼者`・`依頼者ID`・`発生元`（グル�
 ファイル：`src/lib/task-record.ts`（照合と欄の組み立て）／`task-record-wire.ts`（本物へのつなぎ。案件は `CRM_NOTION_TOKEN`（無ければ `NOTION_API_KEY`）と `CRM_DEALS_DB_ID` で読み、5 分覚える）。
 前提：`案件` に書くには、本体の連携（`NOTION_API_KEY`）が CRM_案件 を読めること。読めないと `deal-link` で失敗し、状態だけが入る。
 
-（受付の返事のボタン・2026-11-08）`TASK_BUTTONS`（`1` かつ `TASK_FOLLOWUP=1` のときだけ、確定した受付の返事に［済］［待ち］［延期］［不要］［担当を変える］を付け、押されたら処理する。既定 off）／`TASK_BUTTONS_ADMIN_IDS`（担当者・依頼者のほかに押せる人＝下村さんの LINE userId。カンマ区切り。未設定なら担当者・依頼者だけ。`JOB_ALLOWED_USER_IDS` とは別）。ファイル：`src/lib/task-buttons.ts`（判断・文面）／`task-buttons-wire.ts`（本物へのつなぎ・postback の入口）。依頼者ID が空のタスク（`TASK_RECORD=0` の間に登録）は担当者と特権者だけが押せる。
+（受付の返事のボタン・2026-11-08）`TASK_BUTTONS`（`1` かつ `TASK_FOLLOWUP=1` のときだけ、受付の返事（確定・初動確認の聞き返し・確認失敗のどれでも）に［済］［待ち］［延期］［不要］［担当を変える］のカードを付け、押されたら処理する。既定 off）／`TASK_BUTTONS_ADMIN_IDS`（担当者・依頼者のほかに押せる人＝下村さんの LINE userId。カンマ区切り。未設定なら担当者・依頼者だけ。`JOB_ALLOWED_USER_IDS` とは別）。ファイル：`src/lib/task-buttons.ts`（判断・文面）／`task-card.ts`（カードの見た目）／`task-buttons-wire.ts`（本物へのつなぎ・postback の入口）。ボタンは Flex Message のカード（2026-11-08 にクイックリプライから替えた。PC 版でも出て、発言で消えない）：文字の返事は1文字も変えずに1通目、カードを2通目に足す。`sendLineMessage` が返す ID は1通目（text）のまま。待ち・延期・担当変更のあとはカードを付け直し、済・不要で閉じたら付けない。依頼者ID が空のタスク（`TASK_RECORD=0` の間に登録）は担当者と特権者だけが押せる。
 
 ## よく使うコマンド
 ```bash

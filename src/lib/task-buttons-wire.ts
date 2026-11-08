@@ -26,7 +26,7 @@ import {
   parseButtonData,
   type ButtonDeps,
   type ButtonTask,
-  type QuickReply,
+  type FlexMessage,
 } from "./task-buttons";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
@@ -66,6 +66,13 @@ export async function getButtonTask(
     closed: isClosedPage(page),
     assigneeId: richText(props, "担当者ID"),
     requesterId: richText(props, "依頼者ID"),
+    // カードに出す期日・担当（同じ1回の読み込みから。無ければカードに「未定」）
+    due:
+      (props["期日"] as { date?: { start?: string } | null } | undefined)?.date
+        ?.start ?? null,
+    assignee:
+      (props["担当者"] as { select?: { name?: string } | null } | undefined)
+        ?.select?.name ?? null,
   };
 }
 
@@ -129,7 +136,8 @@ export interface PostbackIo {
   reserve(key: string): Promise<{ proceed: boolean }>;
   complete(key: string): Promise<void>;
   /** 送ったメッセージの ID。送れなければ null */
-  reply(replyToken: string, text: string, quickReply?: QuickReply): Promise<string | null>;
+  /** text を1通目、card があれば2通目に足して送る（sendLineMessage） */
+  reply(replyToken: string, text: string, card?: FlexMessage): Promise<string | null>;
   log(line: string): void;
 }
 
@@ -155,10 +163,10 @@ export async function handleTaskPostbackEvent(
   };
   const op = parseButtonData(data)?.op ?? "invalid";
 
-  const send = async (text: string, quickReply: QuickReply | undefined, code: string) => {
+  const send = async (text: string, card: FlexMessage | undefined, code: string) => {
     let id: string | null = null;
     try {
-      id = await io.reply(replyToken, text, quickReply);
+      id = await io.reply(replyToken, text, card);
     } catch {
       io.log(`[task-buttons] reply-failed ${op} ${code} exception`);
       return;
@@ -205,7 +213,7 @@ export async function handleTaskPostbackEvent(
     for (const w of r.warnings ?? []) io.log(`[task-buttons] ${w}`);
     const code = r.retryable ? "unconfirmed" : r.changed ? "changed" : "no-change";
     io.log(`[task-buttons] ${op} ${code}`);
-    await send(r.text, r.quickReply, code);
+    await send(r.text, r.card, code);
   } finally {
     // タスクを確認できなかったときは完了印を付けない（予約は付けたまま）
     if (key && !r?.retryable) {
