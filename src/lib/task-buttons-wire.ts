@@ -18,7 +18,12 @@ import {
 import { recordAssigneeChange } from "./task-record-wire";
 import { statusDeps } from "./task-status-wire";
 import { jstDateStr } from "./notion";
-import { isClosedPage, readTaskState, type TaskState } from "./task-closed";
+import {
+  isClosedPage,
+  readTaskState,
+  readTaskStatusName,
+  type TaskState,
+} from "./task-closed";
 import {
   buttonsActive,
   handleTaskButton,
@@ -80,6 +85,15 @@ export async function getButtonTask(
 /** 初動確認への回答の前に見る：そのタスクがもう処理済みか（route.ts の安全網） */
 export function taskState(pageId: string): Promise<TaskState> {
   return readTaskState(
+    pageId,
+    async (id) =>
+      (await notion.pages.retrieve({ page_id: id })) as unknown as Record<string, unknown>,
+  );
+}
+
+/** 初動確認の回答で条件がそろったときに見る：そのタスクの今のステータス（route.ts の persist） */
+export function taskStatusName(pageId: string): Promise<string | null> {
+  return readTaskStatusName(
     pageId,
     async (id) =>
       (await notion.pages.retrieve({ page_id: id })) as unknown as Record<string, unknown>,

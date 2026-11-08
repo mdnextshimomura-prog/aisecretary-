@@ -110,7 +110,8 @@ import {
   MSG_UNCONFIRMED,
   registeredCardFor,
 } from "@/lib/task-buttons";
-import { handleTaskPostbackEvent, taskState } from "@/lib/task-buttons-wire";
+import { handleTaskPostbackEvent, taskState, taskStatusName } from "@/lib/task-buttons-wire";
+import { statusAfterConfirm } from "@/lib/task-closed";
 import {
   recordAfterCreate,
   recordAssigneeChange,
@@ -832,11 +833,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             ...extraNote,
           ]);
           if (r.complete) {
+            // 聞き返し中にカードの［待ち］［延期］で「進行中」になっていたら「未着手」で上書きしない
+            const nextStatus = statusAfterConfirm(await taskStatusName(pending.pageId));
             // **引き渡し待ちを先に積んでから**確認状態を消す。
             // 逆順だと、消した直後に落ちた場合に確認も引き渡しも残らず、
             // 条件は固まったのに担当者へ永久に伝わらない。
             await addPendingHandoff(source.groupId, pending);
-            await setTaskStatus(pending.pageId, "未着手");
+            if (nextStatus) await setTaskStatus(pending.pageId, nextStatus);
             await deletePendingTaskConfirm(source.groupId, pending.pageId);
           } else {
             await savePendingTaskConfirm(source.groupId, pending);

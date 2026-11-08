@@ -47,3 +47,23 @@ export async function readTaskState(
   }
   return isClosedPage(page) ? "closed" : "open";
 }
+
+/**
+ * 初動確認の回答で条件がそろったとき、ステータスを何にするか。null なら書かない。
+ * 受付のカードは聞き返し中にも付くので、回答の前にボタンの［待ち］［延期］で「進行中」に
+ * なっていることがある。それを「未着手」で上書きしない（要確認など、それ以外は今までどおり未着手）。
+ * 完了も書かない（開き直さない。ふつうは手前の stopIfClosed で止まる）。
+ */
+export function statusAfterConfirm(current: string | null): string | null {
+  if (current === "進行中" || current === "完了") return null;
+  return "未着手";
+}
+
+/** 今のステータスの名前（無ければ null）。読めなければ例外のまま（呼び出し側は書かない側に倒す）。 */
+export async function readTaskStatusName(
+  pageId: string,
+  retrieve: (pageId: string) => Promise<PageLike>,
+): Promise<string | null> {
+  const page = await retrieve(pageId);
+  return selectName((page.properties as Record<string, unknown>) ?? {}, "ステータス");
+}

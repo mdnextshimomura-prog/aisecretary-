@@ -2,7 +2,12 @@
  * タスクがもう処理済みか（完了・終わり方あり・消されている）。初動確認への回答で「未着手」に
  * 戻さないための安全網と、ボタンの「処理済み」の判定に使う。Notion は差し替える。
  */
-import { isClosedPage, readTaskState } from "../src/lib/task-closed";
+import {
+  isClosedPage,
+  readTaskState,
+  statusAfterConfirm,
+  readTaskStatusName,
+} from "../src/lib/task-closed";
 
 let fail = 0;
 const ok = (name: string, cond: boolean, d = "") => {
@@ -65,6 +70,28 @@ async function main() {
     threw = true;
   }
   ok("読み取りに失敗したら例外（更新しない側に倒す）", threw);
+
+  // ── 初動確認の回答で条件がそろったときのステータス（2026-11-08。カードを聞き返しにも付けたため）──
+  ok("要確認なら今までどおり未着手にする", statusAfterConfirm("要確認") === "未着手");
+  ok("進行中（ボタンの待ち・延期のあと）は未着手で上書きしない", statusAfterConfirm("進行中") === null);
+  ok("未着手は未着手のまま（今までどおり書く）", statusAfterConfirm("未着手") === "未着手");
+  ok("ステータスが空なら今までどおり未着手", statusAfterConfirm(null) === "未着手");
+  ok("完了は開き直さない", statusAfterConfirm("完了") === null);
+  {
+    const name = await readTaskStatusName("p", async () => page("進行中", null));
+    ok("今のステータスを読む", name === "進行中", String(name));
+    const none = await readTaskStatusName("p", async () => page(null, null));
+    ok("ステータスが無ければ null", none === null);
+    let threw = false;
+    try {
+      await readTaskStatusName("p", async () => {
+        throw Object.assign(new Error("x"), { code: "rate_limited" });
+      });
+    } catch {
+      threw = true;
+    }
+    ok("読めなければ例外（書かない側に倒す）", threw);
+  }
 
   if (fail > 0) {
     console.log(`\n${fail} 件失敗`);
