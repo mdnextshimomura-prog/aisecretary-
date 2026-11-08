@@ -68,7 +68,8 @@ export function buttonsActive(): boolean {
 }
 
 /** 片方が off のあいだに押されたときの返事 */
-export const MSG_PAUSED = "いまボタン操作は止めています。文字で操作してください";
+export const MSG_PAUSED =
+  "いまボタン操作は止めています。文字で操作してください";
 
 export const MSG_FORBIDDEN =
   "このタスクを操作できるのは担当者・依頼者・下村さんだけです";
@@ -137,17 +138,56 @@ export function parseButtonData(
   return null;
 }
 
+// ── メニュー・一覧のボタン（B1。task-menu.ts。TASK_MENU=1 のときだけ出す・扱う）──
+// data は `v1|操作|オフセット`。オフセットは一覧の何件目から出すか（0, 10, 20…）。表示番号ではない。
+// menu＝メニュー／lt＝今日・期限切れ／lm＝自分の未完了／lc＝候補／ld＝案件
+export type MenuOp = "menu" | "lt" | "lm" | "lc" | "ld";
+const MENU_OPS: MenuOp[] = ["menu", "lt", "lm", "lc", "ld"];
+export interface MenuAction {
+  op: MenuOp;
+  offset: number;
+}
+/** 一覧の1ページの件数（カルーセルは［次の10件］を足して最大11枚） */
+export const MENU_PAGE_SIZE = 10;
+const MENU_OFFSET_MAX = 500;
+
+export function encodeMenuData(op: MenuOp, offset = 0): string {
+  return ["v1", op, String(offset)].join("|");
+}
+
+/** `v1|操作|オフセット` を読む。メニューの形でなければ null（タスクのボタンは parseButtonData）。 */
+export function parseMenuData(data: string): MenuAction | null {
+  if (!data || data.length > MAX_DATA) return null;
+  const parts = data.split("|");
+  if (parts.length !== 3 || parts[0] !== "v1") return null;
+  const op = parts[1] as MenuOp;
+  if (!MENU_OPS.includes(op)) return null;
+  if (!/^(0|[1-9][0-9]{0,2})$/.test(parts[2])) return null;
+  const offset = Number(parts[2]);
+  if (offset > MENU_OFFSET_MAX || offset % MENU_PAGE_SIZE !== 0) return null;
+  return { op, offset };
+}
+
 /** タスクの 5 つのボタン（data・displayText は今までと同じ）。 */
 function taskButtons(pageId: string): CardButton[] {
   return [
-    cardButton("済", encodeButtonData("done", pageId), "（ボタン）済にする", true),
+    cardButton(
+      "済",
+      encodeButtonData("done", pageId),
+      "（ボタン）済にする",
+      true,
+    ),
     cardButton(
       "待ち（3日後に確認）",
       encodeButtonData("wait", pageId),
       "（ボタン）待ちにする",
     ),
     cardButton("延期", encodeButtonData("pmenu", pageId), "（ボタン）延期する"),
-    cardButton("不要", encodeButtonData("drop", pageId), "（ボタン）不要にする"),
+    cardButton(
+      "不要",
+      encodeButtonData("drop", pageId),
+      "（ボタン）不要にする",
+    ),
     cardButton(
       "担当を変える",
       encodeButtonData("amenu", pageId),
@@ -393,7 +433,11 @@ export async function handleTaskButton(
         return { text, card: again, changed: true };
       }
       case "drop": {
-        const text = await applyStatusToTask({ kind: "drop" }, task, deps.status);
+        const text = await applyStatusToTask(
+          { kind: "drop" },
+          task,
+          deps.status,
+        );
         const warnings = await clearSessionAfter(deps, task.id);
         return { text, changed: true, ...(warnings ? { warnings } : {}) };
       }
@@ -437,7 +481,10 @@ export async function handleTaskButton(
           x.userIds.includes(extra as string),
         );
         if (!m) {
-          return { text: "⚠️ 名簿にいない人には替えられません", changed: false };
+          return {
+            text: "⚠️ 名簿にいない人には替えられません",
+            changed: false,
+          };
         }
         // Notion が先。書けなければ例外で抜け、確認セッションの担当は変えない（済・不要と同じ考え方）。
         // 書けたら確認セッションの担当も合わせる（残すと、確認が済んだとき旧担当へ渡る）。

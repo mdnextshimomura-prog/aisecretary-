@@ -22,6 +22,15 @@ import {
   savePendingTaskConfirm,
 } from "./email/session";
 import { recordAssigneeChange } from "./task-record-wire";
+import {
+  handleMenuAction,
+  menuActive,
+  menuCard,
+  MENU_TEXT,
+  MSG_READ_FAILED,
+  type MenuDeps,
+} from "./task-menu";
+import { menuDeps } from "./task-menu-wire";
 import { statusDeps } from "./task-status-wire";
 import { jstDateStr } from "./notion";
 import {
@@ -36,6 +45,8 @@ import {
   registeredCard,
   MSG_PAUSED,
   parseButtonData,
+  parseMenuData,
+  type MenuAction,
   type ButtonDeps,
   type ButtonTask,
   type FlexMessage,
@@ -245,6 +256,8 @@ export interface PostbackIo {
   /** 付け直したカードの ID の控え（KV。設定が無ければ null＝書かない） */
   cardRefs: CardRefStore | null;
   log(line: string): void;
+  /** メニュー・一覧の読み込み（TASK_MENU=1 のときだけ使う。省けば本物の Notion） */
+  menu?: MenuDeps;
 }
 
 /**
@@ -267,6 +280,7 @@ export async function handleTaskPostbackEvent(
     reply: over.reply ?? replyTextAndCard,
     cardRefs: "cardRefs" in over ? (over.cardRefs ?? null) : defaultCardRefStore(),
     log: over.log ?? ((line) => console.log(line)),
+    menu: over.menu,
   };
   const op = parseButtonData(data)?.op ?? "invalid";
 
@@ -293,6 +307,16 @@ export async function handleTaskPostbackEvent(
   if (!buttonsActive()) {
     await send(MSG_PAUSED, undefined, "paused");
     return;
+  }
+
+  // メニュー・一覧のボタン（TASK_MENU=1 のときだけ。off なら今までどおり下のタスクのボタンへ＝「使えません」）。
+  // 読むだけなので予約・完了印は使わない。送り主の制限は route.ts で通ったあと
+  if (menuActive()) {
+    const action = parseMenuData(data);
+    if (action) {
+      await handleMenuPostback(action, event.source.userId, replyToken, io);
+      return;
+    }
   }
 
   // 同じイベントの再送で二重に書かない。予約できない（KV の障害）なら書かない
@@ -340,4 +364,57 @@ export async function handleTaskPostbackEvent(
       await io.complete(key).catch(() => io.log("[task-buttons] mark-failed"));
     }
   }
+}
+
+/**
+ * メニュー・一覧のボタンが押されたとき。返事は replyToken で（text が1通目、カード・カルーセルが2通目）。
+ * 一覧に載せたタスクが1件だけのときに限り、送れた ID を cardref に控える（引用での完了・回答に結び付ける）。
+ * 2件以上のカルーセルは1通に複数のタスクが載るので控えない（引用されてもどのタスクか決められないため）。
+ * ログは操作名・件数・結果の符号だけ。例外は投げない。
+ */
+async function handleMenuPostback(
+  action: MenuAction,
+  actorId: string | undefined,
+  replyToken: string,
+  io: PostbackIo,
+): Promise<void> {
+  const deps = io.menu ?? menuDeps();
+  let r;
+  try {
+    r = await handleMenuAction(action, actorId, deps);
+  } catch {
+    io.log(`[task-menu] ${action.op} read-failed`);
+    try {
+      await io.reply(replyToken, MSG_READ_FAILED);
+    } catch {
+      io.log(`[task-menu] reply-failed ${action.op}`);
+    }
+    return;
+  }
+  io.log(`[task-menu] ${action.op} shown ${r.pageIds.length}`);
+  let got: SentIds | string | null = null;
+  try {
+    got = await io.reply(replyToken, r.text, r.card);
+  } catch {
+    io.log(`[task-menu] reply-failed ${action.op}`);
+    return;
+  }
+  const ids: SentIds =
+    got === null || typeof got === "string" ? { textId: got, cardId: null } : got;
+  if (ids.textId === null) io.log(`[task-menu] reply-failed ${action.op}`);
+  if (r.card && r.pageIds.length === 1) {
+    await saveCardRefs([ids.textId, ids.cardId], r.pageIds[0], io.cardRefs, io.log);
+  }
+}
+
+/**
+ * 「@秘書 メニュー」・「@秘書」だけの発言への返事（route.ts の入口）。TASK_MENU が off なら呼ばれない。
+ * 送信の例外はそのまま投げる（route.ts の今の扱いに任せる）。
+ */
+export async function replyMenu(
+  replyToken: string,
+  over: Partial<Pick<PostbackIo, "reply" | "log">> = {},
+): Promise<void> {
+  await (over.reply ?? replyTextAndCard)(replyToken, MENU_TEXT, menuCard());
+  (over.log ?? ((line) => console.log(line)))("[task-menu] menu shown 0");
 }
