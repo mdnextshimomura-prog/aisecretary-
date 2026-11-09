@@ -1186,23 +1186,122 @@ const setEnv = (on: { menu?: boolean; cand?: boolean }) => {
       !cc.instantCandidateActive(),
     );
     setEnv({ menu: true });
-    const sent: Array<{ text: string; card?: FlexMessage }> = [];
-    await cc.replyCandidateCard("rt", cand("q2"), {
-      reply: async (_t, text, card) => {
-        sent.push({ text, card });
-        return { textId: "T", cardId: "C" };
-      },
-      members: async () => members,
-      text: cc.MSG_CAND_INSTANT,
-    });
-    ok(
-      "その場のカード：「タスクにしますか？」の文字＋候補カード1枚",
-      sent.length === 1 &&
-        sent[0].text === cc.MSG_CAND_INSTANT &&
-        sent[0].text.includes("タスクにしますか") &&
-        (sent[0].text as string) !== (cc.MSG_CAND_ASKED as string) &&
-        (sent[0].card?.contents as { type: string }).type === "bubble",
-    );
+    const T0 = 1_000_000;
+    const run = async (opts: {
+      at: number;
+      reply?: (
+        t: string,
+        text: string,
+        card?: FlexMessage,
+      ) => Promise<{ textId: string | null; cardId: string | null }>;
+      members?: () => Promise<Member[]>;
+    }) => {
+      const sent: Array<{ text: string; card?: FlexMessage }> = [];
+      const logs: string[] = [];
+      const r = await cc.replyInstantCandidateCard("rt", cand("q2"), T0, {
+        reply:
+          opts.reply ??
+          (async (_t, text, card) => {
+            sent.push({ text, card });
+            return { textId: "T", cardId: "C" };
+          }),
+        members: opts.members ?? (async () => members),
+        now: () => opts.at,
+        log: (l) => logs.push(l),
+      });
+      return { r, sent, logs };
+    };
+    {
+      const { r, sent, logs } = await run({ at: T0 + 3_000 });
+      ok(
+        "その場のカード：「タスクにしますか？」の文字＋候補カード1枚",
+        r === "shown" &&
+          sent.length === 1 &&
+          sent[0].text === cc.MSG_CAND_INSTANT &&
+          sent[0].text.includes("タスクにしますか") &&
+          (sent[0].text as string) !== (cc.MSG_CAND_ASKED as string) &&
+          (sent[0].card?.contents as { type: string }).type === "bubble",
+      );
+      ok(
+        "その場のカード：成功のログは1行・符号だけ",
+        logs.length === 1 &&
+          logs[0] === "[task-candidate] instant-card shown 1",
+        logs.join(),
+      );
+    }
+    {
+      const { r, logs } = await run({
+        at: T0 + 3_000,
+        reply: async () => ({ textId: null, cardId: null }),
+      });
+      ok(
+        "その場のカード：LINE が断った（HTTP エラー）なら失敗のログ1行だけ",
+        r === "failed" &&
+          logs.length === 1 &&
+          logs[0] === "[task-candidate] reply-failed instant-card",
+        logs.join(),
+      );
+    }
+    {
+      const { r, logs } = await run({
+        at: T0 + 3_000,
+        reply: async () => {
+          throw new Error("x");
+        },
+      });
+      ok(
+        "その場のカード：送信の例外は外に出さず、失敗のログ1行だけ",
+        r === "failed" &&
+          logs.length === 1 &&
+          logs[0] === "[task-candidate] reply-failed instant-card",
+        logs.join(),
+      );
+    }
+    {
+      let called = 0;
+      const { r, logs } = await run({
+        at: T0 + cc.INSTANT_DEADLINE_MS - 4_000,
+        reply: async () => {
+          called++;
+          return { textId: "T", cardId: "C" };
+        },
+      });
+      ok(
+        "その場のカード：期限（発言から50秒）に近ければ送らない",
+        r === "too-late" &&
+          called === 0 &&
+          logs.length === 1 &&
+          logs[0] === "[task-candidate] instant-card too-late",
+        logs.join(),
+      );
+    }
+    {
+      const { r, sent } = await run({
+        at: T0 + 3_000,
+        members: async () => {
+          throw new Error("x");
+        },
+      });
+      ok(
+        "その場のカード：名簿が取れなくてもカードは出す",
+        r === "shown" && sent.length === 1,
+      );
+    }
+    {
+      // 送信が返ってこない：残り時間で打ち切る（発言から44秒＝残り6秒）
+      const t = Date.now();
+      const { r, logs } = await run({
+        at: T0 + cc.INSTANT_DEADLINE_MS - 6_000,
+        reply: () => new Promise(() => {}),
+      });
+      ok(
+        "その場のカード：送信が返らなければ残り時間で打ち切り、失敗のログ",
+        r === "failed" &&
+          logs[0] === "[task-candidate] reply-failed instant-card" &&
+          Date.now() - t < 8_000,
+        `${Date.now() - t}ms ${logs.join()}`,
+      );
+    }
     delete process.env.TASK_CANDIDATE_INSTANT;
   }
 

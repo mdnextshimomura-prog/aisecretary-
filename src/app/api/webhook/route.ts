@@ -151,8 +151,8 @@ import {
   defaultCandidateTextDeps,
   handleCandidateTextCommand,
   instantCandidateActive,
-  MSG_CAND_INSTANT,
   replyCandidateCard,
+  replyInstantCandidateCard,
   replyCandidateList,
 } from "@/lib/candidate-card";
 import { dispatchObiEvents, type ObiEventDeps } from "@/lib/obi/webhook-event";
@@ -1521,12 +1521,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             markCommitted();
             // TASK_CANDIDATE_INSTANT=1：控えたらその場の返事で候補カード1枚（off なら今までどおり黙って控える）。
             // 新しく控えたときだけ（同じ発言の2度目は出さない）。送れなくても候補は残り、17時に聞く
+            // 発言から50秒を過ぎそうなら送らない（replyToken の期限）。結果のログは関数の中で1回だけ出す
             if (added && instantCandidateActive()) {
-              await replyCandidateCard(replyToken, cand, {
-                text: MSG_CAND_INSTANT,
-              }).catch(() =>
-                console.error("[task-candidate] reply-failed instant-card")
-              );
+              await replyInstantCandidateCard(replyToken, cand, event.timestamp);
             }
           }
         } catch (err) {

@@ -551,24 +551,97 @@ export async function replyCandidateCard(
   over: {
     reply?: typeof replyTextAndCard;
     members?: () => Promise<Member[]>;
-    /** 1通目の文（既定は迷った依頼の文。メンションの無い依頼は MSG_CAND_INSTANT） */
-    text?: string;
   } = {},
 ): Promise<void> {
   const members = await (over.members ?? loadMembers)().catch(
     () => [] as Member[],
   );
-  const text = over.text ?? MSG_CAND_ASKED;
   await (over.reply ?? replyTextAndCard)(
     replyToken,
-    text,
+    MSG_CAND_ASKED,
     candidateCard(c, nameResolver(members)),
   );
-  console.log(
-    text === MSG_CAND_ASKED
-      ? "[task-candidate] asked-card shown 1"
-      : "[task-candidate] instant-card shown 1",
-  );
+  console.log("[task-candidate] asked-card shown 1");
+}
+
+/** その場で聞くのは、発言の時刻からこの時間まで（replyToken は約1分で切れる。余裕を取る） */
+export const INSTANT_DEADLINE_MS = 50_000;
+/** これより残りが少なければ送らない（名簿と送信の時間を取れない） */
+const INSTANT_MIN_LEFT_MS = 5_000;
+/** 名簿を待つのはここまで（取れなければ名前なしでカードを出す） */
+const INSTANT_MEMBERS_MS = 3_000;
+
+const TIMEOUT = Symbol("timeout");
+function within<T>(p: Promise<T>, ms: number): Promise<T | typeof TIMEOUT> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => resolve(TIMEOUT), Math.max(0, ms));
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
+export type InstantResult = "shown" | "too-late" | "failed";
+
+/**
+ * メンションの無い依頼を候補に控えたとき、その場の返事で「タスクにしますか？」＋候補カード1枚を返す（reply）。
+ * 発言の時刻（eventTs）から INSTANT_DEADLINE_MS を過ぎそうなら送らない（候補は残り、17時に聞く）。
+ * 送れなかった（LINE が断った・時間切れ・例外）ときは失敗のログだけ出す。例外は外に出さない。
+ */
+export async function replyInstantCandidateCard(
+  replyToken: string,
+  c: Candidate,
+  eventTs: number | undefined,
+  over: {
+    reply?: typeof replyTextAndCard;
+    members?: () => Promise<Member[]>;
+    now?: () => number;
+    log?: (line: string) => void;
+  } = {},
+): Promise<InstantResult> {
+  const now = over.now ?? Date.now;
+  const log = over.log ?? ((l: string) => console.log(l));
+  const start = typeof eventTs === "number" && eventTs > 0 ? eventTs : now();
+  const left = () => start + INSTANT_DEADLINE_MS - now();
+  if (left() < INSTANT_MIN_LEFT_MS) {
+    log("[task-candidate] instant-card too-late");
+    return "too-late";
+  }
+  try {
+    const m = await within(
+      (over.members ?? loadMembers)().catch(() => [] as Member[]),
+      Math.min(INSTANT_MEMBERS_MS, left() - INSTANT_MIN_LEFT_MS),
+    );
+    const members = m === TIMEOUT ? [] : m;
+    if (left() < 1_000) {
+      log("[task-candidate] instant-card too-late");
+      return "too-late";
+    }
+    const r = await within(
+      (over.reply ?? replyTextAndCard)(
+        replyToken,
+        MSG_CAND_INSTANT,
+        candidateCard(c, nameResolver(members)),
+      ),
+      left(),
+    );
+    if (r === TIMEOUT || (r.textId === null && r.cardId === null)) {
+      log("[task-candidate] reply-failed instant-card");
+      return "failed";
+    }
+    log("[task-candidate] instant-card shown 1");
+    return "shown";
+  } catch {
+    log("[task-candidate] reply-failed instant-card");
+    return "failed";
+  }
 }
 
 /** 「@秘書 候補」（TASK_MENU on）：メニューの［候補］と同じ返事（文字の一覧＋カード） */
