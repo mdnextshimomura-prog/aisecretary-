@@ -1302,6 +1302,30 @@ const setEnv = (on: { menu?: boolean; cand?: boolean }) => {
         `${Date.now() - t}ms ${logs.join()}`,
       );
     }
+    {
+      // 名簿を待つ間に時計が進み、残りが5秒を切ったら送らない（入口では残り6秒→名簿の後は残り4秒）
+      const times = [T0 + cc.INSTANT_DEADLINE_MS - 6_000, T0 + cc.INSTANT_DEADLINE_MS - 6_000, T0 + cc.INSTANT_DEADLINE_MS - 4_000];
+      let k = 0;
+      let called = 0;
+      const logs: string[] = [];
+      const r = await cc.replyInstantCandidateCard("rt", cand("q3"), T0, {
+        reply: async () => {
+          called++;
+          return { textId: "T", cardId: "C" };
+        },
+        members: async () => members,
+        now: () => times[Math.min(k++, times.length - 1)],
+        log: (l) => logs.push(l),
+      });
+      ok(
+        "その場のカード：名簿の後に残りが5秒を切ったら送らない",
+        r === "too-late" &&
+          called === 0 &&
+          logs.length === 1 &&
+          logs[0] === "[task-candidate] instant-card too-late",
+        `${r} ${called} ${logs.join()}`,
+      );
+    }
     delete process.env.TASK_CANDIDATE_INSTANT;
   }
 

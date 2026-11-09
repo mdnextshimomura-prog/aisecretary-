@@ -620,7 +620,7 @@ export async function replyInstantCandidateCard(
       Math.min(INSTANT_MEMBERS_MS, left() - INSTANT_MIN_LEFT_MS),
     );
     const members = m === TIMEOUT ? [] : m;
-    if (left() < 1_000) {
+    if (left() < INSTANT_MIN_LEFT_MS) {
       log("[task-candidate] instant-card too-late");
       return "too-late";
     }
