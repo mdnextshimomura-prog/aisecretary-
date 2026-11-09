@@ -150,6 +150,8 @@ import {
   candidateCardsActive,
   defaultCandidateTextDeps,
   handleCandidateTextCommand,
+  instantCandidateActive,
+  MSG_CAND_INSTANT,
   replyCandidateCard,
   replyCandidateList,
 } from "@/lib/candidate-card";
@@ -1503,7 +1505,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               assignee = c.name ?? name ?? assignee;
               assigneeUserId = c.userId ?? m.userId ?? null;
             }
-            await addCandidate({
+            const cand = {
               id: event.message.id,
               text,
               title: parsedCand.title,
@@ -1514,8 +1516,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               // B1 Task 2（TASK_MENU off のあいだは置き場が書かない）
               groupId: source.groupId ?? null,
               mentionedUserIds: mentioned.map((x) => x.userId as string),
-            });
+            };
+            const added = await addCandidate(cand);
             markCommitted();
+            // TASK_CANDIDATE_INSTANT=1：控えたらその場の返事で候補カード1枚（off なら今までどおり黙って控える）。
+            // 新しく控えたときだけ（同じ発言の2度目は出さない）。送れなくても候補は残り、17時に聞く
+            if (added && instantCandidateActive()) {
+              await replyCandidateCard(replyToken, cand, {
+                text: MSG_CAND_INSTANT,
+              }).catch(() =>
+                console.error("[task-candidate] reply-failed instant-card")
+              );
+            }
           }
         } catch (err) {
           // 候補は補助。控えられなくても、今までどおり何もしないだけにする

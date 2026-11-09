@@ -55,6 +55,14 @@ export function candidateCardsActive(): boolean {
   return menuActive() && candidatesEnabled();
 }
 
+/**
+ * メンションの無い依頼を候補に控えたとき、その場の返事（reply）で候補カードを出すか。
+ * TASK_CANDIDATE_INSTANT=1 かつ候補カードが on のときだけ。off なら今までどおり黙って控える（17時に聞く）。
+ */
+export function instantCandidateActive(): boolean {
+  return candidateCardsActive() && process.env.TASK_CANDIDATE_INSTANT === "1";
+}
+
 export type CandidateOp = "cr" | "ch" | "cx";
 const OPS: CandidateOp[] = ["cr", "ch", "cx"];
 export interface CandidateAction {
@@ -93,6 +101,9 @@ export const MSG_CAND_ONLY_GROUP = "候補は、控えたグループの中で�
 export const MSG_CAND_OFF = "いま候補の機能は止めています";
 export const MSG_CAND_ASKED =
   "📝 タスクにするか迷ったので、候補に控えました。タスクにするならボタンを押してください";
+/** メンションの無い依頼をその場で聞くときの文（押さなければ17時のまとめでも聞く） */
+export const MSG_CAND_INSTANT =
+  "📝 タスクにしますか？登録するならボタンを押してください（押さなければ、17時のまとめでも聞きます）";
 export const msgHeld = (title: string) =>
   `⏸ 次の17時まで出さないでおきます\n📋 ${title}`;
 export const msgDropped = (title: string) =>
@@ -537,15 +548,27 @@ export function defaultCandidateActionDeps(
 export async function replyCandidateCard(
   replyToken: string,
   c: Candidate,
-  over: { reply?: typeof replyTextAndCard; members?: () => Promise<Member[]> } = {},
+  over: {
+    reply?: typeof replyTextAndCard;
+    members?: () => Promise<Member[]>;
+    /** 1通目の文（既定は迷った依頼の文。メンションの無い依頼は MSG_CAND_INSTANT） */
+    text?: string;
+  } = {},
 ): Promise<void> {
-  const members = await (over.members ?? loadMembers)().catch(() => [] as Member[]);
+  const members = await (over.members ?? loadMembers)().catch(
+    () => [] as Member[],
+  );
+  const text = over.text ?? MSG_CAND_ASKED;
   await (over.reply ?? replyTextAndCard)(
     replyToken,
-    MSG_CAND_ASKED,
+    text,
     candidateCard(c, nameResolver(members)),
   );
-  console.log("[task-candidate] asked-card shown 1");
+  console.log(
+    text === MSG_CAND_ASKED
+      ? "[task-candidate] asked-card shown 1"
+      : "[task-candidate] instant-card shown 1",
+  );
 }
 
 /** 「@秘書 候補」（TASK_MENU on）：メニューの［候補］と同じ返事（文字の一覧＋カード） */
@@ -554,7 +577,11 @@ export async function replyCandidateList(
   groupId: string | undefined,
   over: { reply?: typeof replyTextAndCard; list?: CandidateListDeps } = {},
 ): Promise<void> {
-  const r = await candidateListPage(0, groupId, over.list ?? defaultCandidateListDeps());
+  const r = await candidateListPage(
+    0,
+    groupId,
+    over.list ?? defaultCandidateListDeps(),
+  );
   await (over.reply ?? replyTextAndCard)(replyToken, r.text, r.card);
   console.log(`[task-candidate] list shown ${r.shown ?? 0}`);
 }
@@ -569,7 +596,11 @@ export interface CandidateTextDeps {
   /** ID で片付ける（番号では消さない：登録の間に番号が振り直されても別の候補を消さない） */
   remove(id: string): Promise<void>;
   members(): Promise<Member[]>;
-  register(c: Candidate, replyToken: string, groupId: string): Promise<RegisterResult>;
+  register(
+    c: Candidate,
+    replyToken: string,
+    groupId: string,
+  ): Promise<RegisterResult>;
   reply(replyToken: string, text: string): Promise<unknown>;
   now(): number;
   log(line: string): void;
@@ -622,7 +653,10 @@ export async function handleCandidateTextCommand(
       const n = cmd.numbers[0];
       const c = await deps.peek(n, now, groupId);
       if (!c) {
-        await say(`⚠️ ${n}番の候補は見つかりませんでした（登録済みか、消えています）`, "not-found");
+        await say(
+          `⚠️ ${n}番の候補は見つかりませんでした（登録済みか、消えています）`,
+          "not-found",
+        );
         return { committed: false };
       }
       if (!canOperateCandidate(actorId, c, members)) {
@@ -637,18 +671,28 @@ export async function handleCandidateTextCommand(
       try {
         r = await deps.register(c, replyToken, groupId);
       } catch {
-        await deps.releaseRegister(c.id).catch(() => deps.log("[task-candidate] text-register release-failed"));
+        await deps
+          .releaseRegister(c.id)
+          .catch(() =>
+            deps.log("[task-candidate] text-register release-failed"),
+          );
         await say(MSG_CAND_ERROR, "error");
         return { committed: false };
       }
       if (r === "ok" || r === "duplicate") {
-        await deps.remove(c.id).catch(() => deps.log("[task-candidate] text-register remove-failed"));
+        await deps
+          .remove(c.id)
+          .catch(() =>
+            deps.log("[task-candidate] text-register remove-failed"),
+          );
         if (r === "ok") deps.log("[task-candidate] text-register registered");
         else await say(`${n}番はすでに登録済みです。`, "duplicate");
         return { committed: true };
       }
       // 失敗：予約を外して候補を残す（送り直せる）
-      await deps.releaseRegister(c.id).catch(() => deps.log("[task-candidate] text-register release-failed"));
+      await deps
+        .releaseRegister(c.id)
+        .catch(() => deps.log("[task-candidate] text-register release-failed"));
       if (r === "retry") {
         // LINE の再送は無効なので、503 で待たずにその場で知らせる
         await say(
