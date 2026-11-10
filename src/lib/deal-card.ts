@@ -13,6 +13,7 @@
  *   TASK_RECORD の自動の照合より優先（照合は飛ばす）。TASK_RECORD が off でも案件だけは書く。
  * - CRM_案件 の欄には書かない（読むだけ）。読めなければ「案件を読み取れませんでした」。
  * Notion・KV は deps で受け取る（本物は deal-card-wire.ts）。ログは操作名・件数・符号だけ（案件名・userId は出さない）。
+ * B2（2026-11-11）：TASK_SATEI=1 のときだけ［査定書を作る］（`v1|sa|案件ID`）を3つ目に足す（satei-data.ts）。
  */
 import {
   menuActive,
@@ -32,6 +33,7 @@ import {
   type FlexMessage,
 } from "./task-card";
 import type { DealRef } from "./task-record";
+import { encodeSateiStart, sateiActive } from "./satei-data";
 
 export const MSG_DEALS_EMPTY = "進行中の案件はありません";
 export const MSG_DEAL_READ_FAILED = "案件を読み取れませんでした";
@@ -224,6 +226,10 @@ export function dealBubble(d: DealSummary) {
           encodeDealData("da", d.id),
           "（ボタン）この案件にタスクを足す",
         ),
+        // B2 査定書（TASK_SATEI=1 のときだけ。off なら配列は今と同じ2つ）
+        ...(sateiActive()
+          ? [button("査定書を作る", encodeSateiStart(d.id), "（ボタン）査定書を作る")]
+          : []),
       ],
     },
   };
