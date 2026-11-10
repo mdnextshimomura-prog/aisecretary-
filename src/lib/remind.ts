@@ -14,6 +14,8 @@ import { buildHandoffMessage } from "./clarify";
 import { pushLineMessage, pushLineMessageWithMentions } from "./line";
 import { getPendingHandoffs, removePendingHandoff } from "./email/session";
 import { listTasks } from "./notion";
+import { pushCard } from "./line";
+import { sendRemindCards } from "./remind-cards";
 
 /**
  * 送信に失敗した「担当者への引き渡し」を送り直す。
@@ -206,4 +208,16 @@ export async function sendDailyReminders(): Promise<void> {
   }
   await Promise.all(shown.map((t, i) => setRemindNumber(t.id, i + 1)));
   await pushLineChunks(LINE_GROUP_ID, chunks);
+
+  // TASK_REMIND_CARDS=1 のときだけ、同じタスクを同じ順でボタンつきのカードにして1通足す（off なら何もしない）
+  await sendRemindCards(
+    LINE_GROUP_ID,
+    shown.map((t) => ({
+      id: t.id,
+      title: t.title,
+      dueDate: t.dueDate || null,
+      assignee: t.assignee,
+    })),
+    pushCard
+  );
 }

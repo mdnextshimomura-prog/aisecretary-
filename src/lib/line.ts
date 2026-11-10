@@ -126,6 +126,23 @@ export async function pushTextAndCard(
   return true;
 }
 
+// カード（Flex）だけを push で1通（朝のリマインドのカード・2026-11-10）。本文・宛先はログに出さない。
+export async function pushCard(to: string, card: FlexMessage): Promise<boolean> {
+  const res = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${ACCESS_TOKEN}`,
+    },
+    body: JSON.stringify({ to, messages: [card] }),
+  });
+  if (!res.ok) {
+    console.error("LINE push失敗:", res.status);
+    return false;
+  }
+  return true;
+}
+
 // LINEメンション付きPush送信（textV2形式）。
 // 通常の text メッセージに mention を付けても送信時は無視される（受信専用の仕様）ため、
 // 本物のメンション（相手に通知が飛び、青くハイライトされる）には textV2 の
