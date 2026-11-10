@@ -47,7 +47,7 @@ function restBubble(rest: number, withMenu: boolean) {
     {
       type: "text",
       text: withMenu
-        ? `残り${rest}件は［今日・期限切れ］から見られます`
+        ? `残り${rest}件は上の一覧の番号で返信できます（今日・期限切れの分は下のボタンでも開けます）`
         : `残り${rest}件は上の一覧の番号で返信してください`,
       size: "sm",
       color: "#888888",
