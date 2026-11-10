@@ -20,6 +20,10 @@ const ok = (name: string, cond: boolean, d = "") => {
   }
 };
 
+globalThis.fetch = (async () => {
+  throw new Error("このテストで外部へ通信してはいけない");
+}) as typeof fetch;
+
 const DB = "11111111-2222-3333-4444-555555555555";
 const FOLDER = "1AbC_dEf-GhIjKlMnOp";
 const P1 = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -91,7 +95,11 @@ ok(
       JSON.stringify({ id: good.id, name: good.name, dealNo: 42, folderId: FOLDER }),
 );
 ok("ページが無い → not-found", JSON.stringify(judgeSateiDeal(null, SATEI_KIND, DB)) === JSON.stringify({ ok: false, reason: "not-found" }));
-ok("消えている → not-found", !judgeSateiDeal({ ...good, gone: true }, SATEI_KIND, DB).ok);
+ok(
+  "消えている → not-found",
+  JSON.stringify(judgeSateiDeal({ ...good, gone: true }, SATEI_KIND, DB)) ===
+    JSON.stringify({ ok: false, reason: "not-found" }),
+);
 ok(
   "ほかの DB のページ → not-found",
   JSON.stringify(judgeSateiDeal(good, SATEI_KIND, "99999999-2222-3333-4444-555555555555")) ===
