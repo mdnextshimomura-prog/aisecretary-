@@ -71,3 +71,18 @@
 - 作る：`claude -p`（realestate-satei、40分）。検品：`codex exec --sandbox read-only --skip-git-repo-check -C <out> -o <file>`（realestate-satei-check、20分）。どちらも期限切れで子プロセスのグループを止める。作業中は5分おきに heartbeat、409 なら止める
 - Drive（OAuth・mdnext.proposer）：一覧・ダウンロード・アップロード・md5 取得を `src/satei/drive.js` に新設。下書きは `SATEI_DELIVERY_FOLDER_ID`（`15_AI納品` のフォルダ ID）配下の `年月/査定/` に `J<no>_<案件名>.pdf`
 - 通知は aisecretary の `/api/satei/notify`（`AISECRETARY_BASE_URL`）
+
+## 6. 改訂 v2（2026-11-11・3計画の Codex レビューを受けた決定。第1〜5節と食い違えばこちらが正）
+1. **採用する担当の判断**：runId は UUID／`claimDelivery` に `via:"satei-save"`（portal 上の artifactKey が無くても通す）／期限切れの納品中は保存の予約で取り直す／Mac の Drive は専用の `SATEI_GOOGLE_REFRESH_TOKEN`（mdnext.proposer のアカウント・scope `https://www.googleapis.com/auth/drive`。取り直しは下村さんがブラウザで許可する）／aisecretary は off 判定を本人確認より先／文面の J番号は `#J番号`／notify の findings・missing は配列でも JSON 文字列でも受ける／KV の差し戻し理由の値は `{no}`
+2. **B2 の依頼の範囲**：`workflow="satei"` かつ `sateiDealId != ""` のものだけを B2 として扱う。B2 の依頼は汎用の口（transition など）で動かせない（409 SATEI_LOCKED）。`sateiDealId=""` の satei（今までの受付で作られたもの）は今までどおりで、触らない。汎用の作成口からは `sateiDealId` を入れられない（B2 の依頼は intake でしか作れない）
+3. **保存直前の Notion フォルダ照合**：aisecretary に `POST /api/satei/folder-check`（`x-satei-token`）`{no, dealId, folderId}` → Notion の `Driveフォルダ` を読み `{match:true|false}`。読めない・時間切れは `503`。査定係は書く直前に呼び、false なら save-abort（`folder-mismatch`）、503・通信失敗なら書かずに次の回へ（保存の予約は期限まで持つ）。portal の saves の応答に `dealId` を足す
+4. **knownArtifacts は必須**：claim と saves の応答に `knownArtifacts: string[]`（その案件の B2 依頼で登録した artifactSha256 の一覧。無ければ空配列）を必ず入れる。査定係は項目が無い応答を受けたら何もせず止める（ログ `satei contract-missing knownArtifacts`）
+5. **予約の期限**：下準備の予約は10分（heartbeat で延長）。査定係は最後に受け取った `leaseUntil` の30秒前を過ぎたら、通信が通らなくても自分で子プロセスを止める。保存の予約は既存の45分（延長なし）。査定係は残りが5分未満なら書かない。portal の save-done・save-abort は `deliveryLeaseUntil > now` のときだけ受ける（過ぎていれば `409 SATEI_STALE`）
+6. **結果の送り直し**：査定係は result を呼ぶ前に `state/satei-run.json` に `{no, runId, leaseUntil, phase, resultBody}` を書く。次の起動で、このファイルがあり期限内なら resultBody を送り直す（同じ runId・generation の二重登録は portal が「既に登録済み」として同じ応答を返す）。期限切れならファイルを消して、新しい予約を待つ
+7. **作ったものの確かめ**：成功は「製本 PDF・編集元 Excel（.xlsx）・出典一覧（sources.md）・材料の読み取り（materials.json）」の4つがそろったときだけ。1つでも欠けたら `failed`（`internal`）
+8. **材料の確認**：Mac は先に「`02_査定・事例` に PDF が1つ以上あるか」だけを規則で見る。その先は Claude の最初の段で `materials.json`（`{所在, 専有面積㎡, 種別の根拠, 成約事例の件数}`）を書かせ、査定係が「所在が空でも『不明』でもない／専有面積が正の数／種別の根拠が対象物件の資料から／成約事例が1件以上」を確かめる。通らなければ作成を続けず `failed`（`materials`、missing に足りない項目）
+9. **draft でも missing を保存**：result の draft の `missing`（足りないが作れた資料）も `sateiMissing` に入れ、notices で返す
+10. **差し戻しと理由**：decide の reject は「確認待ち→差し戻し」だけ（取消にしない）。reason API で「差し戻し→取消」と `sateiRejectReason` を1トランザクション。30分たっても理由が来なければ sweep が理由なしで「差し戻し→取消」。差し戻しのあいだは同じ案件の intake は作らず「差し戻しの理由を待っています（理由を返信するか、30分後に押し直してください）」
+11. **差し戻し理由の取り込み**：aisecretary は KV の印を消さずに reason API を呼び、成功してから消す。失敗したら「記録できませんでした。もう一度送ってください」と返し、印は残す（30分まで）
+12. **通知の保留**：notify の結果に `deferred` を足す（aisecretary が off・通知先なし）。portal は `deferred` のとき試行回数を増やさず `pending` のまま。`unknown` だけ回数を増やし、3回で止める
+13. **画面**：通知が3回で止まった B2 の依頼は、終わった状態（納品済み・取消・失敗）でも依頼箱の画面に「通知が届いたか不明」と出す
