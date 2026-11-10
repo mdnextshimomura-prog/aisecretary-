@@ -86,3 +86,6 @@
 11. **差し戻し理由の取り込み**：aisecretary は KV の印を消さずに reason API を呼び、成功してから消す。失敗したら「記録できませんでした。もう一度送ってください」と返し、印は残す（30分まで）
 12. **通知の保留**：notify の結果に `deferred` を足す（aisecretary が off・通知先なし）。portal は `deferred` のとき試行回数を増やさず `pending` のまま。`unknown` だけ回数を増やし、3回で止める
 13. **画面**：通知が3回で止まった B2 の依頼は、終わった状態（納品済み・取消・失敗）でも依頼箱の画面に「通知が届いたか不明」と出す
+14. **result の冪等の判定**（2026-11-11 追記）：Job に `sateiResultSha`（String・既定 ""）を足す。正規化した result 全体（outcome・inputVersion・artifactSha256・driveFileId・driveMd5・verdict・findings・failReason・missing）の SHA-256。同じ runId で同じ値なら初回と同じ応答、違えば `409 SATEI_MISMATCH`。heartbeat と result は「同じ runId・下準備中・prepLeaseUntil > now」で受ける（延長後の値でよい）
+15. **期限つきの書き込み**：査定係の Drive の要求には、予約の残りより短い期限と中断を付ける。結果が分からなければ、次の回に保存先の SHA-256 照合で回収する。result の 409 を受けたら、依頼箱の今の状態を読み直して、自分の runId が無効と確かめてから控えを消す
+16. **差し戻し理由の印**：KV の印は、読み取った値と今の値が同じときだけ消す（原子的に）。消すのは portal が実際に 4xx を返したときと成功したときだけ（status 0・5xx・設定不足・例外では残す）
