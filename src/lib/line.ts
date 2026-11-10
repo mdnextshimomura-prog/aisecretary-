@@ -391,3 +391,35 @@ export async function deliverReply(
   if (!pushed) console.error("reply を断られ、push でも送れなかった");
   return pushed ? "pushed" : "push-failed";
 }
+
+/**
+ * 個人あての push（B2 査定書の通知・2026-11-11）。X-Line-Retry-Key（UUID）を付けるので、同じキーで送り直しても
+ * LINE は2通目を届けず 409 を返す。返すのは HTTP の状態番号（時間切れ・通信の失敗は null。例外は投げない）。
+ * 本文・宛先はログに出さない。既存の push 関数は変えていない。
+ */
+export async function pushMessagesWithRetryKey(
+  to: string,
+  messages: unknown[],
+  retryKey: string,
+  timeoutMs: number = PUSH_TIMEOUT_MS,
+  fetchImpl: typeof fetch = fetch
+): Promise<number | null> {
+  try {
+    const res = await fetchImpl("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+        "X-Line-Retry-Key": retryKey,
+      },
+      body: JSON.stringify({ to, messages }),
+      signal: AbortSignal.timeout(timeoutMs),
+      cache: "no-store",
+    });
+    if (!res.ok && res.status !== 409) console.error("LINE push（retry key つき）を断られた:", res.status);
+    return res.status;
+  } catch (err) {
+    console.error("LINE push（retry key つき）の結果が分からない:", (err as { name?: string })?.name ?? "Error");
+    return null;
+  }
+}
