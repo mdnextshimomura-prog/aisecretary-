@@ -172,6 +172,28 @@ test("長い題名・担当なし・期日なしでも作れて、JSON が 30KB 
 });
 
 
+test("1枚が大きいとき：枚数を減らして 30KB 未満に収め、減らした分は「残り」に数える", () => {
+  withEnv({ ...ON, TASK_MENU: "1" }, () => {
+    const big = "名".repeat(2000); // 担当名は切り詰められないので1枚が約6KB
+    const card = buildRemindCarousel(
+      Array.from({ length: 10 }, (_, i) => task(i + 1, { assignee: big })),
+    )!;
+    assert.ok(Buffer.byteLength(JSON.stringify(card.contents), "utf8") < 30_000);
+    const bs = bubbles(card);
+    const shown = bs.length - 1;
+    assert.ok(shown >= 1 && shown < 10, `shown=${shown}`);
+    assert.equal(titleOf(bs[shown]), REMIND_REST_TITLE);
+    assert.ok(JSON.stringify(bs[shown]).includes(`残り${10 - shown}件`));
+  });
+});
+
+test("1枚でも 30KB を超えるならカードを作らない", () => {
+  withEnv(ON, () => {
+    const huge = "名".repeat(12000);
+    assert.equal(buildRemindCarousel([task(1, { assignee: huge })]), undefined);
+  });
+});
+
 const asyncTests: Array<[string, () => Promise<void>]> = [];
 function atest(name: string, fn: () => Promise<void>) {
   asyncTests.push([name, fn]);
@@ -207,6 +229,22 @@ atest("送信：0件なら呼ばない", async () => {
     const r = await sendRemindCards("G", [], async () => (called++, true), () => {});
     assert.equal(r, "empty");
     assert.equal(called, 0);
+  });
+});
+
+atest("送信：1枚でも上限を超えるなら送らずに too-large を1行", async () => {
+  await withEnvAsync(ON, async () => {
+    let called = 0;
+    const logs: string[] = [];
+    const r = await sendRemindCards(
+      "G",
+      [task(1, { assignee: "名".repeat(12000) })],
+      async () => (called++, true),
+      (l) => logs.push(l),
+    );
+    assert.equal(r, "too-large");
+    assert.equal(called, 0);
+    assert.deepEqual(logs, ["[remind] cards too-large"]);
   });
 });
 

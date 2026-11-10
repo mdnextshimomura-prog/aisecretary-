@@ -112,12 +112,12 @@ export function buildRemindCarousel(
       contents: { type: "carousel", contents: bubbles },
     };
     if (
-      Buffer.byteLength(JSON.stringify(card.contents), "utf8") <
-        FLEX_JSON_MAX ||
-      count === 1
+      Buffer.byteLength(JSON.stringify(card.contents), "utf8") < FLEX_JSON_MAX
     ) {
       return card;
     }
+    // 1枚でも上限を超える（担当名などが極端に長い）なら、カードは送らない（文字の一覧は届いている）
+    if (count === 1) return undefined;
     count--;
   }
 }
@@ -132,16 +132,22 @@ export async function sendRemindCards(
   tasks: RemindCardTask[],
   push: (to: string, card: FlexMessage) => Promise<boolean>,
   log: (line: string) => void = (l) => console.log(l),
-): Promise<"off" | "empty" | "shown" | "failed"> {
+): Promise<"off" | "empty" | "too-large" | "shown" | "failed"> {
   if (!remindCardsActive()) return "off";
+  if (tasks.length === 0) return "empty";
   const card = buildRemindCarousel(tasks);
-  if (!card) return "empty";
+  if (!card) {
+    log("[remind] cards too-large");
+    return "too-large";
+  }
   let ok = false;
   try {
     ok = await push(to, card);
   } catch {
     ok = false;
   }
-  log(ok ? `[remind] cards shown ${tasks.length}` : "[remind] cards push-failed");
+  log(
+    ok ? `[remind] cards shown ${tasks.length}` : "[remind] cards push-failed",
+  );
   return ok ? "shown" : "failed";
 }
