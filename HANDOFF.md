@@ -137,7 +137,7 @@
 - 下村さんの承認待ち（未実施）：`git push`、deploy、本番 env の追加、`TASK_SATEI` を on にすること。
 
 ### 本番で on にする前に要る設定と確かめ
-- **確かめ（未実施）**：`delIfToken` の Lua（`kv.eval`）は通信0回のテストでしか確かめていない。試験環境の Upstash で通るか確かめる。
+- **確かめ（未実施）**：`delIfToken` の削除条件（token が一致したときだけ消す）は Map の偽物で確認した。Lua（`kv.eval`）の実行と Upstash 実機での確認は未実施。試験環境の Upstash で通るか確かめる。
 - env の追加：`TASK_SATEI=1`、`TASK_SATEI_USER_IDS`（先頭＝下村さん）。値は画面に出さない方法で入れる。
 - 下村さんの userId が `SECRETARY_ALLOWED_USER_IDS`（空なら `TASK_BUTTONS_ADMIN_IDS`）に入っているか。
 - CRM_案件・CRM_物件 の両方を CRM_NOTION_TOKEN の連携に共有しているか。

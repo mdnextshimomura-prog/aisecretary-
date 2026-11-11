@@ -64,7 +64,7 @@ export function parseSateiData(data: string): SateiAction | null {
   return { op: op as SateiDecisionOp, no: Number(no), generation: Number(generation), sha256 };
 }
 
-/** ［差し戻し］のあと、次の1対1の文字を理由として受ける印（値は `{ no }`） */
+/** ［差し戻し］のあと、次の1対1の文字を理由として受ける印（値は `{ no, token }`。token は UUID） */
 export const sateiReasonKey = (userId: string): string => `satei:reason:${userId}`;
 export const SATEI_REASON_TTL = 30 * 60;
 export const SATEI_REASON_MAX = 200;
