@@ -38,6 +38,9 @@ import {
   type DealDeps,
 } from "./deal-card";
 import { dealDeps } from "./deal-card-wire";
+import { parseSateiData } from "./satei-data";
+import { handleSateiPostback, type SateiActionDeps } from "./satei-actions";
+import { sateiActionDeps } from "./satei-wire";
 import type { ListPage } from "./task-menu";
 import {
   candidateCardsActive,
@@ -280,6 +283,8 @@ export interface PostbackIo {
    * register は route.ts が渡す（registerTaskFromText）。省いた部品は本物（KV・名簿）
    */
   candidates?: Partial<CandidateActionDeps>;
+  /** 査定書のボタン（B2。v1|sa|・v1|so|・v1|sr|）。省いた部品は本物（satei-wire.ts） */
+  satei?: Partial<SateiActionDeps>;
 }
 
 /**
@@ -305,7 +310,27 @@ export async function handleTaskPostbackEvent(
     menu: over.menu,
     deal: over.deal,
     candidates: over.candidates,
+    satei: over.satei,
   };
+  // B2 査定書のボタン（v1|sa|・v1|so|・v1|sr|）。TASK_BUTTONS・TASK_MENU とは別のスイッチ（TASK_SATEI）なので、
+  // 「止めています」の判定より前に振り分ける。off・押せる人・二度押しの扱いは satei-actions.ts。
+  // この3つの data は今まで出していないので、ほかのボタンの扱いは変わらない
+  const satei = parseSateiData(data);
+  if (satei) {
+    await handleSateiPostback(
+      satei,
+      { replyToken, webhookEventId: event.webhookEventId, source: event.source },
+      {
+        ...sateiActionDeps(),
+        reserve: io.reserve,
+        complete: io.complete,
+        reply: (token, text) => io.reply(token, text),
+        log: io.log,
+        ...io.satei,
+      },
+    );
+    return;
+  }
   const op = parseButtonData(data)?.op ?? "invalid";
 
   const send = async (
