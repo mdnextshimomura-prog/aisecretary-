@@ -24,12 +24,24 @@ import {
 import type { SateiActionDeps, SateiReasonDeps, SateiReasonKv } from "./satei-actions";
 import type { SateiNotifyDeps } from "./satei-notify";
 
-const crmNotion = new Client({ auth: process.env.CRM_NOTION_TOKEN ?? process.env.NOTION_API_KEY });
+/**
+ * satei 用の CRM の Notion Client。SDK の既定のログ（失敗時に error.message＝ページ ID を含む）を出さないよう、
+ * 何も出さない logger を渡す。fetchImpl はテスト用（通信せずに本物の Client の経路を通すため）
+ */
+export function makeSateiNotion(fetchImpl?: typeof fetch): Client {
+  return new Client({
+    auth: process.env.CRM_NOTION_TOKEN ?? process.env.NOTION_API_KEY,
+    logger: () => undefined,
+    ...(fetchImpl ? { fetch: fetchImpl } : {}),
+  });
+}
+
+const crmNotion = makeSateiNotion();
 const log = (line: string) => console.log(line);
 
-async function retrieve(pageId: string): Promise<Record<string, unknown> | null> {
+async function retrieve(client: Client, pageId: string): Promise<Record<string, unknown> | null> {
   try {
-    return (await crmNotion.pages.retrieve({ page_id: pageId })) as unknown as Record<string, unknown>;
+    return (await client.pages.retrieve({ page_id: pageId })) as unknown as Record<string, unknown>;
   } catch (err) {
     const code = (err as { code?: string }).code;
     if (code === "object_not_found" || code === "validation_error") return null;
@@ -40,12 +52,13 @@ async function retrieve(pageId: string): Promise<Record<string, unknown> | null>
 /** 案件ページと物件の1件目の種別。案件ページが無ければ null。物件が読めない・無ければ kind は null */
 export async function readSateiDealReal(
   dealId: string,
+  client: Client = crmNotion,
 ): Promise<{ deal: SateiDeal; kind: string | null } | null> {
-  const page = await retrieve(dealId);
+  const page = await retrieve(client, dealId);
   if (!page) return null;
   const deal = readSateiDealPage(page);
   const propertyId = deal.propertyIds[0];
-  const prop = propertyId ? await retrieve(propertyId) : null;
+  const prop = propertyId ? await retrieve(client, propertyId) : null;
   const kind = prop && !prop.archived && !prop.in_trash ? readPropertyKind(prop) : null;
   return { deal, kind };
 }
@@ -67,7 +80,7 @@ async function withPortal<T>(run: (o: SateiPortalOpts) => Promise<SateiCall<T>>)
 export function sateiActionDeps(): SateiActionDeps {
   return {
     dealsDbId: process.env.CRM_DEALS_DB_ID || null,
-    readDeal: readSateiDealReal,
+    readDeal: (dealId) => readSateiDealReal(dealId),
     intake: (req) => withPortal((o) => sateiIntake(req, o)),
     decide: (no, req) => withPortal((o) => sateiDecide(no, req, o)),
     kv: defaultDealKv(),
