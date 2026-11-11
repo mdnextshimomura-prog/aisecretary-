@@ -126,6 +126,8 @@ import { statusForConfirmComplete } from "@/lib/task-closed";
 import { bareMentionMenu, menuWordEntry } from "@/lib/task-menu";
 import { dealWordEntry } from "@/lib/deal-card";
 import { recordAfterCreateWithPick } from "@/lib/deal-card-wire";
+import { handleSateiReasonText } from "@/lib/satei-actions";
+import { sateiReasonDeps } from "@/lib/satei-wire";
 import {
   recordAfterCreate,
   recordAssigneeChange,
@@ -837,6 +839,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       await replyDealList(replyToken, source.groupId).catch(() =>
         console.error("[task-menu] reply-failed ld")
       );
+      continue;
+    }
+
+    // B2 査定書の差し戻し理由（2026-11-11）。TASK_SATEI=1・1対1・TASK_SATEI_USER_IDS の人で、
+    // ［差し戻し］から30分以内の印（satei:reason:<userId>）があるときだけ、この1通を理由として依頼箱へ送る。
+    // それ以外は KV も読まずに false が返り、下の今の流れ（メールの下書き・初動確認・番号での完了など）へ進む。
+    if (
+      await handleSateiReasonText(
+        {
+          userId: source.userId,
+          groupId: source.groupId,
+          text: event.message.text,
+          replyToken,
+        },
+        sateiReasonDeps(),
+      )
+    ) {
+      markCommitted();
       continue;
     }
 
