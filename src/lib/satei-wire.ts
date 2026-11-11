@@ -23,6 +23,7 @@ import {
 } from "./satei-portal";
 import type { SateiActionDeps, SateiReasonDeps, SateiReasonKv } from "./satei-actions";
 import type { SateiNotifyDeps } from "./satei-notify";
+import type { FolderCheckDeps } from "./satei-folder-check";
 
 /**
  * satei 用の CRM の Notion Client。SDK の既定のログ（失敗時に error.message＝ページ ID を含む）を出さないよう、
@@ -49,14 +50,22 @@ async function retrieve(client: Client, pageId: string): Promise<Record<string, 
   }
 }
 
+/** 案件ページだけ（物件は読まない）。見つからなければ null。読めなければ例外 */
+export async function readSateiDealPageReal(
+  dealId: string,
+  client: Client = crmNotion,
+): Promise<SateiDeal | null> {
+  const page = await retrieve(client, dealId);
+  return page ? readSateiDealPage(page) : null;
+}
+
 /** 案件ページと物件の1件目の種別。案件ページが無ければ null。物件が読めない・無ければ kind は null */
 export async function readSateiDealReal(
   dealId: string,
   client: Client = crmNotion,
 ): Promise<{ deal: SateiDeal; kind: string | null } | null> {
-  const page = await retrieve(client, dealId);
-  if (!page) return null;
-  const deal = readSateiDealPage(page);
+  const deal = await readSateiDealPageReal(dealId, client);
+  if (!deal) return null;
   const propertyId = deal.propertyIds[0];
   const prop = propertyId ? await retrieve(client, propertyId) : null;
   const kind = prop && !prop.archived && !prop.in_trash ? readPropertyKind(prop) : null;
@@ -123,4 +132,8 @@ export function sateiNotifyDeps(): SateiNotifyDeps {
     push: (to, messages, retryKey) => pushMessagesWithRetryKey(to, messages, retryKey),
     log,
   };
+}
+
+export function sateiFolderCheckDeps(): FolderCheckDeps {
+  return { env: process.env, readDealPage: (dealId) => readSateiDealPageReal(dealId), log };
 }

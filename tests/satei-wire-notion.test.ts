@@ -3,7 +3,7 @@
  * Notion SDK の既定のログは失敗時に error.message（ページ ID を含む）を出すので、satei 用の Client は
  * 何も出さないこと、結果が想定どおりであることを見る。
  */
-import { makeSateiNotion, readSateiDealReal } from "../src/lib/satei-wire";
+import { makeSateiNotion, readSateiDealPageReal, readSateiDealReal } from "../src/lib/satei-wire";
 
 let fail = 0;
 const ok = (name: string, cond: boolean, d = "") => {
@@ -163,6 +163,35 @@ const leaked = (id: string) => {
     }
     ok("500 は例外を投げる", threw);
     ok("500 のとき console に ID が出ない", !leaked(DEAL), printed.join(" | "));
+  }
+
+  // 4) 案件ページだけを読む：物件は取りに行かない／404 → null・500 → 例外。ID は出ない
+  {
+    const urls: string[] = [];
+    const client = makeSateiNotion((async (url: string | URL | Request) => {
+      urls.push(String(url));
+      return json(200, dealPage);
+    }) as typeof fetch);
+    const d = await readSateiDealPageReal(DEAL, client);
+    ok("案件ページだけ読む（物件は取りに行かない）", !!d && d.dealNo === 42 && urls.length === 1, urls.join(","));
+    const c404 = makeSateiNotion((async () => notFound(DEAL)) as typeof fetch);
+    const c500 = makeSateiNotion((async () =>
+      json(500, { object: "error", status: 500, code: "internal_server_error", message: `failed for ${DEAL}` })) as typeof fetch);
+    printed.length = 0;
+    capture();
+    let n: unknown = "unset";
+    let threw = false;
+    try {
+      n = await readSateiDealPageReal(DEAL, c404);
+      await readSateiDealPageReal(DEAL, c500);
+    } catch {
+      threw = true;
+    } finally {
+      release();
+    }
+    ok("案件ページ単独：404 → null", n === null);
+    ok("案件ページ単独：500 → 例外", threw);
+    ok("案件ページ単独：console に ID が出ない", !leaked(DEAL), printed.join(" | "));
   }
 
   ok("外部への通信は0回", outside === 0, String(outside));
