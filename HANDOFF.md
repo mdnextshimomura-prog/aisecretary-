@@ -122,3 +122,33 @@
   同時保存で片方が消え、引き渡しなら再送されなくなる
 - **イベントは予約方式で冪等化。** 単なる処理済みフラグに戻さないこと
   （書けなかったときに黙って再実行される／途中で落ちたときに永久に失われる）
+
+---
+
+## B2 査定書の下書き（aisecretary 側・2026-11-11）
+
+### どこまで
+- aisecretary 側の B2 を `feat/b2-satei`（worktree `.worktrees/b2-satei`）に実装済み（Task 2〜12）。**未 push・未 deploy**。Codex レビュー可。
+- 設計 `docs/superpowers/specs/2026-11-11-b2-satei-draft-design.md`、受け渡しの正本 `…-b2-satei-contract.md`（第6節 改訂 v2 が最優先）。運用の要点は CLAUDE.md の「B2・査定書の下書き」の節。
+- Task 1 の Notion の確認結果：CRM_案件・CRM_物件 とも CRM_NOTION_TOKEN で読めた（2026-11-11）。parent=database_id、案件名=title・ID=unique_id・Driveフォルダ=url・フォルダ状態=select・物件=relation、CRM_物件 の 種別=select。
+
+### 何待ち
+- reins-report 側（契約 第2節の intake・decide・reason）と line-secretary の査定係（`/api/satei/notify`・`folder-check` を呼ぶ側）。
+- 下村さんの承認待ち（未実施）：`git push`、deploy、本番 env の追加、`TASK_SATEI` を on にすること。
+
+### 本番で on にする前に要る設定と確かめ
+- **確かめ（未実施）**：`delIfToken` の Lua（`kv.eval`）は通信0回のテストでしか確かめていない。試験環境の Upstash で通るか確かめる。
+- env の追加：`TASK_SATEI=1`、`TASK_SATEI_USER_IDS`（先頭＝下村さん）。値は画面に出さない方法で入れる。
+- 下村さんの userId が `SECRETARY_ALLOWED_USER_IDS`（空なら `TASK_BUTTONS_ADMIN_IDS`）に入っているか。
+- CRM_案件・CRM_物件 の両方を CRM_NOTION_TOKEN の連携に共有しているか。
+- 秘書の LINE と下村さんが友だちであること。
+- PORTAL_BASE_URL・JOB_API_TOKEN（帯替えと同じ。32字以上）。
+
+### 次の一手
+下村さんの承認後に env を入れて deploy → 試験用の案件で通しの試験（設計 第11節）。
+
+### 注意（B2）
+- satei 用の Notion Client は `makeSateiNotion`（SDK のログを出さない logger）。ID をログに出さないため、素の `new Client` に戻さない。
+- off のとき既存の動きは1バイトも変えない。postback の satei 振り分けは TASK_BUTTONS の「止めています」判定より前。
+- 理由の印は成功してから消す（通信失敗は残す・はっきり断られたら消す）。
+- 経緯の追記予定の文面は side-session-notes の `b2-satei-aisecretary-vault-draft.md`（vault 本体にはまだ書いていない）。
