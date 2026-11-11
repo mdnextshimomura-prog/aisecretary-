@@ -259,9 +259,51 @@ const quiet = (logs: string[]) => !logs.join("\n").includes(SHIMO) && !logs.join
     ok("sr：理由を聞く返事", m.r.replies[0] === T.msgSateiRejectAsk(12));
   }
   {
-    const m = mk({ kv: false });
+    const m = mk({ kv: false, decide: { kind: "ok", value: { status: "差し戻し" } } });
     await handleSateiPostback(SR, ev(), m.deps);
     ok("sr：KV が無い → 差し戻しだけ伝える", m.r.replies[0] === T.msgSateiRejected(12));
+  }
+  // 古い［差し戻し］の押し直し（新しい webhookEventId）：portal は同じ人・同じ版なら今の状態を返す
+  {
+    const m = mk({ decide: { kind: "ok", value: { status: "取消" } } });
+    await handleSateiPostback(SR, { ...ev(), webhookEventId: "01HEVENTNEW" }, m.deps);
+    ok(
+      "sr：portal が「取消」→ 印を置かない・古い下書きの文面",
+      m.r.decides.length === 1 && m.r.kvSets.length === 0 && m.r.replies.length === 1 && m.r.replies[0] === T.msgSateiStale(12),
+    );
+    ok("sr：「取消」は済み（完了印あり）・符号 closed", m.r.completed.includes("pb:01HEVENTNEW") && m.r.logs.some((l) => l.includes("closed")));
+  }
+  {
+    // 別案件の差し戻しの印が既にあるとき、閉じた依頼の押し直しで上書きしない
+    const other = { no: 99, token: "tok-other" };
+    const store = new Map<string, unknown>([[sateiReasonKey(SHIMO), other]]);
+    const m = mk({ decide: { kind: "ok", value: { status: "取消" } } });
+    m.deps.kv = {
+      set: async (key, value) => {
+        store.set(key, value);
+      },
+    };
+    await handleSateiPostback(SR, { ...ev(), webhookEventId: "01HEVENTNEW2" }, m.deps);
+    ok(
+      "sr：「取消」の押し直しで別案件の印が残る",
+      JSON.stringify(store.get(sateiReasonKey(SHIMO))) === JSON.stringify(other) && store.size === 1 && m.r.replies[0] === T.msgSateiStale(12),
+    );
+  }
+  {
+    const m = mk({ decide: { kind: "ok", value: { status: "差し戻し" } } });
+    await handleSateiPostback(SR, { ...ev(), webhookEventId: "01HEVENTNEW3" }, m.deps);
+    ok(
+      "sr：portal が「差し戻し」（理由待ちのまま）→ 今までどおり印を置いて理由を聞く",
+      m.r.kvSets.length === 1 && m.r.kvSets[0]?.key === sateiReasonKey(SHIMO) && m.r.replies[0] === T.msgSateiRejectAsk(12),
+    );
+  }
+  for (const status of ["完成", "確認待ち", ""]) {
+    const m = mk({ decide: { kind: "ok", value: { status } } });
+    await handleSateiPostback(SR, ev(), m.deps);
+    ok(
+      `sr：想定外の status（${JSON.stringify(status)}）→ 印を置かない・差し戻しだけ伝える`,
+      m.r.kvSets.length === 0 && m.r.replies[0] === T.msgSateiRejected(12) && m.r.completed.length === 1,
+    );
   }
   {
     const m = mk({ decide: { kind: "rejected", status: 409, code: "SATEI_MISMATCH" } });

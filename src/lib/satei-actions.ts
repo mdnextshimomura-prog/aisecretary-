@@ -146,6 +146,10 @@ async function decideSatei(
   }
   if (r.kind === "unknown") return { text: MSG_SATEI_UNKNOWN, code: "unknown", settled: false };
   if (a.op === "so") return { text: msgSateiOk(a.no), code: "ok", settled: true };
+  // 同じ人・同じ版の二度押しに、portal は今の状態を返す。もう取消なら閉じた依頼なので印に触らない
+  // （置き直すと、次の無関係な1対1の発言を理由として送り、別案件の印も上書きするため）
+  if (r.value.status === "取消") return { text: msgSateiStale(a.no), code: "closed", settled: true };
+  if (r.value.status !== "差し戻し") return { text: msgSateiRejected(a.no), code: "rejected-unexpected", settled: true };
   // 差し戻し：次の1対1の文字を理由として受ける印（30分）。置けなければ理由は聞かない
   if (deps.kv) {
     try {
