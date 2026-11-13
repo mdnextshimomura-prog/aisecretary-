@@ -400,13 +400,41 @@ async function newAdd(c: Candidate, nowMs: number): Promise<"added" | "exists" |
     { ...c, groupId: c.groupId ?? (mainGroup() || null) },
     { ex: ttl, nx: true },
   );
-  if (r !== "OK") return "exists";
-  await k.sadd(INDEX_KEY, memberOf(c.id));
-  await k.expire(INDEX_KEY, TTL_SECONDS);
-  // 多すぎるときは古いものから落とす（全体で 30 件まで）
-  const all = await allItems(k, nowMs);
-  for (const old of all.slice(0, Math.max(0, all.length - MAX_ITEMS))) {
-    await removeById(k, old.id);
+  if (r !== "OK") {
+    // 同じ発言の中身はもうある。前の処理が目次に足す前に落ちていたら一覧に出ないので、目次を直してから「既にある」
+    // （sadd は同じものを何度足しても1つ。直せなくても「既にある」は変えない＝中身はある）
+    try {
+      await k.sadd(INDEX_KEY, memberOf(c.id));
+      await k.expire(INDEX_KEY, TTL_SECONDS);
+    } catch {
+      console.log("[task-candidate] index-repair-failed");
+    }
+    return "exists";
+  }
+  // 結果は実際に残った状態で返す（2026-11-13）：
+  // 目次に足せなかった＝一覧に出ない → 中身を消して「失敗」（消せなくても一覧に出ないので「失敗」。次の同じ発言で目次を直す）
+  try {
+    await k.sadd(INDEX_KEY, memberOf(c.id));
+  } catch {
+    await k.del(`${ITEM_PREFIX}${c.id}`).catch(() =>
+      console.log("[task-candidate] add-rollback-failed")
+    );
+    return "failed";
+  }
+  // ここから先は一覧に出る＝控えた。目次の期限・古いものの整理が失敗しても「控えた」のまま（警告の符号だけ）
+  try {
+    await k.expire(INDEX_KEY, TTL_SECONDS);
+  } catch {
+    console.log("[task-candidate] index-expire-failed");
+  }
+  try {
+    // 多すぎるときは古いものから落とす（全体で 30 件まで）
+    const all = await allItems(k, nowMs);
+    for (const old of all.slice(0, Math.max(0, all.length - MAX_ITEMS))) {
+      await removeById(k, old.id);
+    }
+  } catch {
+    console.log("[task-candidate] trim-failed");
   }
   return "added";
 }

@@ -244,6 +244,101 @@ const repliesWith = (msg: string) => lineReplies.filter((b) => b.includes(JSON.s
     ok("登録：受け付けなかった返事は出さない", repliesWith(MSG_INTAKE_NOT_REGISTERED) === 0 && lineReplies.length === 1, JSON.stringify(lineReplies).slice(0, 300));
   }
 
+  // ── 9) メニュー on（新しい置き場）で、候補の保存が途中で失敗したとき ──
+  //    結果は実際に残った状態で決める：一覧に出るなら「控えた」、出ないなら「失敗」（受付拒否を返す）
+  process.env.TASK_MENU = "1";
+  process.env.TASK_BUTTONS = "1";
+  process.env.TASK_FOLLOWUP = "1";
+  const faults = { sadd: false, expire: false, del: false };
+  const kvMap = new Map<string, unknown>();
+  const sets = () => kvMap as Map<string, unknown>;
+  const fkv = {
+    get: async (key: string) => (sets().get(key) ?? null) as never,
+    mget: async (keys: string[]) => keys.map((k) => (sets().get(k) ?? null)) as never,
+    set: async (key: string, value: unknown, opts: { ex: number; nx?: boolean }) => {
+      if (opts.nx && sets().has(key)) return null;
+      sets().set(key, JSON.parse(JSON.stringify(value)));
+      return "OK" as const;
+    },
+    del: async (key: string) => {
+      if (faults.del) throw new Error("del down");
+      sets().delete(key);
+    },
+    sadd: async (key: string, member: string) => {
+      if (faults.sadd) throw new Error("sadd down");
+      const cur = new Set((sets().get(key) as string[] | undefined) ?? []);
+      cur.add(member);
+      sets().set(key, Array.from(cur));
+    },
+    srem: async (key: string, member: string) => {
+      sets().set(key, ((sets().get(key) as string[] | undefined) ?? []).filter((m) => m !== member));
+    },
+    smembers: async (key: string) => [...(((sets().get(key) as string[] | undefined) ?? []) as string[])],
+    expire: async () => {
+      if (faults.expire) throw new Error("expire down");
+    },
+  };
+  store._setKvForTest(fkv as never);
+  parseAnswer = task(true, 0.6);
+  const listedIds = async () => (await store.listCandidates(Date.now(), G)).map((c) => c.id);
+
+  // 9a) 中身と目次は書けたが、目次の期限（expire）だけ失敗 → 一覧に出る＝控えた。受付拒否は返さない
+  reset();
+  kvMap.clear();
+  faults.expire = true;
+  {
+    const ev = botMention("@AI秘書 来週あたり売主さんに連絡");
+    ev.message.id = "7700000000001";
+    await post(route, [ev]);
+    ok("メニュー on・expire だけ失敗：candidate-saved", JSON.stringify(intakeLogs) === JSON.stringify(["[task-intake] candidate-saved"]), JSON.stringify(intakeLogs));
+    ok("メニュー on・expire だけ失敗：受付拒否を返さない", repliesWith(MSG_INTAKE_NOT_REGISTERED) === 0, JSON.stringify(lineReplies).slice(0, 200));
+    ok("メニュー on・expire だけ失敗：候補は一覧に出る", (await listedIds()).includes("7700000000001"));
+  }
+  faults.expire = false;
+
+  // 9b) 目次に足せない（sadd 失敗・中身は消せた） → 失敗。受付拒否を1回・一覧に出ない・中身も残さない
+  reset();
+  kvMap.clear();
+  faults.sadd = true;
+  {
+    const ev = botMention("@AI秘書 来週あたり売主さんに連絡");
+    ev.message.id = "7700000000002";
+    await post(route, [ev]);
+    faults.sadd = false;
+    ok("メニュー on・目次に足せない：candidate-save-failed", JSON.stringify(intakeLogs) === JSON.stringify(["[task-intake] candidate-save-failed"]), JSON.stringify(intakeLogs));
+    ok("メニュー on・目次に足せない：受付拒否を1回", repliesWith(MSG_INTAKE_NOT_REGISTERED) === 1 && lineReplies.length === 1, JSON.stringify(lineReplies).slice(0, 200));
+    ok("メニュー on・目次に足せない：一覧に出ない・中身も消した", !(await listedIds()).includes("7700000000002") && !kvMap.has("taskcand:c:7700000000002"));
+  }
+
+  // 9c) 目次に足せず、中身も消せなかった → 失敗（一覧に出ない）。そのあと同じ発言が届き直したら（再送・引き継ぎ）
+  //     目次を直して「既にある」：一覧に出て、受付拒否は返さない
+  reset();
+  kvMap.clear();
+  faults.sadd = true;
+  faults.del = true;
+  {
+    const ev = botMention("@AI秘書 来週あたり売主さんに連絡");
+    ev.message.id = "7700000000003";
+    await post(route, [ev]);
+    faults.sadd = false;
+    faults.del = false;
+    ok("メニュー on・目次も消すのも失敗：candidate-save-failed・受付拒否1回", JSON.stringify(intakeLogs) === JSON.stringify(["[task-intake] candidate-save-failed"]) && repliesWith(MSG_INTAKE_NOT_REGISTERED) === 1, JSON.stringify(intakeLogs));
+    ok("メニュー on・目次も消すのも失敗：一覧には出ない（中身だけ残る）", !(await listedIds()).includes("7700000000003") && kvMap.has("taskcand:c:7700000000003"));
+  }
+  reset();
+  {
+    // 同じ発言の届き直し：前の処理のイベント完了印が残らなかった（予約の猶予切れ・引き継ぎ）形を、予約を外して作る
+    const ev = botMention("@AI秘書 来週あたり売主さんに連絡");
+    ev.message.id = "7700000000003";
+    const session = await import("../src/lib/email/session");
+    await session.releaseEvent("7700000000003");
+    await post(route, [{ ...ev, replyToken: "rt-redeliver" }]);
+    ok("届き直し：candidate-exists・受付拒否を返さない", JSON.stringify(intakeLogs) === JSON.stringify(["[task-intake] candidate-exists"]) && repliesWith(MSG_INTAKE_NOT_REGISTERED) === 0, JSON.stringify(intakeLogs) + JSON.stringify(lineReplies).slice(0, 200));
+    ok("届き直し：目次を直して一覧に出る", (await listedIds()).includes("7700000000003"));
+  }
+  store._setKvForTest(null);
+  for (const k of ["TASK_MENU", "TASK_BUTTONS", "TASK_FOLLOWUP"]) delete process.env[k];
+
   ok("外へのソケットは1回も開かない", socketCalls.length === 0, JSON.stringify(socketCalls));
   ok("ログに本文・userId・groupId を出さない", intakeLogs.every((l) => !l.includes(SENDER) && !l.includes(G)));
 
