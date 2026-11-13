@@ -55,7 +55,8 @@ src/app/api/webhook/route.ts   … 署名検証 → メンション判定 → �
 ## 重要な制約・前提（壊さないこと）
 - **Notionのプロパティ名は日本語固定**。`notion.ts` の `名前`/`種別` 等を変えるとNotion側スキーマと不整合になる。
 - **種別は5択**：売買 / 賃貸 / 管理 / 買取再販 / その他。**緊急度は3択**：今日中 / 今週中 / 来週以降。Notionのセレクト選択肢と一致させること。
-- **AI秘書へのメンションがタスク受付の入口**（2026-09-04〜）。メンションの無い発言は解析しない。`confidence >= TASK_CONFIDENCE_THRESHOLD`（既定0.7、env調整可）のときだけNotion登録する。雑談・相槌・報告は黙ってスキップ。
+- **AI秘書へのメンションがタスク受付の入口**（2026-09-04〜）。メンションの無い発言は解析しない。`confidence >= TASK_CONFIDENCE_THRESHOLD`（既定0.7、env調整可）のときだけNotion登録する。雑談・相槌・報告は黙ってスキップ（メンションの無い発言には返事をしない）。
+  - （2026-11-13）@AI秘書 あてで登録しなかったとき（タスクでない・確信度 0.5 未満・0.5〜0.7 で候補に控えなかった）は「タスクとしては受け付けませんでした…」を返す（候補に控えたときは今までどおり）。グループで「@秘書」を手打ちしただけ（メンションの印が無い）のときは一覧から選ぶよう返す。ログは `[task-intake] mention-none|typed-mention|not-task|low-conf|candidate-skip|candidate-saved|registered` の符号だけ（本文・ID・名前は出さない）。`src/lib/task-intake.ts`・`tests/task-intake-outcome.test.ts`。
 - **担当者**：メンションがあればそのテキストから名前を取得して上書き（任意）。LINE APIは使わない。
 - **永続化の主軸はNotion**。SQLite/Google Calendarは過去に主軸から外した（remind.tsのみSQLite参照）。
 

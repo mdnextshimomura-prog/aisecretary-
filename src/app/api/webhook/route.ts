@@ -49,8 +49,13 @@ import { canonicalAssignee } from "@/lib/members";
 import { applyAutomaticAssignment } from "@/lib/assignment";
 import {
   emailIntakeAllowed,
+  finishNoBotMention,
+  finishUnregisteredIntake,
+  hasTypedBotMention,
   isContextlessRequest,
+  logTaskIntake,
   taskMentionState,
+  unregisteredReason,
 } from "@/lib/task-intake";
 import { loadRecentAttachments, consumeRecentAttachments } from "@/lib/media";
 import {
@@ -1497,6 +1502,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const mentioned = (event.message.mention?.mentionees ?? []).filter(
         (m) => m.type === "user" && m.userId && m.userId !== BOT_USER_ID
       );
+      // 候補のその場の返事で replyToken を使ったか（使ったら手打ちの「@秘書」への案内は返さない）
+      let replyTokenUsed = false;
       if (
         candidatesEnabled() &&
         shouldCapture({
@@ -1543,6 +1550,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             // 新しく控えたときだけ（同じ発言の2度目は出さない）。送れなくても候補は残り、17時に聞く
             // 発言から50秒を過ぎそうなら送らない（replyToken の期限）。結果のログは関数の中で1回だけ出す
             if (added && instantCandidateActive()) {
+              replyTokenUsed = true;
               await replyInstantCandidateCard(replyToken, cand, event.timestamp);
             }
           }
@@ -1551,6 +1559,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           console.error("候補の控えに失敗（何もしない）:", err);
         }
       }
+      // 理由の符号だけログ。グループで「@秘書」を手打ちしただけのときは、一覧から選ぶよう返す
+      await finishNoBotMention({
+        isGroup: Boolean(source.groupId),
+        typedMention: hasTypedBotMention(
+          event.message.text,
+          event.message.mention?.mentionees
+        ),
+        replyTokenUsed,
+        replyToken,
+        send: sendLineMessage,
+      });
       continue;
     }
 
@@ -1694,6 +1713,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!parsed.isTask || parsed.confidence < TASK_CONFIDENCE_THRESHOLD) {
       // @AI秘書 あての依頼で、確信度が足りず登録しないもの。今までは黙って捨てていた。
       // 依頼らしさが残るものは候補に控えて、あとで人に決めてもらう。
+      let candidateSaved = false;
       if (
         candidatesEnabled() &&
         parsed.isTask &&
@@ -1723,6 +1743,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           console.error("候補の控えに失敗（何もしない）:", err);
           return false;
         });
+        candidateSaved = added;
         // TASK_MENU on：その場の返事で候補カード1枚（off なら今までどおり返事はしない）
         if (added && candidateCardsActive()) {
           await replyCandidateCard(replyToken, cand).catch(() =>
@@ -1730,6 +1751,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           );
         }
       }
+      // 理由の符号だけログ。候補に控えなかったときは、受け付けなかったことと送り直し方を返す
+      const reason = unregisteredReason(parsed, CANDIDATE_MIN_CONFIDENCE);
+      await finishUnregisteredIntake({
+        code:
+          reason === "candidate-range"
+            ? candidateSaved
+              ? "candidate-saved"
+              : "candidate-skip"
+            : reason,
+        replyToken,
+        send: sendLineMessage,
+      });
       continue;
     }
 
@@ -1843,6 +1876,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 登録済みを確定させる。以後の再送はここで止まり、二重登録にならない。
       await completeMessage(event.message.id, pageId).catch(() => undefined);
       markCommitted();
+      logTaskIntake("registered");
       // 誰が頼んだか・どこから来たか・どの案件か（スイッチが off なら何もしない。失敗しても止めない）
       // ［タスクを足す］の印があれば案件を「確定」で入れて印を消す（B1 Task 3。TASK_MENU off なら今と同じ）
       await recordAfterCreateWithPick(pageId, {
