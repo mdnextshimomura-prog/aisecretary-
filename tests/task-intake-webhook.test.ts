@@ -336,6 +336,33 @@ const repliesWith = (msg: string) => lineReplies.filter((b) => b.includes(JSON.s
     ok("届き直し：candidate-exists・受付拒否を返さない", JSON.stringify(intakeLogs) === JSON.stringify(["[task-intake] candidate-exists"]) && repliesWith(MSG_INTAKE_NOT_REGISTERED) === 0, JSON.stringify(intakeLogs) + JSON.stringify(lineReplies).slice(0, 200));
     ok("届き直し：目次を直して一覧に出る", (await listedIds()).includes("7700000000003"));
   }
+  // 9d) 中身だけ残っていて、届き直しでも目次を直せない（sadd がまだ失敗） → 失敗。受付拒否を1回・一覧に出ない
+  reset();
+  kvMap.clear();
+  kvMap.set("taskcand:c:7700000000004", { id: "7700000000004", text: "t", title: "t", assignee: null, assigneeUserId: null, senderId: SENDER, createdAt: Date.now(), groupId: G });
+  faults.sadd = true;
+  {
+    const ev = botMention("@AI秘書 来週あたり売主さんに連絡");
+    ev.message.id = "7700000000004";
+    await post(route, [ev]);
+    faults.sadd = false;
+    ok("届き直しで目次を直せない：candidate-save-failed", JSON.stringify(intakeLogs) === JSON.stringify(["[task-intake] candidate-save-failed"]), JSON.stringify(intakeLogs));
+    ok("届き直しで目次を直せない：受付拒否を1回", repliesWith(MSG_INTAKE_NOT_REGISTERED) === 1 && lineReplies.length === 1, JSON.stringify(lineReplies).slice(0, 200));
+    ok("届き直しで目次を直せない：一覧に出ない", !(await listedIds()).includes("7700000000004"));
+  }
+  // 9e) 届き直しで目次は直せたが、期限の設定だけ失敗 → 既にある。受付拒否は返さない・一覧に出る
+  reset();
+  kvMap.clear();
+  kvMap.set("taskcand:c:7700000000005", { id: "7700000000005", text: "t", title: "t", assignee: null, assigneeUserId: null, senderId: SENDER, createdAt: Date.now(), groupId: G });
+  faults.expire = true;
+  {
+    const ev = botMention("@AI秘書 来週あたり売主さんに連絡");
+    ev.message.id = "7700000000005";
+    await post(route, [ev]);
+    faults.expire = false;
+    ok("届き直し・expire だけ失敗：candidate-exists・受付拒否を返さない", JSON.stringify(intakeLogs) === JSON.stringify(["[task-intake] candidate-exists"]) && repliesWith(MSG_INTAKE_NOT_REGISTERED) === 0, JSON.stringify(intakeLogs));
+    ok("届き直し・expire だけ失敗：一覧に出る", (await listedIds()).includes("7700000000005"));
+  }
   store._setKvForTest(null);
   for (const k of ["TASK_MENU", "TASK_BUTTONS", "TASK_FOLLOWUP"]) delete process.env[k];
 

@@ -402,12 +402,18 @@ async function newAdd(c: Candidate, nowMs: number): Promise<"added" | "exists" |
   );
   if (r !== "OK") {
     // 同じ発言の中身はもうある。前の処理が目次に足す前に落ちていたら一覧に出ないので、目次を直してから「既にある」
-    // （sadd は同じものを何度足しても1つ。直せなくても「既にある」は変えない＝中身はある）
+    // （sadd は同じものを何度足しても1つ）。目次に入れられなかったら一覧に出ない＝「失敗」（受付拒否を返す）。
+    // 目次に入って期限の設定だけ失敗したなら「既にある」
     try {
       await k.sadd(INDEX_KEY, memberOf(c.id));
-      await k.expire(INDEX_KEY, TTL_SECONDS);
     } catch {
       console.log("[task-candidate] index-repair-failed");
+      return "failed";
+    }
+    try {
+      await k.expire(INDEX_KEY, TTL_SECONDS);
+    } catch {
+      console.log("[task-candidate] index-expire-failed");
     }
     return "exists";
   }
