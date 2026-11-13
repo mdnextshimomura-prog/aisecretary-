@@ -66,6 +66,8 @@ export type TaskIntakeCode =
   | "low-conf" // タスクらしいが確信度が候補の下限（0.5）未満
   | "candidate-skip" // 確信度は候補の範囲だが、候補に控えなかった（スイッチ off・対象外など）
   | "candidate-saved" // 候補に控えた（今までどおり。返事は候補の仕組みに任せる）
+  | "candidate-exists" // 同じ発言の候補がもう控えてある（再送・再処理。返事はしない）
+  | "candidate-save-failed" // 候補に控えようとして失敗した（受け付けなかったことを返す）
   | "registered"; // Notion に登録した
 
 export const MSG_INTAKE_NOT_REGISTERED =
@@ -93,10 +95,29 @@ export function unregisteredReason(
 
 /**
  * 本文に「@秘書」「@AI秘書」を手で打っただけで、メンションの印（mentionees）が付いていないか。
- * 本物のメンションの範囲（index〜index+length）に重なる「@…秘書」は数えない
- * （ボットの userId の設定違いで認識できなかった本物のメンションを、手打ちと取り違えない）。
- * 「@秘書課」のように漢字が続くものは別の言葉として数えない。
+ * 誤って拾うとふつうの会話に返事をしてしまうので、狭く決める：
+ * - 「@」「＠」の前は、行頭・空白・区切りの記号（、。！？（）など）だけ（`office@秘書.jp` のようなメールの形を拾わない）
+ * - 名前は「秘書」か「AI秘書」（全角の ＡＩ も）だけで、後ろは行末・空白・区切りの記号だけ
+ *   （`@秘書bot`・`@秘書2`・`@秘書課`・`@秘書.example.jp`・`@秘書が` は拾わない）
+ * - 「」『』“”"" の引用の中は拾わない（`「@秘書」と入力してください` のような説明文）
+ * - 本物のメンションの範囲（index〜index+length）に重なるものは数えない
+ *   （ボットの userId の設定違いで認識できなかった本物のメンションを、手打ちと取り違えない）
  */
+const TYPED_BEFORE_OK = /[\s\u3000、。，,！!？?（）()・:：]/;
+const TYPED_AFTER_OK = /[\s\u3000、。，,！!？?（）()・:：]/;
+const TYPED_NAMES = ["AI秘書", "ＡＩ秘書", "Ai秘書", "ai秘書", "秘書"];
+
+function insideQuote(t: string, at: number): boolean {
+  const before = t.slice(0, at);
+  const count = (ch: string) => before.split(ch).length - 1;
+  if (count("「") > count("」")) return true;
+  if (count("『") > count("』")) return true;
+  if (count("“") > count("”")) return true;
+  if (count('"') % 2 === 1) return true;
+  if (count("＂") % 2 === 1) return true;
+  return false;
+}
+
 export function hasTypedBotMention(
   rawText: string | undefined,
   mentionees: MentioneeLike[] | undefined
@@ -105,12 +126,16 @@ export function hasTypedBotMention(
   const ranges = (mentionees ?? [])
     .filter((m) => typeof m.index === "number" && typeof m.length === "number")
     .map((m) => [m.index as number, (m.index as number) + (m.length as number)] as const);
-  const re = /[@＠](?:[AaＡａ][IiＩｉ])?秘書(?![\u3400-\u4DBF\u4E00-\u9FFF])/g;
-  let hit: RegExpExecArray | null;
-  while ((hit = re.exec(t)) !== null) {
-    const at = hit.index;
-    const end = at + hit[0].length;
-    if (!ranges.some(([s, e]) => at < e && end > s)) return true;
+  for (let at = 0; at < t.length; at++) {
+    if (t[at] !== "@" && t[at] !== "＠") continue;
+    if (at > 0 && !TYPED_BEFORE_OK.test(t[at - 1])) continue;
+    const name = TYPED_NAMES.find((n) => t.startsWith(n, at + 1));
+    if (!name) continue;
+    const end = at + 1 + name.length;
+    if (end < t.length && !TYPED_AFTER_OK.test(t[end])) continue;
+    if (insideQuote(t, at)) continue;
+    if (ranges.some(([s, e]) => at < e && end > s)) continue;
+    return true;
   }
   return false;
 }
@@ -149,16 +174,24 @@ export async function finishNoBotMention(o: {
 
 /**
  * @秘書 あての発言を登録しなかったときの後始末（確信度がしきい値に届かなかった枝の最後）。
- * 候補に控えたときは今までどおり（返事は候補の仕組みに任せる）。それ以外は受け付けなかったことを返す。
+ * 候補に控えたときは今までどおり（返事は候補の仕組みに任せる）。同じ発言の候補がもう控えてあるとき
+ * （再送・再処理）は、前の処理で扱い済みなので返事をしない。それ以外（控えなかった・控えるのに失敗した）は
+ * 受け付けなかったことを返す（失敗を黙ると、控えたつもりで誰も気づかないまま依頼が消えるため返す側に倒す）。
  */
 export async function finishUnregisteredIntake(o: {
-  code: "not-task" | "low-conf" | "candidate-skip" | "candidate-saved";
+  code:
+    | "not-task"
+    | "low-conf"
+    | "candidate-skip"
+    | "candidate-saved"
+    | "candidate-exists"
+    | "candidate-save-failed";
   replyToken: string;
   send: Send;
   log?: (line: string) => void;
 }): Promise<void> {
   const log = o.log ?? ((l: string) => console.log(l));
   logTaskIntake(o.code, log);
-  if (o.code === "candidate-saved") return;
+  if (o.code === "candidate-saved" || o.code === "candidate-exists") return;
   await safeReply(o.send, o.replyToken, MSG_INTAKE_NOT_REGISTERED, log);
 }

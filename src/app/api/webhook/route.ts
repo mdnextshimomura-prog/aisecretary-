@@ -149,6 +149,7 @@ import {
 } from "@/lib/task-candidate";
 import {
   addCandidate,
+  addCandidateResult,
   numberCandidates,
   peekCandidate,
   removeCandidate,
@@ -1713,7 +1714,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (!parsed.isTask || parsed.confidence < TASK_CONFIDENCE_THRESHOLD) {
       // @AI秘書 あての依頼で、確信度が足りず登録しないもの。今までは黙って捨てていた。
       // 依頼らしさが残るものは候補に控えて、あとで人に決めてもらう。
-      let candidateSaved = false;
+      // 候補に控えた結果（控えに行かなかったら null）
+      let candidateResult: "added" | "exists" | "failed" | null = null;
       if (
         candidatesEnabled() &&
         parsed.isTask &&
@@ -1739,11 +1741,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             .filter((m) => m.type === "user" && m.userId && m.userId !== BOT_USER_ID)
             .map((m) => m.userId as string),
         };
-        const added = await addCandidate(cand).catch((err) => {
-          console.error("候補の控えに失敗（何もしない）:", err);
-          return false;
-        });
-        candidateSaved = added;
+        candidateResult = await addCandidateResult(cand);
+        if (candidateResult === "failed") console.error("候補の控えに失敗（何もしない）");
+        const added = candidateResult === "added";
         // TASK_MENU on：その場の返事で候補カード1枚（off なら今までどおり返事はしない）
         if (added && candidateCardsActive()) {
           await replyCandidateCard(replyToken, cand).catch(() =>
@@ -1755,11 +1755,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const reason = unregisteredReason(parsed, CANDIDATE_MIN_CONFIDENCE);
       await finishUnregisteredIntake({
         code:
-          reason === "candidate-range"
-            ? candidateSaved
+          reason !== "candidate-range"
+            ? reason
+            : candidateResult === "added"
               ? "candidate-saved"
-              : "candidate-skip"
-            : reason,
+              : candidateResult === "exists"
+                ? "candidate-exists"
+                : candidateResult === "failed"
+                  ? "candidate-save-failed"
+                  : "candidate-skip",
         replyToken,
         send: sendLineMessage,
       });

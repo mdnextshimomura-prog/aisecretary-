@@ -2,7 +2,6 @@
  * @秘書 あての発言を登録しなかった枝の、理由のログと返事（2026-11-13）。
  * 枝ごとに符号1行だけを出し、本文・ID を出さないこと。返事は @秘書 あてと分かるときだけ。
  */
-import { readFileSync } from "node:fs";
 import {
   MSG_INTAKE_NOT_REGISTERED,
   MSG_INTAKE_TYPED_MENTION,
@@ -53,6 +52,21 @@ async function main() {
     hasTypedBotMention("@杉山 舜 @秘書 見積", [{ type: "user", userId: "U_S", index: 0, length: 5 }])
   );
   ok("本文が無ければ拾わない", !hasTypedBotMention(undefined, undefined));
+  ok("文の途中（空白のあと）の @秘書 も拾う", hasTypedBotMention("これ見て @秘書 お願い", []));
+  ok("区切りの記号のあとの @秘書 を拾う", hasTypedBotMention("確認、@秘書。", []));
+  ok("行末の @AI秘書 を拾う", hasTypedBotMention("見積の件 @AI秘書", []));
+  ok("改行のあとの @秘書 を拾う", hasTypedBotMention("見積の件\n@秘書 明日まで", []));
+  ok("「@秘書bot」は拾わない", !hasTypedBotMention("@秘書bot 見積", []));
+  ok("「@秘書2」は拾わない", !hasTypedBotMention("@秘書2 見積", []));
+  ok("メールの形 office@秘書.example.jp は拾わない", !hasTypedBotMention("宛先は office@秘書.example.jp です", []));
+  ok("「@秘書.example.jp」も拾わない", !hasTypedBotMention("@秘書.example.jp", []));
+  ok("かなが続く「@秘書が」は拾わない", !hasTypedBotMention("@秘書がやってくれます", []));
+  ok("「」の中の説明は拾わない", !hasTypedBotMention("「@秘書」と入力してください", []));
+  ok("『』の中は拾わない", !hasTypedBotMention("『@AI秘書 見積』と送ると登録されます", []));
+  ok("“”の中は拾わない", !hasTypedBotMention("“@秘書 見積” の形で", []));
+  ok('"" の中は拾わない', !hasTypedBotMention('"@秘書" と打つ', []));
+  ok("引用が閉じたあとの @秘書 は拾う", hasTypedBotMention("「見積」の件 @秘書 お願いします", []));
+  ok("漢字・かなの直後の @秘書 は拾わない（メールの local part と同じく狭く）", !hasTypedBotMention("これ@秘書", []));
 
   // ── 理由の分け方 ──
   ok("タスクでない → not-task", unregisteredReason({ isTask: false, confidence: 0.9 }, 0.5) === "not-task");
@@ -91,10 +105,25 @@ async function main() {
     ok(`${code}：ログは符号1行`, f.logs.length === 1 && f.logs[0] === `[task-intake] ${code}`, JSON.stringify(f.logs));
     ok(`${code}：受け付けなかったことを返す`, f.sent.length === 1 && f.sent[0].token === "R" && f.sent[0].text === MSG_INTAKE_NOT_REGISTERED);
   }
+  for (const code of ["candidate-saved", "candidate-exists"] as const) {
+    const f = fake();
+    await finishUnregisteredIntake({ code, replyToken: "R", send: f.send, log: f.log });
+    ok(`${code}：ログ1行・返事はしない`, f.logs.length === 1 && f.logs[0] === `[task-intake] ${code}` && f.sent.length === 0);
+  }
   {
     const f = fake();
-    await finishUnregisteredIntake({ code: "candidate-saved", replyToken: "R", send: f.send, log: f.log });
-    ok("candidate-saved：ログ1行・返事は候補の仕組みに任せる", f.logs[0] === "[task-intake] candidate-saved" && f.sent.length === 0);
+    await finishUnregisteredIntake({ code: "candidate-save-failed", replyToken: "R", send: f.send, log: f.log });
+    ok("candidate-save-failed：ログ1行・受け付けなかったことを返す", f.logs[0] === "[task-intake] candidate-save-failed" && f.sent.length === 1 && f.sent[0].text === MSG_INTAKE_NOT_REGISTERED);
+  }
+  {
+    // 候補の置き場：新規・既存・失敗を分けて返す（KV 未設定＝メモリ経路、TASK_MENU off）
+    const store = await import("../src/lib/task-candidate-store");
+    store._resetMemoryForTest();
+    const c = { id: "m-outcome-1", text: "t", title: "t", assignee: null, assigneeUserId: null, senderId: null, createdAt: Date.now() };
+    ok("1回目は added", (await store.addCandidateResult(c)) === "added");
+    ok("同じ発言の2回目は exists", (await store.addCandidateResult(c)) === "exists");
+    ok("addCandidate は今までどおり2回目に false", (await store.addCandidate(c)) === false);
+    store._resetMemoryForTest();
   }
   {
     const logs: string[] = [];
@@ -120,22 +149,7 @@ async function main() {
   }
   ok("返事の文に @秘書 と送り直し方がある", MSG_INTAKE_NOT_REGISTERED.includes("もう一度 @秘書") && MSG_INTAKE_NOT_REGISTERED.includes("期限や担当"));
 
-  // ── route.ts のつなぎ方（置き場所） ──
-  const src = readFileSync("src/app/api/webhook/route.ts", "utf8");
-  const at = (s: string) => src.indexOf(s);
-  const noMention = at("if (!mentionState.mentionsBot) {");
-  const noMentionEnd = at("const attachments = await loadRecentAttachments(source);");
-  const finishNo = at("await finishNoBotMention({");
-  ok("メンションなしの枝の最後で finishNoBotMention を1回", src.split("await finishNoBotMention({").length === 2 && noMention < finishNo && finishNo < noMentionEnd);
-  ok("候補のその場の返事で replyTokenUsed を立てる", /replyTokenUsed = true;\s*await replyInstantCandidateCard\(/.test(src));
-  const lowConf = at("if (!parsed.isTask || parsed.confidence < TASK_CONFIDENCE_THRESHOLD) {");
-  const finishUn = at("await finishUnregisteredIntake({");
-  const finalize = src.indexOf("await finalizeDue(parsed, now);", lowConf);
-  ok("確信度が足りない枝の最後で finishUnregisteredIntake を1回", src.split("await finishUnregisteredIntake({").length === 2 && lowConf < finishUn && finishUn < finalize);
-  ok("候補に控えたかは addCandidate の結果で決める", /candidateSaved = added;/.test(src.slice(lowConf, finishUn)));
-  const reg = at('logTaskIntake("registered");');
-  ok("registered は登録を確定させた直後", reg > at("pageId = await createNotionTask(parsed, rawForNotion, event.message.id);") && /markCommitted\(\);\s*logTaskIntake\("registered"\);/.test(src));
-  ok("ログに ID・本文を渡していない", !/logTaskIntake\([^)]*(text|userId|groupId|message\.id)/.test(src));
+  // route.ts を通した動きは tests/task-intake-webhook.test.ts（POST を本物のまま呼ぶ）で確かめる。
 
   if (fail > 0) {
     console.log(`\n${fail} 件失敗`);

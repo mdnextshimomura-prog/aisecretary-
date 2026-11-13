@@ -76,11 +76,11 @@ async function legacyListCandidates(
 async function legacyAddCandidate(
   c: Candidate,
   nowMs: number = Date.now(),
-): Promise<boolean> {
+): Promise<"added" | "exists"> {
   const list = await legacyListCandidates(nowMs);
-  if (list.some((x) => x.id === c.id)) return false;
+  if (list.some((x) => x.id === c.id)) return "exists";
   await write(ITEMS_KEY, [...list, c].slice(-MAX_ITEMS));
-  return true;
+  return "added";
 }
 
 /**
@@ -387,12 +387,12 @@ async function newList(nowMs: number, groupId?: string): Promise<Candidate[]> {
   return all.filter((c) => groupOf(c) === g);
 }
 
-async function newAdd(c: Candidate, nowMs: number): Promise<boolean> {
+async function newAdd(c: Candidate, nowMs: number): Promise<"added" | "exists" | "failed"> {
   const k = client();
-  if (!k) return false;
-  if (!CANDIDATE_ID_RE.test(c.id)) return false;
+  if (!k) return "failed";
+  if (!CANDIDATE_ID_RE.test(c.id)) return "failed";
   const ttl = itemTtl(c, nowMs);
-  if (ttl <= 0) return false;
+  if (ttl <= 0) return "failed";
   await migrateLegacy(k, nowMs);
   // 中身を先に書き、目次は後に足す（目次だけ残っても読むときに外れる）。同じ発言は 2 度控えない（NX）
   const r = await k.set(
@@ -400,7 +400,7 @@ async function newAdd(c: Candidate, nowMs: number): Promise<boolean> {
     { ...c, groupId: c.groupId ?? (mainGroup() || null) },
     { ex: ttl, nx: true },
   );
-  if (r !== "OK") return false;
+  if (r !== "OK") return "exists";
   await k.sadd(INDEX_KEY, memberOf(c.id));
   await k.expire(INDEX_KEY, TTL_SECONDS);
   // 多すぎるときは古いものから落とす（全体で 30 件まで）
@@ -408,7 +408,7 @@ async function newAdd(c: Candidate, nowMs: number): Promise<boolean> {
   for (const old of all.slice(0, Math.max(0, all.length - MAX_ITEMS))) {
     await removeById(k, old.id);
   }
-  return true;
+  return "added";
 }
 
 async function removeById(k: CandKv, id: string): Promise<void> {
@@ -494,12 +494,36 @@ export async function addCandidate(
   c: Candidate,
   nowMs: number = Date.now(),
 ): Promise<boolean> {
+  // 例外は今までどおり外に出す（呼び出し側のログに任せる）
+  return (await addCandidateRaw(c, nowMs)) === "added";
+}
+
+async function addCandidateRaw(
+  c: Candidate,
+  nowMs: number,
+): Promise<"added" | "exists" | "failed"> {
   if (menuActive()) return newAdd(c, nowMs);
   // off のあいだは今までと同じ中身（B1 で足した欄は書かない）
   const { groupId: _g, mentionedUserIds: _m, ...rest } = c;
   void _g;
   void _m;
   return legacyAddCandidate(rest, nowMs);
+}
+
+/**
+ * addCandidate と同じ控え方で、結果を3つに分けて返す（2026-11-13）。
+ * "added"＝新しく控えた／"exists"＝同じ発言がもう控えてある／"failed"＝控えられなかった（例外・置き場なし・形が不正）。
+ * 例外は外に出さない（"failed" にする）。
+ */
+export async function addCandidateResult(
+  c: Candidate,
+  nowMs: number = Date.now(),
+): Promise<"added" | "exists" | "failed"> {
+  try {
+    return await addCandidateRaw(c, nowMs);
+  } catch {
+    return "failed";
+  }
 }
 
 /**
