@@ -2,6 +2,8 @@
 
 設計書 `2026-11-11-b2-satei-draft-design.md` を3つのリポジトリに分けて作るときの「名前と形」の正本。3つの計画はここに合わせる。変えるときはここを先に直す。
 
+> 改訂 v3（2026-11-13）：第7節（状態の読み取り口・sateiResultSha・Mac 側の決定・Q1）と第8節（査定の帯替えの口 6-18）を追記。第1節・第2節の表にも1行ずつ足した。
+
 ## 0. 登場するもの
 - **aisecretary**（Vercel・LINE）：ボタン、下村さんの本人確認、Notion の読み取り、個人 LINE への送信
 - **reins-report**（依頼箱・Railway Postgres／テストは SQLite）：状態の正本
@@ -27,6 +29,7 @@
 | sateiRejectReason | String | "" | 今回の差し戻し理由（200字まで） |
 | sateiDecidedBy | String | "" | OK／差し戻しを押した LINE userId |
 | sateiSavedFileId | String | "" | 案件フォルダに入れた写しの Drive ID |
+| sateiResultSha | String | "" | result の冪等の判定用ハッシュ（6-14）。正規化した9項目（outcome・inputVersion・artifactSha256・driveFileId・driveMd5・verdict・findings・failReason・missing）の SHA-256 |
 使い回す既存の列：`workflow="satei"`、`status`、`lineMessageId`（= `satei:` + LINE の webhookEventId）、`property`（案件名。画面用）、`artifactSha256`（検品した成果物）、`driveFileId`（閲覧用ファイル）、`prepRunId`・`prepLeaseUntil`・`prepHeartbeatAt`・`prepAttempts`、`deliveryClaimId`・`deliveryLeaseUntil`。
 
 ## 2. reins-report の機械用 API（すべて `isJobApiRequest`＝`x-job-token`。例外は `jobErrorResponse`）
@@ -34,6 +37,7 @@
 |---|---|---|---|
 | `POST /api/jobs/satei/intake` | `{eventId, dealId, dealNo, folderId, dealName, requestedBy}` | AppState のロック行 `satei-intake` を同じトランザクションで更新して直列化。同じ `dealId` で「受付・下準備中・確認待ち・差し戻し・完成・納品中・納品要確認」の satei があれば作らない。`lineMessageId=satei:eventId` が既にあれば同じものを返す。新規なら直前に取消された同じ案件の `sateiRejectReason` を `sateiCarryReason` に写す | `{created, job:{no,status}}` |
 | `POST /api/jobs/satei/claim` | `{}` | ① 受付の satei を古い順に1件、または ② 下準備中で `prepLeaseUntil` が過ぎ `prepAttempts<2` のもの。新しい `prepRunId`（cuid）、`prepLeaseUntil=now+10分`、`prepAttempts+1`。受付→下準備中 | `{no, runId, leaseUntil, attempt, dealId, dealNo, folderId, dealName, carryReason}` か `204` |
+| `GET /api/jobs/{no}/satei` | – | 状態の読み取り専用（6-18）。Job は変えない | `{no, status, runId, leaseUntil, attempt, generation}`／`401`／`400`（B2 の依頼でない）／`404` |
 | `POST /api/jobs/{no}/satei/heartbeat` | `{runId}` | runId 一致・下準備中・期限内なら `prepLeaseUntil=now+10分` | `{leaseUntil}`／`409 SATEI_STALE` |
 | `POST /api/jobs/{no}/satei/result` | `{runId, outcome:"draft"\|"failed", inputVersion, artifactSha256?, driveFileId?, driveMd5?, verdict?, findings?, failReason?, missing?}` | runId 一致・期限内のときだけ。draft→確認待ち、failed→失敗。`sateiGeneration+1`、`sateiNoticeKind=draft\|failed`、`sateiNoticeState=pending` | `{status, generation}`／`409 SATEI_STALE` |
 | `GET /api/jobs/satei/notices` | – | `sateiNoticeState in (pending, unknown)` かつ `sateiNoticeAttempts<3` | `{jobs:[{no, kind, generation, dealName, driveFileId, verdict, findings, missing, failReason, artifactSha256}]}` |
@@ -89,3 +93,52 @@
 14. **result の冪等の判定**（2026-11-11 追記）：Job に `sateiResultSha`（String・既定 ""）を足す。正規化した result 全体（outcome・inputVersion・artifactSha256・driveFileId・driveMd5・verdict・findings・failReason・missing）の SHA-256。同じ runId で同じ値なら初回と同じ応答、違えば `409 SATEI_MISMATCH`。heartbeat と result は「同じ runId・下準備中・prepLeaseUntil > now」で受ける（延長後の値でよい）
 15. **期限つきの書き込み**：査定係の Drive の要求には、予約の残りより短い期限と中断を付ける。結果が分からなければ、次の回に保存先の SHA-256 照合で回収する。result の 409 を受けたら、依頼箱の今の状態を読み直して、自分の runId が無効と確かめてから控えを消す
 16. **差し戻し理由の印**：KV の印は、読み取った値と今の値が同じときだけ消す（原子的に）。消すのは portal が実際に 4xx を返したときと成功したときだけ（status 0・5xx・設定不足・例外では残す）
+
+## 7. 改訂 v3（2026-11-13・実装が先に従った追記。第1〜6節と食い違えばこちらが正）
+1. **状態の読み取り口（6-15 の実体）**：`GET /api/jobs/{no}/satei`（`x-job-token`）。応答 `200 {no, status, runId, leaseUntil, attempt, generation}`（`runId` は `prepRunId`、`leaseUntil` は `prepLeaseUntil`、`attempt` は `prepAttempts`、`generation` は `sateiGeneration`）。`401`（token 違い）・`400`（B2 の依頼でない）・`404`（番号なし）。読み取り専用で Job・JobEvent を変えない。Mac は result・heartbeat が `409` のとき、この口で自分の `runId` がもう今のものでない（取り直された・期限切れ・状態が進んだ）と確かめてから `state/satei-run.json` の控えを消す。第2節の表にも1行足した
+2. **sateiResultSha**：第1節の表に列を足した（中身は 6-14）。ハッシュは正規化した9項目（`failReason` を含む）全体に掛け、同じ runId で同じ値なら初回と同じ応答、違えば `409 SATEI_MISMATCH`
+3. **Mac 側の決定（契約に影響するもの）**
+   - v1 は Web 調査をしない。地域・校区の欄は「地域・校区の調査なし（担当が追記）」とし、`missing` にも入れる。出典一覧（sources.md）には「Web の出典は無い」の1行を必ず入れる（6-7 の4成果物は変わらない）
+   - 製本 PDF の先頭に、Node が固定の文で「確認事項」ページを入れる（最大3ページ）。`artifactSha256` は確認事項込みの PDF の SHA-256
+   - **Q1（初版の決定）**：［OK］のあと案件フォルダの `02_査定・事例` へ保存する写しは、検品して担当が承認した確認事項込みの PDF そのもので、担当の承認記録として扱う。お客様に出すもの（確認事項を外し、帯や鍵番号を担当が直したもの）は担当が作る別の成果物で、SHA-256 の承認の保証は引き継がない。契約（登録する成果物は1つ）は広げない
+
+## 8. 査定の帯替えの口（6-18）`POST /api/jobs/{no}/satei/obi`（改訂 v3 で追加）
+売出事例（他社の帯つきマイソク）のページを、LINE の帯替えと同じ下準備にかけて返す機械用の口。成約事例の「消すだけ」・番号の訂正・AI の読み取り・帯の記憶の学習は含まない。詳細設計は reins-report の `docs/superpowers/specs/2026-11-12-satei-obi-api-design.md`。この口のデプロイより前に、この節がコミットされていること（設計 §9 の1）。
+
+**呼び出し**：`x-job-token`・`x-satei-run-id`（UUID）・`Content-Type: application/pdf`・`Content-Length`（必須）・本文は PDF のバイト列。
+- 受ける条件は heartbeat と同じ：B2 の依頼で、`下準備中`・`prepRunId` が `x-satei-run-id` と同じ・`prepLeaseUntil > now`。**延長の代わりにはならない**（Mac は別に heartbeat を続ける）
+- 限界：送る PDF は 20MB・1〜5ページまで。応答の本文は 45MB まで、うち戻る PDF は30MB まで。依頼箱は PDF を保存せず、Job・JobEvent を変えず、帯の記憶を書かない（読むだけ）
+
+**応答 `200`**：`{gateStatus: "pass"|"residue"|"needs_review"|"error", reason, issues:[{page, kind}], marks:[{page, reason}], pages, pdf}`
+- `reason`：`pass`・`residue` は `null`、`needs_review`・`error` は符号（`/^[a-z-]{1,32}$/`）。`issues` は `page`（0始まり）と `kind` だけで、他社名などの文字は返さない。`pdf` は base64
+- `pdf` は `pass` 以外でも返すが、Mac は使わない。**Mac は `pass` のときだけ帯替え済みを綴じ**、それ以外は元のページを綴じて確認事項に回す。`pass` の PDF は base64・`%PDF-` で始まる・30MB 以下・ページ数が送ったものと合うことを Mac が確かめ、違えば `error`
+- `pages`：解析した側が数えたページ数（1〜5）。**依頼箱が解析せずに元の PDF へ戻した場合（下表の「元の PDF」）は `pages: null`**
+
+**エラー（200 以外）**
+| HTTP | code | 意味 |
+|---|---|---|
+| 401 | （既存の `unauthorized`） | `x-job-token` 違い |
+| 400 | `SATEI_OBI_BAD_BODY` | ヘッダ違い・`%PDF-` でない・受信の時間切れ |
+| 413 | `SATEI_OBI_TOO_BIG` | 20MB 超 |
+| 404／400 | （既存） | 依頼なし／B2 の依頼でない |
+| 409 | `SATEI_STALE` | 下準備中でない・runId 違い・期限切れ。Mac は作業を止める |
+| 503 | `SATEI_OBI_BUSY` | 同時に1件の錠・内部のサービスが使用中・版の食い違い。Mac は元のページ＋要確認で続ける |
+| 502 | `SATEI_OBI_INTERNAL_AUTH` | 依頼箱の中の設定の誤り（内部の鍵・URL の不足や不一致）。管理者が確認 |
+
+**依頼箱の内部の状態 → 外向きの対応**（reason は固定。Mac の `OBI_LINES` がこの表のすべてを固定の日本語の行に引き、依頼箱の文字を確認事項にそのまま書かない）
+| できごと | 外向き | gateStatus／reason（200）・code |
+|---|---|---|
+| 内部サービスが正常に結果を返した（形が正しい） | 200 | 内部の `gateStatus`・`reason` のまま |
+| 結果の形が違う | 200 | `error`／`bad-service-response`・`pages: null`・元の PDF |
+| 出力が大きすぎる | 200 | `error`／`output-too-big`・元の PDF |
+| 応答が45MB超 | 200 | `error`／`response-too-big`・元の PDF |
+| メモリ超過 | 200 | `error`／`memory`・元の PDF |
+| つながらない | 200 | `error`／`service-unavailable`・元の PDF |
+| 140秒で切った | 200 | `error`／`service-timeout`・元の PDF |
+| それ以外の HTTP | 200 | `error`／`service-error`・元の PDF |
+| 使用中・子が消えない・版の食い違い | 503 | `SATEI_OBI_BUSY` |
+| 内部の鍵の不一致・鍵や URL の不足 | 502 | `SATEI_OBI_INTERNAL_AUTH` |
+- 「元の PDF」の行では `pdf` は依頼箱が受けた元の PDF、`pages` は `null`
+- 解析が正常に終わったときの `reason`（内部の口の規則）：枠が1つも無い→`no-swap`、対象外・枠の無いページが混ざる→`partial`、向きや位置が不確か（`outside-unchecked`・`rotated-guess`・`orientation-unknown`・`low-score`）→`uncertain`。いずれも `needs_review`。それ以外は帯替えの関門の `pass`／`residue`／`needs_review` のまま
+
+**内部の専用サービス `satei-obi`**（契約の外。web とは別の Railway のサービス）：同じイメージ・公開ドメインなし・同時に1件・子プロセスで解析（120秒）・メモリは Railway の上限で保護。web と satei-obi の間は内部の鍵 `x-satei-obi-secret` と版 `x-satei-obi-proto`（今は 1）で守る。Mac からは見えず、`satei-obi` を止めても Mac は上の `service-unavailable` を受けて元のページ＋要確認で続く。**`satei-obi` の追加は費用が出るので下村さんの承認が要る**（設計 §12）。デプロイと有効化の順番は設計 §9：この節のコミット → 実装・レビュー → 承認 → push・Railway → 査定係の実機ゲート（帯替え）→ `SATEI_ENABLED=1`。
