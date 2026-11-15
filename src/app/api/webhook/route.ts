@@ -1099,7 +1099,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const done: string[] = [];
         const notFound: number[] = [];
         for (const n of numbers) {
-          const t = await findTaskByRemindNumber(n, { anyDue: followupEnabled() });
+          const t = await findTaskByRemindNumber(n, {
+            anyDue: followupEnabled(),
+            inGroup: Boolean(source.groupId),
+          });
           if (!t) {
             notFound.push(n);
             continue;
@@ -1142,7 +1145,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
       if (statusCmd) {
         try {
-          const r = await applyStatusCommand(statusCmd, statusDeps());
+          const r = await applyStatusCommand(
+            statusCmd,
+            statusDeps(Boolean(source.groupId))
+          );
           if (r.changed > 0) markCommitted();
           await sendLineMessage(replyToken, r.text);
         } catch (err) {

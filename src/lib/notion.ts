@@ -1,10 +1,20 @@
 import { Client } from "@notionhq/client";
 import type { ParsedTask } from "./claude";
 import { closeProps, followupEnabled } from "./task-status";
-import { isLineWorksOrigin, originOf } from "./task-origin";
+import { isLineWorksOrigin, originOf, ORIGIN_LINE_WORKS } from "./task-origin";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const DATABASE_ID = process.env.NOTION_DATABASE_ID!;
+
+// グループあての取得で、LINE WORKS 発を Notion の側で外す絞り込み条件。
+// 手元で外すだけだと、LINE WORKS 発が 1 ページ（100件）を埋めたときに後ろのグループ発を取りこぼす。
+// 発生元が空の古い行は「空である」を明示して必ず通す（does_not_equal の空の扱いに頼らない）。
+const NOT_LINE_WORKS = {
+  or: [
+    { property: "発生元", rich_text: { is_empty: true as const } },
+    { property: "発生元", rich_text: { does_not_equal: ORIGIN_LINE_WORKS } },
+  ],
+};
 
 export async function createNotionTask(
   task: ParsedTask,
@@ -108,6 +118,8 @@ export async function getDueSoonTasks(): Promise<
         { property: "期日", date: { before: jstDateStr(1) } },
         { property: "ステータス", select: { does_not_equal: "完了" } },
         { property: "通知済み", checkbox: { equals: false } },
+        // 送り先は営業部グループ。LINE WORKS 発は Notion の側でも外す（呼び出し側でも外す＝二重の守り）
+        NOT_LINE_WORKS,
       ],
     },
   });
@@ -316,11 +328,15 @@ export async function clearStaleRemindNumbers(keepIds: string[]): Promise<number
 // 過去に振られた古い番号を誤って拾うことがない（範囲内のタスクは毎回振り直されるため）。
 export async function findTaskByRemindNumber(
   num: number,
-  opts: { anyDue?: boolean } = {}
+  /**
+   * inGroup：グループからの呼び出しか（省略時は true＝安全側）。グループでは LINE WORKS 発を引けない
+   * ようにする（古い番号が残っていても題名を返さない・完了にしない）。Notion の側で外し、手元でも外す。
+   * 1対1（false）は今までどおり引ける。同じ番号が重なっていたら、知らせに載っているほう
+   * （LINE WORKS 発でないほう）を先に使う。
+   */
+  opts: { anyDue?: boolean; inGroup?: boolean } = {}
 ): Promise<{ id: string; title: string } | null> {
-  // LINE WORKS 発はグループの知らせに載せないので、番号で引けないようにする（古い番号が残っていても
-  // 題名を返さない・完了にしない）。1件だけ取ると LINE WORKS 発に先に当たって本来のタスクを
-  // 取り逃すので、同じ番号の行をまとめて取り、手元で外してから先頭を使う。
+  const inGroup = opts.inGroup ?? true;
   const response = await notion.databases.query({
     database_id: DATABASE_ID,
     filter: {
@@ -332,15 +348,17 @@ export async function findTaskByRemindNumber(
         ...(opts.anyDue
           ? []
           : [{ property: "期日", date: { on_or_before: jstDateStr(1) } }]),
+        ...(inGroup ? [NOT_LINE_WORKS] : []),
       ],
     },
   });
 
   const propsOf = (pg: unknown) =>
     ((pg as Record<string, unknown>).properties as Record<string, unknown>) ?? {};
-  const page = response.results.find(
+  const notLineWorks = response.results.find(
     (pg) => !isLineWorksOrigin(originOf(propsOf(pg)))
   );
+  const page = notLineWorks ?? (inGroup ? undefined : response.results[0]);
   if (!page) return null;
   const props = propsOf(page);
   const titleProp = props["名前"] as

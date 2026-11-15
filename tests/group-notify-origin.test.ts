@@ -83,6 +83,23 @@ const notifiedWrites: string[] = [];
 const otherWrites: string[] = [];
 /** この ID のページへの番号の書き込みは失敗させる */
 const failNumberWriteFor = new Set<string>();
+/** 問い合わせの絞り込み条件の控え（中身を確かめる） */
+const queryFilters: string[] = [];
+/**
+ * Notion の側の絞り込みをまねる：条件に「発生元が LINE WORKS でない（空は通す）」が入っていれば、
+ * LINE WORKS 発を返さない。入っていなければ全部返す。1回に返すのは pageSize 件まで（has_more つき）。
+ */
+let pageSize = 100;
+const NOT_LW_FILTER = JSON.stringify({
+  or: [
+    { property: "発生元", rich_text: { is_empty: true } },
+    { property: "発生元", rich_text: { does_not_equal: "LINE WORKS" } },
+  ],
+});
+const listOf = (matched: Row[], body: string) => {
+  const kept = body.includes(NOT_LW_FILTER) ? matched.filter((r) => r.origin !== "LINE WORKS") : matched;
+  return { object: "list", results: kept.slice(0, pageSize).map(page), has_more: kept.length > pageSize, next_cursor: kept.length > pageSize ? "next" : null };
+};
 const page = (r: Row) => ({
   id: r.id,
   url: `https://example.invalid/${r.id}`,
@@ -127,12 +144,13 @@ Client.prototype.request = (async (args: { path: string; method: string; body?: 
     return page(row);
   }
   if (args.method === "post" && args.path.endsWith("/query")) {
+    queryFilters.push(body);
     const filter = (args.body as { filter?: { and?: Array<Record<string, unknown>>; property?: string; rich_text?: { contains?: string } } }).filter;
     // 番号での検索（findTaskByRemindNumber）：その番号の行だけ返す
     const byNumber = filter?.and?.find((c) => c.property === "リマインド番号" && (c.number as { equals?: number })?.equals !== undefined);
     if (byNumber) {
       const n = (byNumber.number as { equals: number }).equals;
-      return { object: "list", results: rows.filter((r) => r.number === n).map(page), has_more: false, next_cursor: null };
+      return listOf(rows.filter((r) => r.number === n), body);
     }
     // メッセージID での検索（findTaskByMessageId）
     if (filter?.property === "メッセージID") {
@@ -140,8 +158,11 @@ Client.prototype.request = (async (args: { path: string; method: string; body?: 
       return { object: "list", results: rows.filter((r) => r.messageId === m).map(page), has_more: false, next_cursor: null };
     }
     // 番号の掃除（clearStaleRemindNumbers）の問い合わせは、番号が入っている行だけ返す
-    const list = body.includes("is_not_empty") ? rows.filter((r) => r.number !== null) : rows;
-    return { object: "list", results: list.map(page), has_more: false, next_cursor: null };
+    if (body.includes("is_not_empty"))
+      return { object: "list", results: rows.filter((r) => r.number !== null).map(page), has_more: false, next_cursor: null };
+    // 期限前の通知（getDueSoonTasks）は 1 ページだけ読む。ほかの取得は今までどおり全部返す
+    if (body.includes("通知済み")) return listOf(rows, body);
+    return { object: "list", results: rows.map(page), has_more: false, next_cursor: null };
   }
   return { object: "list", results: [], has_more: false, next_cursor: null, properties: {} };
 }) as typeof Client.prototype.request;
@@ -162,6 +183,8 @@ const reset = () => {
   otherWrites.length = 0;
   errors.length = 0;
   failNumberWriteFor.clear();
+  queryFilters.length = 0;
+  pageSize = 100;
 };
 /** push の本文（JSON 文字列）をつないだもの */
 const sentText = () => pushes.join("\n");
@@ -215,6 +238,19 @@ const numbers = () => Object.fromEntries(rows.map((r) => [r.id, r.number]));
     reset();
     const r = await runDueReminders(Date.parse(`${today}T17:30:00+09:00`));
     eq("期限前：LINE WORKS 発だけなら何も送らない・印も付けない", [r, pushes.length, notifiedWrites], [{ checked: 0, sent: 0 }, 0, []]);
+  }
+
+  {
+    // 未通知の LINE WORKS 発が先頭の1ページを埋めていても、後ろのグループ発・発生元なしを取りこぼさない
+    rows = [
+      mk("p-lw-1", "本人のLW仕事1", "LINE WORKS"), mk("p-lw-2", "本人のLW仕事2", "LINE WORKS"),
+      mk("p-group-1", "グループ発その1", G), mk("p-old", "発生元なしの古い行", null),
+    ];
+    reset();
+    pageSize = 2;
+    const r = await runDueReminders(Date.parse(`${today}T17:30:00+09:00`));
+    eq("期限前：LINE WORKS 発が1ページを埋めても、グループ発と発生元なしに届く", [r, notifiedWrites], [{ checked: 2, sent: 2 }, ["p-group-1", "p-old"]]);
+    ok("期限前：絞り込み条件に「発生元が空、または LINE WORKS でない」が入っている", queryFilters.length === 1 && queryFilters[0].includes(NOT_LW_FILTER));
   }
 
   // ── 2. 朝のリマインド（今までの知らせ方：TASK_FOLLOWUP なし） ──
@@ -322,10 +358,27 @@ const numbers = () => Object.fromEntries(rows.map((r) => [r.id, r.number]));
     for (const anyDue of [true, false]) {
       eq(`番号検索：同じ番号でも LINE WORKS 発を飛ばして本来のタスクに当たる（anyDue=${anyDue}）`, await findTaskByRemindNumber(2, { anyDue }), { id: "p-group-1", title: "グループ発その1" });
     }
+    ok("番号検索：グループからは、絞り込み条件で LINE WORKS 発を外している", queryFilters.length === 2 && queryFilters.every((f) => f.includes(NOT_LW_FILTER)));
+    {
+      // 同じ番号の LINE WORKS 発が1ページを埋めていても、本来のタスクを取り逃さない
+      pageSize = 1;
+      eq("番号検索：LINE WORKS 発が1ページを埋めても本来のタスクに当たる", (await findTaskByRemindNumber(2, { anyDue: true }))?.id, "p-group-1");
+      pageSize = 100;
+    }
+    // 1対1（inGroup: false）は今までどおり引ける
+    queryFilters.length = 0;
+    eq("番号検索（1対1）：同じ番号が重なっていたら、知らせに載っているほうを使う", (await findTaskByRemindNumber(2, { anyDue: true, inGroup: false }))?.id, "p-group-1");
+    ok("番号検索（1対1）：絞り込み条件で LINE WORKS 発を外さない", queryFilters.length === 1 && !queryFilters[0].includes("発生元"));
     eq("番号検索：発生元が空の古い行は今までどおり引ける", await findTaskByRemindNumber(3, { anyDue: true }), { id: "p-old", title: "発生元なしの古い行" });
     rows = [mk("p-lw", "本人のLW仕事", "LINE WORKS", 2)];
     eq("番号検索：LINE WORKS 発だけなら見つからない", [await findTaskByRemindNumber(2, { anyDue: true }), await findTaskByRemindNumber(2)], [null, null]);
-    const r = await applyStatusCommand({ kind: "drop", numbers: [2] } as Parameters<typeof applyStatusCommand>[0], statusDeps());
+    eq("番号検索（1対1）：LINE WORKS 発だけでも今までどおり引ける", await findTaskByRemindNumber(2, { anyDue: true, inGroup: false }), { id: "p-lw", title: "本人のLW仕事" });
+    {
+      const one = await applyStatusCommand({ kind: "wait", note: "テスト", date: "2026-12-01", numbers: [2] } as Parameters<typeof applyStatusCommand>[0], statusDeps(false));
+      eq("番号での待ち（1対1）：LINE WORKS 発にも今までどおり書ける", [one.changed, otherWrites], [1, ["p-lw"]]);
+      otherWrites.length = 0;
+    }
+    const r = await applyStatusCommand({ kind: "drop", numbers: [2] } as Parameters<typeof applyStatusCommand>[0], statusDeps(true));
     ok("番号での不要：LINE WORKS 発には書かない・題名を返さない", r.changed === 0 && !r.text.includes("本人のLW仕事") && r.text.includes("2番は見つかりませんでした") && otherWrites.length === 0, JSON.stringify([r, otherWrites]));
   }
 

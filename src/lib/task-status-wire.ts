@@ -12,9 +12,13 @@ export function defaultCheckDateFrom(todayJst: string, closures: Closure[]): str
   return shiftToBusinessDay(addDaysStr(todayJst, 3), closures).date.slice(0, 10);
 }
 
-export function statusDeps(): StatusDeps {
+/**
+ * inGroup：グループからの呼び出しか（省略時は true＝安全側）。グループでは、番号で LINE WORKS 発を
+ * 引けない。1対1（false）は今までどおり。
+ */
+export function statusDeps(inGroup: boolean = true): StatusDeps {
   return {
-    findByNumber: (n) => findTaskByRemindNumber(n, { anyDue: true }),
+    findByNumber: (n) => findTaskByRemindNumber(n, { anyDue: true, inGroup }),
     update: updateTaskProps,
     defaultCheckDate: async () =>
       defaultCheckDateFrom(jstDateStr(0), await loadClosures().catch(() => [])),
