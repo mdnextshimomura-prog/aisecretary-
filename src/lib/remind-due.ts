@@ -11,6 +11,7 @@
 import { kv } from "@vercel/kv";
 import { getDueSoonTasks, markNotified } from "./notion";
 import { pushLineMessageWithMentions, sanitizeForTextV2 } from "./line";
+import { splitForGroup } from "./task-origin";
 
 const LINE_GROUP_ID =
   process.env.LINE_GROUP_ID ?? "Cd5fda3261e9bdd012e598884b2e6a696";
@@ -26,7 +27,9 @@ function jstDateOf(iso: string): string {
 export async function runDueReminders(
   now: number = Date.now()
 ): Promise<{ checked: number; sent: number }> {
-  const tasks = await getDueSoonTasks();
+  // 送り先は営業部グループ。LINE WORKS 発（本人の仕事）は出さない。
+  // 印（通知済み）も付けない。発生元が空の古い行・グループ発は今までどおり。
+  const tasks = splitForGroup(await getDueSoonTasks()).shown;
   let sent = 0;
 
   for (const t of tasks) {

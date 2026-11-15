@@ -9,7 +9,13 @@
  * 送信はVercel Cron（10時）から。誰のPCが起動しているかに関係なく動く。
  * 件数が多い場合は複数通に分けて**全件**出す（打ち切らない）。
  */
-import { getUpcomingTasksAll, setRemindNumber, jstDateStr } from "./notion";
+import {
+  clearRemindNumber,
+  getUpcomingTasksAll,
+  setRemindNumber,
+  jstDateStr,
+} from "./notion";
+import { splitForGroup } from "./task-origin";
 import { pushLineChunks, sanitizeForTextV2 } from "./line";
 import { buildChunks, type ChunkItem } from "./chunk";
 
@@ -50,7 +56,11 @@ export async function sendClosureStocktake(
   dryRun = false
 ): Promise<ReportResult> {
   const today = jstDateStr(0);
-  const tasks = await getUpcomingTasksAll();
+  // 送り先は営業部グループ。LINE WORKS 発（本人の仕事）は載せない（件数にも数えない・番号も振らない）。
+  // 発生元が空の古い行・グループ発は今までどおり。
+  const { shown: tasks, hidden: hiddenFromGroup } = splitForGroup(
+    await getUpcomingTasksAll()
+  );
   if (tasks.length === 0) {
     return { sent: false, before: 0, during: 0, unassigned: 0 };
   }
@@ -126,6 +136,17 @@ export async function sendClosureStocktake(
     };
   }
 
+  // 載せなかった LINE WORKS 発に古い番号が残っていると、今回振る番号と重なって
+  // 「3済」が載せていないほうに当たることがある。先に消しておく（失敗しても続行）。
+  await Promise.all(
+    hiddenFromGroup
+      .filter((t) => t.remindNumber !== null)
+      .map((t) =>
+        clearRemindNumber(t.id).catch((e) =>
+          console.error("[report] 載せないタスクの番号の掃除でエラー（続行）:", e)
+        )
+      )
+  );
   // 本文に載せた順で番号を確定させてから送る（送信後だと先に返信されたとき引けない）
   await Promise.all(shown.map((t, i) => setRemindNumber(t.id, i + 1)));
   await pushLineChunks(LINE_GROUP_ID, chunks);

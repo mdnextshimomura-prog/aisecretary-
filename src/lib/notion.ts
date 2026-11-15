@@ -1,6 +1,7 @@
 import { Client } from "@notionhq/client";
 import type { ParsedTask } from "./claude";
 import { closeProps, followupEnabled } from "./task-status";
+import { originOf } from "./task-origin";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const DATABASE_ID = process.env.NOTION_DATABASE_ID!;
@@ -94,6 +95,8 @@ export async function getDueSoonTasks(): Promise<
     createdTime: string;
     assignee: string | null;
     assigneeUserId: string | null;
+    /** 発生元（グループ ID／"LINE WORKS"）。空なら null。グループへ出すかの判定に使う */
+    origin: string | null;
   }>
 > {
   const todayStr = jstDateStr(0);
@@ -133,6 +136,7 @@ export async function getDueSoonTasks(): Promise<
       createdTime: p.created_time,
       assignee: assigneeProp?.select?.name ?? null,
       assigneeUserId: assigneeIdProp?.rich_text[0]?.plain_text ?? null,
+      origin: originOf(props),
     };
   });
 }
@@ -246,6 +250,15 @@ export async function setRemindNumber(
   await notion.pages.update({
     page_id: pageId,
     properties: { リマインド番号: { number: num } },
+  });
+}
+
+// 1件の番号を消す。グループあての知らせから外したタスク（LINE WORKS 発）に古い番号が残っていると、
+// 新しく振った同じ番号と重なり、「3済」が外したほうに当たることがあるため。
+export async function clearRemindNumber(pageId: string): Promise<void> {
+  await notion.pages.update({
+    page_id: pageId,
+    properties: { リマインド番号: { number: null } },
   });
 }
 
@@ -424,6 +437,10 @@ export async function getUpcomingTasksAll(): Promise<
     assigneeUserId: string | null;
     propertyName: string | null;
     createdTime: string;
+    /** 発生元（グループ ID／"LINE WORKS"）。空なら null */
+    origin: string | null;
+    /** いま入っているリマインド番号。無ければ null */
+    remindNumber: number | null;
   }>
 > {
   const results: unknown[] = [];
@@ -462,6 +479,10 @@ export async function getUpcomingTasksAll(): Promise<
       assigneeUserId: rich("担当者ID") || null,
       propertyName: rich("物件名") || null,
       createdTime: p.created_time as string,
+      origin: originOf(props),
+      remindNumber:
+        (props["リマインド番号"] as { number: number | null } | undefined)
+          ?.number ?? null,
     };
   });
 }
@@ -515,6 +536,10 @@ export async function getUpcomingTasks(opts: { followup?: boolean } = {}): Promi
     note: string;
     /** 登録した日（JST の "YYYY-MM-DD"） */
     createdDate: string;
+    /** 発生元（グループ ID／"LINE WORKS"）。空なら null */
+    origin: string | null;
+    /** いま入っているリマインド番号。無ければ null */
+    remindNumber: number | null;
   }>
 > {
   const tomorrowStr = jstDateStr(1);
@@ -617,6 +642,10 @@ export async function getUpcomingTasks(opts: { followup?: boolean } = {}): Promi
           ? ""
           : new Date(ms + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
       })(),
+      origin: originOf(props),
+      remindNumber:
+        (props["リマインド番号"] as { number: number | null } | undefined)
+          ?.number ?? null,
     };
   });
 }

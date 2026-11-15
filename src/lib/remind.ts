@@ -1,4 +1,5 @@
 import {
+  clearRemindNumber,
   clearStaleRemindNumbers,
   getUpcomingTasks,
   jstDateStr,
@@ -16,6 +17,7 @@ import { getPendingHandoffs, removePendingHandoff } from "./email/session";
 import { listTasks } from "./notion";
 import { pushCard } from "./line";
 import { sendRemindCards } from "./remind-cards";
+import { splitForGroup } from "./task-origin";
 
 /**
  * 送信に失敗した「担当者への引き渡し」を送り直す。
@@ -124,7 +126,11 @@ export async function sendDailyReminders(): Promise<void> {
   // 確認日が来たもの・入ったばかりのものを足す。
   const followup = followupEnabled();
   const tomorrowStr = jstDateStr(1);
-  const fetched = await getUpcomingTasks({ followup });
+  // 送り先は営業部グループ。LINE WORKS 発（本人の仕事）は載せない（番号も振らない）。
+  // 発生元が空の古い行・グループ発は今までどおり。
+  const { shown: fetched, hidden: hiddenFromGroup } = splitForGroup(
+    await getUpcomingTasks({ followup })
+  );
   const tasks = followup
     ? fetched.filter((t) => shouldRemind(t, todayStr, tomorrowStr, jstDateStr(-1)))
     : fetched;
@@ -201,6 +207,17 @@ export async function sendDailyReminders(): Promise<void> {
 
   // 本文に載せた順で番号を確定させてから送る。
   // 送信後に番号を振ると、先に返信されたときに引けないため順序が重要。
+  // 載せなかった LINE WORKS 発に古い番号が残っていると、今回振る番号と重なって
+  // 「3済」が載せていないほうに当たることがある。先に消しておく（失敗しても続行）。
+  await Promise.all(
+    hiddenFromGroup
+      .filter((t) => t.remindNumber !== null)
+      .map((t) =>
+        clearRemindNumber(t.id).catch((e) =>
+          console.error("[remind] 載せないタスクの番号の掃除でエラー（続行）:", e)
+        )
+      )
+  );
   if (followup) {
     await clearStaleRemindNumbers(shown.map((t) => t.id)).catch((e) =>
       console.error("[remind] 古い番号の掃除でエラー（続行）:", e)
