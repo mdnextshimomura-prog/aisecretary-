@@ -10,7 +10,7 @@
  * 件数が多い場合は複数通に分けて**全件**出す（打ち切らない）。
  */
 import {
-  clearRemindNumber,
+  clearHiddenRemindNumbers,
   getUpcomingTasksAll,
   setRemindNumber,
   jstDateStr,
@@ -61,6 +61,9 @@ export async function sendClosureStocktake(
   const { shown: tasks, hidden: hiddenFromGroup } = splitForGroup(
     await getUpcomingTasksAll()
   );
+  // 載せなかった LINE WORKS 発に古い番号が残っていたら消す。載せるものが 0 件でも行う（下見では書かない）。
+  // 消せなくても送信は続ける（番号検索の側で LINE WORKS 発を外しているので取り違えは起きない）。
+  if (!dryRun) await clearHiddenRemindNumbers(hiddenFromGroup, "report");
   if (tasks.length === 0) {
     return { sent: false, before: 0, during: 0, unassigned: 0 };
   }
@@ -136,17 +139,6 @@ export async function sendClosureStocktake(
     };
   }
 
-  // 載せなかった LINE WORKS 発に古い番号が残っていると、今回振る番号と重なって
-  // 「3済」が載せていないほうに当たることがある。先に消しておく（失敗しても続行）。
-  await Promise.all(
-    hiddenFromGroup
-      .filter((t) => t.remindNumber !== null)
-      .map((t) =>
-        clearRemindNumber(t.id).catch((e) =>
-          console.error("[report] 載せないタスクの番号の掃除でエラー（続行）:", e)
-        )
-      )
-  );
   // 本文に載せた順で番号を確定させてから送る（送信後だと先に返信されたとき引けない）
   await Promise.all(shown.map((t, i) => setRemindNumber(t.id, i + 1)));
   await pushLineChunks(LINE_GROUP_ID, chunks);

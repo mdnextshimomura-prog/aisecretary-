@@ -1,5 +1,5 @@
 import {
-  clearRemindNumber,
+  clearHiddenRemindNumbers,
   clearStaleRemindNumbers,
   getUpcomingTasks,
   jstDateStr,
@@ -134,6 +134,9 @@ export async function sendDailyReminders(): Promise<void> {
   const tasks = followup
     ? fetched.filter((t) => shouldRemind(t, todayStr, tomorrowStr, jstDateStr(-1)))
     : fetched;
+  // 載せなかった LINE WORKS 発に古い番号が残っていたら消す。載せるものが 0 件の朝でも行う。
+  // 消せなくても送信は続ける（番号検索の側で LINE WORKS 発を外しているので取り違えは起きない）。
+  await clearHiddenRemindNumbers(hiddenFromGroup, "remind");
   if (tasks.length === 0) return;
 
   // 初動確認の回答待ち。期日の枠に混ぜず先頭に独立させる。
@@ -207,17 +210,6 @@ export async function sendDailyReminders(): Promise<void> {
 
   // 本文に載せた順で番号を確定させてから送る。
   // 送信後に番号を振ると、先に返信されたときに引けないため順序が重要。
-  // 載せなかった LINE WORKS 発に古い番号が残っていると、今回振る番号と重なって
-  // 「3済」が載せていないほうに当たることがある。先に消しておく（失敗しても続行）。
-  await Promise.all(
-    hiddenFromGroup
-      .filter((t) => t.remindNumber !== null)
-      .map((t) =>
-        clearRemindNumber(t.id).catch((e) =>
-          console.error("[remind] 載せないタスクの番号の掃除でエラー（続行）:", e)
-        )
-      )
-  );
   if (followup) {
     await clearStaleRemindNumbers(shown.map((t) => t.id)).catch((e) =>
       console.error("[remind] 古い番号の掃除でエラー（続行）:", e)

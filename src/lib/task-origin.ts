@@ -25,6 +25,17 @@ export function isLineWorksOrigin(origin: string | null | undefined): boolean {
   return (origin ?? "").trim() === ORIGIN_LINE_WORKS;
 }
 
+/**
+ * グループでの操作（ボタン・引用）の対象にしてよいか。グループ（groupId あり）で LINE WORKS 発なら
+ * null＝「見つからない」と同じ扱いにする（題名を返さない・操作しない）。1対1（groupId なし）はそのまま。
+ */
+export function hideLineWorksInGroup<T extends { origin?: string | null }>(
+  task: T | null,
+  groupId: string | undefined
+): T | null {
+  return task && groupId && isLineWorksOrigin(task.origin) ? null : task;
+}
+
 /** グループあての通知に載せるもの（shown）と、載せないもの（hidden）に分ける。順番は変えない */
 export function splitForGroup<T extends { origin: string | null }>(
   tasks: T[]

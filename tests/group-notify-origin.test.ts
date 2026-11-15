@@ -4,6 +4,8 @@
  *   - LINE WORKS 発は出ない／グループ発は出る／発生元が空の古い行は出る
  *   - 番号は載せたものだけに 1 から続きで振る（文字の一覧・カード・Notion の番号が同じ並び）
  *   - 載せなかった LINE WORKS 発に残っていた古い番号は消す（同じ番号の取り違えを防ぐ）
+ *   - 番号での検索（「N済」・番号での待ち／延期／不要）は LINE WORKS 発を「見つからない」にする
+ *   - グループでのボタン・引用は LINE WORKS 発を「見つからない」にする（1対1はそのまま）
  * 外への通信は全部横取りする：LINE（fetch）・Notion（Client.prototype.request）。KV は未設定。
  * 実際の外部 API には一切つながない。値はどれもテスト用。
  */
@@ -12,7 +14,7 @@ import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
 import { Client } from "@notionhq/client";
-import { isLineWorksOrigin, originOf, splitForGroup } from "../src/lib/task-origin";
+import { hideLineWorksInGroup, isLineWorksOrigin, originOf, splitForGroup } from "../src/lib/task-origin";
 
 let fail = 0;
 const ok = (name: string, cond: boolean, d = "") => {
@@ -71,10 +73,16 @@ interface Row {
   number: number | null;
   notified: boolean;
   created: string;
+  /** メッセージID（引用での特定に使う）。無ければ空 */
+  messageId?: string;
 }
 let rows: Row[] = [];
 const numberWrites: Array<[string, number | null]> = [];
 const notifiedWrites: string[] = [];
+/** その他の書き込み（完了・状況など）の対象ページ */
+const otherWrites: string[] = [];
+/** この ID のページへの番号の書き込みは失敗させる */
+const failNumberWriteFor = new Set<string>();
 const page = (r: Row) => ({
   id: r.id,
   url: `https://example.invalid/${r.id}`,
@@ -85,6 +93,8 @@ const page = (r: Row) => ({
     緊急度: { select: { name: "今日中" } },
     担当者: { select: { name: "担当 太郎" } },
     担当者ID: { rich_text: [] },
+    依頼者ID: { rich_text: [] },
+    メッセージID: { rich_text: r.messageId ? [{ plain_text: r.messageId }] : [] },
     ステータス: { select: { name: "未着手" } },
     発生元: { rich_text: r.origin ? [{ plain_text: r.origin }] : [] },
     リマインド番号: { number: r.number },
@@ -97,6 +107,9 @@ Client.prototype.request = (async (args: { path: string; method: string; body?: 
     const id = args.path.slice("pages/".length);
     const props = ((args.body ?? {}) as { properties?: Record<string, unknown> }).properties ?? {};
     const row = rows.find((r) => r.id === id);
+    if ("リマインド番号" in props && failNumberWriteFor.has(id))
+      throw new Error(`テスト用の失敗 ${id}`);
+    if (!("リマインド番号" in props) && !("通知済み" in props)) otherWrites.push(id);
     if ("リマインド番号" in props) {
       const n = (props["リマインド番号"] as { number: number | null }).number;
       numberWrites.push([id, n]);
@@ -108,7 +121,24 @@ Client.prototype.request = (async (args: { path: string; method: string; body?: 
     }
     return { id, properties: {} };
   }
+  if (args.method === "get" && args.path.startsWith("pages/")) {
+    const row = rows.find((r) => r.id === args.path.slice("pages/".length));
+    if (!row) throw Object.assign(new Error("not found"), { code: "object_not_found" });
+    return page(row);
+  }
   if (args.method === "post" && args.path.endsWith("/query")) {
+    const filter = (args.body as { filter?: { and?: Array<Record<string, unknown>>; property?: string; rich_text?: { contains?: string } } }).filter;
+    // 番号での検索（findTaskByRemindNumber）：その番号の行だけ返す
+    const byNumber = filter?.and?.find((c) => c.property === "リマインド番号" && (c.number as { equals?: number })?.equals !== undefined);
+    if (byNumber) {
+      const n = (byNumber.number as { equals: number }).equals;
+      return { object: "list", results: rows.filter((r) => r.number === n).map(page), has_more: false, next_cursor: null };
+    }
+    // メッセージID での検索（findTaskByMessageId）
+    if (filter?.property === "メッセージID") {
+      const m = filter.rich_text?.contains ?? "";
+      return { object: "list", results: rows.filter((r) => r.messageId === m).map(page), has_more: false, next_cursor: null };
+    }
     // 番号の掃除（clearStaleRemindNumbers）の問い合わせは、番号が入っている行だけ返す
     const list = body.includes("is_not_empty") ? rows.filter((r) => r.number !== null) : rows;
     return { object: "list", results: list.map(page), has_more: false, next_cursor: null };
@@ -129,6 +159,9 @@ const reset = () => {
   pushes.length = 0;
   numberWrites.length = 0;
   notifiedWrites.length = 0;
+  otherWrites.length = 0;
+  errors.length = 0;
+  failNumberWriteFor.clear();
 };
 /** push の本文（JSON 文字列）をつないだもの */
 const sentText = () => pushes.join("\n");
@@ -222,7 +255,16 @@ const numbers = () => Object.fromEntries(rows.map((r) => [r.id, r.number]));
     rows = [mk("p-lw", "本人のLW仕事", "LINE WORKS", 2)];
     reset();
     await sendDailyReminders();
-    eq("朝：LINE WORKS 発だけなら何も送らない・書かない", [pushes.length, numberWrites], [0, []]);
+    eq("朝：LINE WORKS 発だけなら何も送らないが、古い番号は消す", [pushes.length, numberWrites], [0, [["p-lw", null]]]);
+  }
+  {
+    rows = fresh();
+    reset();
+    failNumberWriteFor.add("p-lw");
+    await sendDailyReminders();
+    ok("朝：番号を消せなくても送信は続ける", pushes.length === 1 && !sentText().includes("本人のLW仕事"));
+    eq("朝：消せなかったことを1行だけ残す（番号・ID・題名なし）", errors, ["[remind] hidden-number-clear-failed 1/1"]);
+    errors.length = 0;
   }
 
   // ── 3. 棚卸し ──
@@ -250,6 +292,67 @@ const numbers = () => Object.fromEntries(rows.map((r) => [r.id, r.number]));
     reset();
     const r = await sendClosureStocktake("テスト休業", "2026-01-01");
     eq("棚卸し：LINE WORKS 発だけなら送らない", [r.sent, pushes.length], [false, 0]);
+  }
+  {
+    rows = [mk("p-lw", "本人のLW仕事", "LINE WORKS", 2)];
+    reset();
+    const dry = await sendClosureStocktake("テスト休業", "2026-01-01", true);
+    eq("棚卸し（下見）：0件でも書かない", [dry.sent, numberWrites], [false, []]);
+    const r = await sendClosureStocktake("テスト休業", "2026-01-01");
+    eq("棚卸し：LINE WORKS 発だけなら送らないが、古い番号は消す", [r.sent, pushes.length, numberWrites], [false, 0, [["p-lw", null]]]);
+  }
+  {
+    rows = fresh();
+    reset();
+    failNumberWriteFor.add("p-lw");
+    const r = await sendClosureStocktake("テスト休業", "2026-01-01");
+    ok("棚卸し：番号を消せなくても送信は続ける", r.sent && !sentText().includes("本人のLW仕事"));
+    eq("棚卸し：消せなかったことを1行だけ残す（番号・ID・題名なし）", errors, ["[report] hidden-number-clear-failed 1/1"]);
+    errors.length = 0;
+  }
+
+  // ── 4. 番号での検索（「N済」・番号での待ち／延期／不要が使う） ──
+  {
+    const { findTaskByRemindNumber } = await import("../src/lib/notion");
+    const { statusDeps } = await import("../src/lib/task-status-wire");
+    const { applyStatusCommand } = await import("../src/lib/task-status");
+    // 古い番号 2 が LINE WORKS 発に残ったまま、グループ発にも 2 が振られている（LINE WORKS 発が先に返る並び）
+    rows = [mk("p-lw", "本人のLW仕事", "LINE WORKS", 2), mk("p-group-1", "グループ発その1", G, 2), mk("p-old", "発生元なしの古い行", null, 3)];
+    reset();
+    for (const anyDue of [true, false]) {
+      eq(`番号検索：同じ番号でも LINE WORKS 発を飛ばして本来のタスクに当たる（anyDue=${anyDue}）`, await findTaskByRemindNumber(2, { anyDue }), { id: "p-group-1", title: "グループ発その1" });
+    }
+    eq("番号検索：発生元が空の古い行は今までどおり引ける", await findTaskByRemindNumber(3, { anyDue: true }), { id: "p-old", title: "発生元なしの古い行" });
+    rows = [mk("p-lw", "本人のLW仕事", "LINE WORKS", 2)];
+    eq("番号検索：LINE WORKS 発だけなら見つからない", [await findTaskByRemindNumber(2, { anyDue: true }), await findTaskByRemindNumber(2)], [null, null]);
+    const r = await applyStatusCommand({ kind: "drop", numbers: [2] } as Parameters<typeof applyStatusCommand>[0], statusDeps());
+    ok("番号での不要：LINE WORKS 発には書かない・題名を返さない", r.changed === 0 && !r.text.includes("本人のLW仕事") && r.text.includes("2番は見つかりませんでした") && otherWrites.length === 0, JSON.stringify([r, otherWrites]));
+  }
+
+  // ── 5. 過去のカードのボタン・引用（グループでは見つからない扱い。1対1はそのまま） ──
+  {
+    const { buttonDeps, getButtonTask, findQuotedTaskReal } = await import("../src/lib/task-buttons-wire");
+    const { handleTaskButton, MSG_UNCONFIRMED } = await import("../src/lib/task-buttons");
+    eq("判定：グループでだけ LINE WORKS 発を隠す", [
+      hideLineWorksInGroup({ origin: "LINE WORKS" }, G), hideLineWorksInGroup({ origin: "LINE WORKS" }, undefined),
+      hideLineWorksInGroup({ origin: G }, G), hideLineWorksInGroup({ origin: null }, G), hideLineWorksInGroup(null, G),
+    ], [null, { origin: "LINE WORKS" }, { origin: G }, { origin: null }, null]);
+    const LW = "11111111-2222-3333-4444-555555555555"; // ボタンの data に載る形（ページ ID）
+    rows = [
+      { ...mk(LW, "本人のLW仕事", "LINE WORKS"), messageId: "msg-lw" },
+      { ...mk("p-group-1", "グループ発その1", G), messageId: "msg-g" },
+      { ...mk("p-old", "発生元なしの古い行", null), messageId: "msg-old" },
+    ];
+    reset();
+    eq("ボタン：グループでは LINE WORKS 発は見つからない", await getButtonTask(LW, G), null);
+    eq("ボタン：1対1では今までどおり読める", (await getButtonTask(LW))?.title, "本人のLW仕事");
+    eq("ボタン：グループ発・発生元が空の行はグループで読める", [(await getButtonTask("p-group-1", G))?.title, (await getButtonTask("p-old", G))?.title], ["グループ発その1", "発生元なしの古い行"]);
+    const pressed = await handleTaskButton(`v1|done|${LW}`, "U" + "b".repeat(32), buttonDeps(G));
+    ok("ボタン：グループで押されても題名を返さず、書かない", pressed !== null && pressed.text === MSG_UNCONFIRMED && pressed.changed === false && otherWrites.length === 0, JSON.stringify([pressed, otherWrites]));
+
+    eq("引用：グループでは LINE WORKS 発は見つからない", await findQuotedTaskReal("msg-lw", G), null);
+    eq("引用：1対1では今までどおり", (await findQuotedTaskReal("msg-lw"))?.title, "本人のLW仕事");
+    eq("引用：グループ発・発生元が空の行はグループで見つかる", [(await findQuotedTaskReal("msg-g", G))?.id, (await findQuotedTaskReal("msg-old", G))?.id], ["p-group-1", "p-old"]);
   }
 
   eq("外への通信なし（LINE 以外の fetch・生のソケット）", [otherFetch, socketCalls], [[], []]);

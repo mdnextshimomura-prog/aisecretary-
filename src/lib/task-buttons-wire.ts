@@ -50,6 +50,7 @@ import {
   type CandidateActionDeps,
 } from "./candidate-card";
 import { statusDeps } from "./task-status-wire";
+import { hideLineWorksInGroup, originOf } from "./task-origin";
 import { jstDateStr } from "./notion";
 import {
   isClosedPage,
@@ -83,9 +84,14 @@ function richText(props: Record<string, unknown>, key: string): string | null {
   return v || null;
 }
 
-/** ボタンの対象のタスク。見つからなければ null。 */
+/**
+ * ボタンの対象のタスク。見つからなければ null。
+ * groupId（押されたグループ）があり、タスクが LINE WORKS 発なら null（見つからないと同じ扱い。
+ * 題名を返さない・操作しない）。1対1（groupId なし）は今までどおり。
+ */
 export async function getButtonTask(
   pageId: string,
+  groupId?: string,
 ): Promise<ButtonTask | null> {
   let page: Record<string, unknown>;
   try {
@@ -101,6 +107,7 @@ export async function getButtonTask(
   const title =
     (props["名前"] as { title?: Array<{ plain_text: string }> } | undefined)
       ?.title?.[0]?.plain_text ?? "（無題）";
+  if (!hideLineWorksInGroup({ origin: originOf(props) }, groupId)) return null;
   return {
     id: String(page.id),
     title,
@@ -155,7 +162,7 @@ export function sessionDeps(groupId: string | undefined): ButtonDeps["session"] 
 export function buttonDeps(groupId?: string): ButtonDeps {
   const s = statusDeps();
   return {
-    getTask: getButtonTask,
+    getTask: (pageId) => getButtonTask(pageId, groupId),
     members: loadMembers,
     complete: completeTask,
     status: { update: s.update, defaultCheckDate: s.defaultCheckDate },
@@ -174,10 +181,10 @@ export interface SentIds {
   cardId: string | null;
 }
 
-/** pageId からタスク（id・題名）。消された（アーカイブ・ゴミ箱）・見つからないなら null */
+/** pageId からタスク（id・題名・発生元）。消された（アーカイブ・ゴミ箱）・見つからないなら null */
 export async function readTaskRef(
   pageId: string,
-): Promise<{ id: string; title: string } | null> {
+): Promise<{ id: string; title: string; origin: string | null } | null> {
   let page: Record<string, unknown>;
   try {
     page = (await notion.pages.retrieve({
@@ -193,20 +200,25 @@ export async function readTaskRef(
   const title =
     (props["名前"] as { title?: Array<{ plain_text: string }> } | undefined)
       ?.title?.[0]?.plain_text ?? "（無題）";
-  return { id: String(page.id), title };
+  return { id: String(page.id), title, origin: originOf(props) };
 }
 
 /**
  * 引用先のタスク（route.ts の確認への回答・引用での完了で使う）。まずメッセージID、無ければ
  * 付け直したカードの控え（cardref）。TASK_BUTTONS が off なら findTaskByMessageId と同じ。
+ * groupId（発言のあったグループ）があり、引用先が LINE WORKS 発なら null（見つからないと同じ扱い。
+ * グループでは題名を返さない・操作しない）。1対1（groupId なし）は今までどおり。
  */
 export function findQuotedTaskReal(
   messageId: string,
+  groupId?: string,
 ): Promise<{ id: string; title: string } | null> {
   return findQuotedTask(messageId, {
-    findByMessageId: findTaskByMessageId,
+    findByMessageId: async (id) =>
+      hideLineWorksInGroup(await findTaskByMessageId(id), groupId),
     store: defaultCardRefStore(),
-    readTask: readTaskRef,
+    readTask: async (pageId) =>
+      hideLineWorksInGroup(await readTaskRef(pageId), groupId),
     log: (line) => console.log(line),
   });
 }

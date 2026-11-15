@@ -896,7 +896,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     {
       const quotedId = event.message.quotedMessageId ?? null;
       // メッセージID で見つからなければ、付け直したカードの控え（cardref。TASK_BUTTONS=1 のときだけ）
-      const quotedTask = quotedId ? await findQuotedTaskReal(quotedId) : null;
+      const quotedTask = quotedId
+        ? await findQuotedTaskReal(quotedId, source.groupId)
+        : null;
       const pending = await getPendingTaskConfirm(
         source.groupId,
         quotedId,
@@ -1313,7 +1315,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       ) ?? [];
     if (event.message.quotedMessageId) {
       // メッセージID で見つからなければ、付け直したカードの控え（cardref。TASK_BUTTONS=1 のときだけ）
-      const task = await findQuotedTaskReal(event.message.quotedMessageId);
+      const task = await findQuotedTaskReal(
+        event.message.quotedMessageId,
+        source.groupId
+      );
       if (task) {
         // 「待ち 完了検査 金曜」「待ち キャンセル待ち 金曜」は、理由の中の「完了」「キャンセル」で
         // 下の (a)(a2) に取られてしまう。状況の言葉として読めるときは (a)(a2) を飛ばして (a3) に回す。

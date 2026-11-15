@@ -1,7 +1,7 @@
 import { Client } from "@notionhq/client";
 import type { ParsedTask } from "./claude";
 import { closeProps, followupEnabled } from "./task-status";
-import { originOf } from "./task-origin";
+import { isLineWorksOrigin, originOf } from "./task-origin";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 const DATABASE_ID = process.env.NOTION_DATABASE_ID!;
@@ -169,7 +169,7 @@ export async function setTaskMessageIds(
 // 引用リプライ先のメッセージIDからタスクを探す
 export async function findTaskByMessageId(
   messageId: string
-): Promise<{ id: string; title: string } | null> {
+): Promise<{ id: string; title: string; origin: string | null } | null> {
   const response = await notion.databases.query({
     database_id: DATABASE_ID,
     filter: {
@@ -188,6 +188,7 @@ export async function findTaskByMessageId(
   return {
     id: page.id,
     title: titleProp?.title[0]?.plain_text ?? "（無題）",
+    origin: originOf(props),
   };
 }
 
@@ -262,6 +263,23 @@ export async function clearRemindNumber(pageId: string): Promise<void> {
   });
 }
 
+// グループあての知らせから外したタスク（LINE WORKS 発）のうち、番号が残っているものを消す。
+// 消せなかった件数を返す。失敗は握りつぶさず 1 行だけログに出す（番号・ID・題名は出さない）。
+// 消せなくても、番号検索（findTaskByRemindNumber）が LINE WORKS 発を外すので取り違えは起きない。
+export async function clearHiddenRemindNumbers(
+  hidden: Array<{ id: string; remindNumber: number | null }>,
+  label: string,
+  log: (line: string) => void = (l) => console.error(l)
+): Promise<number> {
+  const targets = hidden.filter((t) => t.remindNumber !== null);
+  const results = await Promise.allSettled(
+    targets.map((t) => clearRemindNumber(t.id))
+  );
+  const failed = results.filter((r) => r.status === "rejected").length;
+  if (failed > 0) log(`[${label}] hidden-number-clear-failed ${failed}/${targets.length}`);
+  return failed;
+}
+
 // 今回の知らせに載せなかったタスクの番号を消す。
 // 新しい知らせ方では期日が先のタスクにも番号が付くので、古い番号が残っていると
 // 「3済」が別のタスクに当たる。知らせるたびに、載せた分以外の番号を消しておく。
@@ -300,9 +318,11 @@ export async function findTaskByRemindNumber(
   num: number,
   opts: { anyDue?: boolean } = {}
 ): Promise<{ id: string; title: string } | null> {
+  // LINE WORKS 発はグループの知らせに載せないので、番号で引けないようにする（古い番号が残っていても
+  // 題名を返さない・完了にしない）。1件だけ取ると LINE WORKS 発に先に当たって本来のタスクを
+  // 取り逃すので、同じ番号の行をまとめて取り、手元で外してから先頭を使う。
   const response = await notion.databases.query({
     database_id: DATABASE_ID,
-    page_size: 1,
     filter: {
       and: [
         { property: "リマインド番号", number: { equals: num } },
@@ -316,11 +336,13 @@ export async function findTaskByRemindNumber(
     },
   });
 
-  const page = response.results[0];
+  const propsOf = (pg: unknown) =>
+    ((pg as Record<string, unknown>).properties as Record<string, unknown>) ?? {};
+  const page = response.results.find(
+    (pg) => !isLineWorksOrigin(originOf(propsOf(pg)))
+  );
   if (!page) return null;
-  const props =
-    ((page as Record<string, unknown>).properties as Record<string, unknown>) ??
-    {};
+  const props = propsOf(page);
   const titleProp = props["名前"] as
     | { title: Array<{ plain_text: string }> }
     | undefined;
