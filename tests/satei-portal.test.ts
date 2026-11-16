@@ -6,6 +6,7 @@ import {
   sateiIntake,
   sateiPortalConfig,
   sateiReason,
+  parseSateiRedo,
   SATEI_CODE_AWAITING_REASON,
   type SateiIntakeReq,
   type SateiPortalOpts,
@@ -178,6 +179,18 @@ const headerOf = (c: Call, k: string) =>
     opts(fakeFetch(409, { code: "SATEI_STALE" }, [])),
   );
   ok("reason 409 → 断り", s2.kind === "rejected");
+
+  // ── redo の読み方 ──
+  const rd = async (redo: unknown) => {
+    const r = await sateiReason(12, "x", opts(fakeFetch(200, redo === undefined ? { ok: true } : { ok: true, redo }, [])));
+    return r.kind === "ok" ? JSON.stringify(r.value.redo ?? null) : "NG";
+  };
+  ok("redo {no,autoCount}", (await rd({ no: 15, autoCount: 2 })) === JSON.stringify({ kind: "started", no: 15, autoCount: 2 }));
+  ok("redo {limit:true}", (await rd({ limit: true })) === JSON.stringify({ kind: "limit" }));
+  ok("redo {skipped}", (await rd({ skipped: "BUSY" })) === JSON.stringify({ kind: "skipped" }));
+  ok("redo null・無し", (await rd(null)) === "null" && (await rd(undefined)) === "null");
+  for (const bad of [{ no: 0, autoCount: 1 }, { no: 1.5, autoCount: 1 }, { no: "15", autoCount: 1 }, { no: 15 }, { limit: false }, { limit: "true" }, { skipped: 3 }, {}, [], "x", 5, { no: 15, autoCount: 0 }])
+    ok(`redo 形が違えば null（${JSON.stringify(bad)}）`, parseSateiRedo(bad) === null);
 
   // ── 設定 ──
   const cfg = sateiPortalConfig({

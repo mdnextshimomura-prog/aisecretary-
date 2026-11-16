@@ -168,13 +168,34 @@ export async function sateiDecide(
   );
 }
 
+/** reason の応答の `redo`（自動の作り直しの結果）。null＝無い・形が違う（スイッチ off・古い portal を含む） */
+export type SateiRedo =
+  | { kind: "started"; no: number; autoCount: number }
+  | { kind: "limit" }
+  | { kind: "skipped" };
+
+export interface SateiReasonOk {
+  ok: true;
+  redo?: SateiRedo | null;
+}
+
+/** 形が違うものは null（今の文）。符号の中身（skipped の文字列）は使わない */
+export function parseSateiRedo(v: unknown): SateiRedo | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const r = v as Record<string, unknown>;
+  if (isPositiveInt(r.no) && isPositiveInt(r.autoCount)) return { kind: "started", no: r.no, autoCount: r.autoCount };
+  if (r.limit === true) return { kind: "limit" };
+  if (typeof r.skipped === "string") return { kind: "skipped" };
+  return null;
+}
+
 export async function sateiReason(
   no: number,
   text: string,
   opts: SateiPortalOpts,
-): Promise<SateiCall<{ ok: true }>> {
+): Promise<SateiCall<SateiReasonOk>> {
   return classify(
     await postJson(`/api/jobs/${no}/satei/reason`, { text }, opts),
-    (b) => (b.ok === true ? { ok: true as const } : null),
+    (b) => (b.ok === true ? { ok: true as const, redo: parseSateiRedo(b.redo) } : null),
   );
 }

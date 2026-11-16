@@ -18,6 +18,7 @@ import { judgeSateiDeal, type SateiDeal } from "./satei-deal";
 import {
   SATEI_CODE_AWAITING_REASON,
   type SateiCall,
+  type SateiReasonOk,
   type SateiDecideReq,
   type SateiIntakeOk,
   type SateiIntakeReq,
@@ -38,6 +39,9 @@ import {
   msgSateiReasonClosed,
   msgSateiReasonFailed,
   msgSateiReasonSaved,
+  msgSateiRedoLimit,
+  msgSateiRedoSkipped,
+  msgSateiRedoStarted,
   msgSateiRejectAsk,
   msgSateiRejected,
   msgSateiStale,
@@ -233,7 +237,7 @@ export interface SateiReasonKv {
 
 export interface SateiReasonDeps {
   kv: SateiReasonKv | null;
-  reason(no: number, text: string): Promise<SateiCall<{ ok: true }>>;
+  reason(no: number, text: string): Promise<SateiCall<SateiReasonOk>>;
   reply(replyToken: string, text: string): Promise<unknown>;
   log(line: string): void;
 }
@@ -274,7 +278,7 @@ export async function handleSateiReasonText(m: SateiReasonMessage, deps: SateiRe
   const token = mark?.token;
   if (typeof no !== "number" || !Number.isInteger(no) || no <= 0) return false;
   if (typeof token !== "string" || !token) return false;
-  let r: SateiCall<{ ok: true }>;
+  let r: SateiCall<SateiReasonOk>;
   try {
     r = await deps.reason(no, text);
   } catch {
@@ -292,8 +296,18 @@ export async function handleSateiReasonText(m: SateiReasonMessage, deps: SateiRe
       deps.log("[satei] reason clear-failed");
     }
   }
+  const redo = r.kind === "ok" ? (r.value.redo ?? null) : null;
+  if (redo) deps.log(`[satei] reason #J${no} redo-${redo.kind}`);
+  const savedText =
+    redo?.kind === "started"
+      ? msgSateiRedoStarted(redo.no, redo.autoCount)
+      : redo?.kind === "limit"
+        ? msgSateiRedoLimit(no)
+        : redo?.kind === "skipped"
+          ? msgSateiRedoSkipped(no)
+          : msgSateiReasonSaved(no);
   const reply =
-    outcome === "saved" ? msgSateiReasonSaved(no) : outcome === "closed" ? msgSateiReasonClosed(no) : msgSateiReasonFailed(no);
+    outcome === "saved" ? savedText : outcome === "closed" ? msgSateiReasonClosed(no) : msgSateiReasonFailed(no);
   try {
     await deps.reply(m.replyToken, reply);
   } catch {

@@ -30,10 +30,17 @@ export const msgSateiAccepted = (no: number) => `受け付けました。結果�
 export const msgSateiInProgress = (no: number) => `作成中です（${jobTag(no)}）`;
 export const msgSateiOk = (no: number) => `OK を受け付けました。案件フォルダに保存したら知らせます（${jobTag(no)}）`;
 export const msgSateiRejectAsk = (no: number) =>
-  `差し戻しました（${jobTag(no)}）。理由を一言返信してください（次の1通を理由として記録します）`;
+  `差し戻しました（${jobTag(no)}）。理由を一言返信してください（次の1通を理由として記録します）。検品の指摘は、こちらで作成役に渡します`;
 export const msgSateiRejected = (no: number) => `差し戻しました（${jobTag(no)}）`;
 export const msgSateiStale = (no: number) => `この下書きは古いか、もう処理済みです（${jobTag(no)}）`;
 export const msgSateiReasonSaved = (no: number) => `理由を記録しました（${jobTag(no)}）`;
+export const SATEI_AUTO_REDO_MAX = 2;
+export const msgSateiRedoStarted = (newNo: number, n: number) =>
+  `理由を記録しました。検品の指摘と合わせて作り直します（${jobTag(newNo)}・作り直し ${n}回目／${SATEI_AUTO_REDO_MAX}回まで）`;
+export const msgSateiRedoLimit = (no: number) =>
+  `理由を記録しました。自動の作り直しは${SATEI_AUTO_REDO_MAX}回までです。案件カードの［査定書を作る］から押し直してください（${jobTag(no)}）`;
+export const msgSateiRedoSkipped = (no: number) =>
+  `理由を記録しました。いまは自動で作り直せませんでした。案件カードの［査定書を作る］を押してください（${jobTag(no)}）`;
 /** 通信の失敗・結果不明（印は残すので、次の1通をもう一度理由として受ける。契約 6-11 の文） */
 export const msgSateiReasonFailed = (no: number) => `記録できませんでした。もう一度送ってください（${jobTag(no)}）`;
 /** portal がはっきり断った（30分を過ぎて取消になった・もう理由が入っている）。印は消す */

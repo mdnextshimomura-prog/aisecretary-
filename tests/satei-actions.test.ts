@@ -7,6 +7,7 @@ import {
   type SateiActionDeps,
   type SateiReasonDeps,
 } from "../src/lib/satei-actions";
+import type { SateiReasonOk } from "../src/lib/satei-portal";
 import { encodeSateiDecision, parseSateiData, sateiReasonKey, type SateiAction } from "../src/lib/satei-data";
 import type { SateiDeal } from "../src/lib/satei-deal";
 import type { SateiCall, SateiDecideReq, SateiIntakeOk, SateiIntakeReq } from "../src/lib/satei-portal";
@@ -327,7 +328,7 @@ const quiet = (logs: string[]) => !logs.join("\n").includes(SHIMO) && !logs.join
   function mkR(
     o: {
       mark?: unknown;
-      reasons?: Array<SateiCall<{ ok: true }>>;
+      reasons?: Array<SateiCall<SateiReasonOk>>;
       kv?: boolean;
       getThrows?: boolean;
       delThrows?: boolean;
@@ -444,7 +445,7 @@ const quiet = (logs: string[]) => !logs.join("\n").includes(SHIMO) && !logs.join
     ["設定不足（status 0）", { kind: "rejected", status: 0, code: "CONFIG" }],
     ["5xx", { kind: "rejected", status: 503, code: "HTTP_503" }],
     ["結果不明", { kind: "unknown", reason: "http-500" }],
-  ] as Array<[string, SateiCall<{ ok: true }>]>) {
+  ] as Array<[string, SateiCall<SateiReasonOk>]>) {
     // ④ 印を消すのは portal が実際に 4xx を返したときだけ
     const m = mkR({ mark: MA, reasons: [res] });
     const r1 = await handleSateiReasonText(msg(), m.deps);
@@ -490,6 +491,35 @@ const quiet = (logs: string[]) => !logs.join("\n").includes(SHIMO) && !logs.join
     ok("理由：KV が読めなければ今の流れへ", (await handleSateiReasonText(msg(), m.deps)) === false && m.r.reasons.length === 0);
   }
   delete process.env.TASK_SATEI;
+  on();
+  // ── 自動の作り直し（redo）の返事 ──
+  for (const [label, value, want, logLine] of [
+    ["started", { ok: true, redo: { kind: "started", no: 15, autoCount: 2 } }, T.msgSateiRedoStarted(15, 2), "[satei] reason #J12 redo-started"],
+    ["limit", { ok: true, redo: { kind: "limit" } }, T.msgSateiRedoLimit(12), "[satei] reason #J12 redo-limit"],
+    ["skipped", { ok: true, redo: { kind: "skipped" } }, T.msgSateiRedoSkipped(12), "[satei] reason #J12 redo-skipped"],
+    ["null", { ok: true, redo: null }, T.msgSateiReasonSaved(12), ""],
+    ["無し", { ok: true }, T.msgSateiReasonSaved(12), ""],
+  ] as Array<[string, SateiReasonOk, string, string]>) {
+    const m = mkR({ mark: MA, reasons: [{ kind: "ok", value }] });
+    const r1 = await handleSateiReasonText(msg(), m.deps);
+    ok(`redo ${label}：返事`, r1 === true && m.r.replies.length === 1 && m.r.replies[0] === want);
+    ok(`redo ${label}：印は消える`, !m.store.has(KEY));
+    ok(`redo ${label}：ログ`, logLine ? m.r.logs.includes(logLine) : !m.r.logs.some((l) => l.includes("redo-")));
+    ok(`redo ${label}：ログに本文・token を出さない`, !m.r.logs.join("").includes("事例") && !m.r.logs.join("").includes("tok-A"));
+  }
+  ok(
+    "redo の文（started）が設計どおり",
+    T.msgSateiRedoStarted(15, 1) === "理由を記録しました。検品の指摘と合わせて作り直します（#J15・作り直し 1回目／2回まで）" &&
+      T.msgSateiRedoLimit(12) === "理由を記録しました。自動の作り直しは2回までです。案件カードの［査定書を作る］から押し直してください（#J12）" &&
+      T.msgSateiRedoSkipped(12) === "理由を記録しました。いまは自動で作り直せませんでした。案件カードの［査定書を作る］を押してください（#J12）",
+  );
+  ok("redo なし・null の文は今のまま", T.msgSateiReasonSaved(12) === "理由を記録しました（#J12）");
+  {
+    // redo があっても失敗・結果不明は今のまま（印を残してもう一度）
+    const m = mkR({ mark: MA, reasons: [{ kind: "unknown", reason: "timeout" }] });
+    await handleSateiReasonText(msg(), m.deps);
+    ok("redo：結果不明は今どおり", m.r.replies[0] === T.msgSateiReasonFailed(12) && m.store.has(KEY));
+  }
   delete process.env.TASK_SATEI_USER_IDS;
 
   if (fail > 0) {
