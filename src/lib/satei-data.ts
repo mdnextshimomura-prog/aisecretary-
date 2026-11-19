@@ -67,4 +67,5 @@ export function parseSateiData(data: string): SateiAction | null {
 /** ［差し戻し］のあと、次の1対1の文字を理由として受ける印（値は `{ no, token }`。token は UUID） */
 export const sateiReasonKey = (userId: string): string => `satei:reason:${userId}`;
 export const SATEI_REASON_TTL = 30 * 60;
-export const SATEI_REASON_MAX = 200;
+// 喋り言葉のまま送れるように 2000字（設計書 2026-11-19 spoken-reason 1。portal も 2000字で切る）
+export const SATEI_REASON_MAX = 2000;

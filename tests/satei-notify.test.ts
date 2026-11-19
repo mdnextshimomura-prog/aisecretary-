@@ -73,13 +73,21 @@ const DRAFT = {
   artifactSha256: SHA,
 };
 const p1 = parseNotifyInput(DRAFT);
-ok("draft を読む", p1 !== null && p1.no === 12 && p1.kind === "draft" && p1.generation === 3 && p1.findings.length === 3);
+ok("draft を読む", p1 !== null && p1.no === 12 && p1.kind === "draft" && p1.generation === 3 && p1.findings.length === 4);
 ok("findings は JSON 配列の文字列でも読む", parseNotifyInput({ ...DRAFT, findings: JSON.stringify(["x"]) })?.findings[0] === "x");
 ok("missing は JSON 配列の文字列でも読む", parseNotifyInput({ no: 1, kind: "failed", generation: 1, dealName: "a", failReason: "materials", missing: '["謄本"]' })?.missing[0] === "謄本");
 ok("draft で sha が無い → null", parseNotifyInput({ ...DRAFT, artifactSha256: undefined }) === null);
 ok("draft で Drive ID が無い → null", parseNotifyInput({ ...DRAFT, driveFileId: "" }) === null);
 ok("draft で generation 0 → null", parseNotifyInput({ ...DRAFT, generation: 0 }) === null);
 ok("知らない kind → null", parseNotifyInput({ ...DRAFT, kind: "other" }) === null);
+{
+  const r = parseNotifyInput({ no: 14, kind: "received", generation: 0, dealName: "a", requests: ["価格の見直し", " "], staffRequests: ["帯替え"] });
+  ok("received は generation 0 で受け、直す点を読む", r !== null && r.kind === "received" && r.requests.join() === "価格の見直し" && r.staffRequests.join() === "帯替え");
+  ok("received の直す点は15件・150字", (parseNotifyInput({ no: 14, kind: "received", generation: 0, requests: Array(20).fill("あ".repeat(200)) })?.requests ?? []).every((x) => Array.from(x).length === 150) && parseNotifyInput({ no: 14, kind: "received", generation: 0, requests: Array(20).fill("x") })?.requests.length === 15);
+  ok("直す点の形が違う → null", parseNotifyInput({ no: 14, kind: "received", generation: 0, requests: [1] }) === null);
+  ok("findings は10件・200字まで受ける", parseNotifyInput({ ...DRAFT, findings: Array(12).fill("あ".repeat(250)) })?.findings.length === 10 && Array.from(parseNotifyInput({ ...DRAFT, findings: ["あ".repeat(250)] })?.findings[0] ?? "").length === 200);
+  ok("nothing-to-fix の failReason を受ける", parseNotifyInput({ no: 1, kind: "failed", generation: 1, dealName: "a", failReason: "nothing-to-fix", missing: ["帯替え"] })?.failReason === "nothing-to-fix");
+}
 ok("知らない判定 → null", parseNotifyInput({ ...DRAFT, verdict: "まあまあ" }) === null);
 ok("知らない failReason → null", parseNotifyInput({ no: 1, kind: "failed", generation: 1, dealName: "a", failReason: "x" }) === null);
 ok("no が0 → null", parseNotifyInput({ ...DRAFT, no: 0 }) === null);

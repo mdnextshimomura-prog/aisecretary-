@@ -36,6 +36,8 @@ const DRAFT: SateiNotice = {
   driveFileId: "1FileId_abcdefghij",
   verdict: "要修正",
   findings: ["指摘1", "指摘2", "指摘3", "指摘4"],
+  requests: [],
+  staffRequests: [],
   missing: [],
   failReason: null,
   artifactSha256: SHA,
@@ -47,7 +49,7 @@ ok("受付の返事", msgSateiAccepted(5) === "受け付けました。結果は
 ok("作成中の返事", msgSateiInProgress(4) === "作成中です（#J4）");
 ok(
   "差し戻しの返事",
-  msgSateiRejectAsk(12) === "差し戻しました（#J12）。理由を一言返信してください（次の1通を理由として記録します）。検品の指摘は、こちらで作成役に渡します",
+  msgSateiRejectAsk(12) === "差し戻しました（#J12）。直してほしいことを返信してください。まとめなくて大丈夫です。喋ったまま（マイク入力でも）1通で送ってください（次の1通を理由として記録します）。検品の指摘は、こちらで作成役に渡します",
 );
 ok(
   "理由待ちの返事（契約 6-10）",
@@ -65,6 +67,8 @@ ok("見出し", json.includes("🏢 査定書の下書きができました（#J
 ok("altText も見出し", card.altText === "🏢 査定書の下書きができました（#J12・テストマンション101）");
 ok("判定", json.includes("判定：要修正"));
 ok("指摘は上位3件まで", json.includes("・指摘3") && !json.includes("指摘4"));
+ok("4件目からは「ほかにN件」の1行", json.includes("ほかに1件（差し戻したときは全部、作成役に渡します）"));
+ok("3件以下なら「ほかに」は出ない", !JSON.stringify(sateiDraftCard({ ...DRAFT, findings: ["a", "b", "c"] })).includes("ほかに"));
 type Act = { type: string; label: string; uri?: string; data?: string; displayText?: string };
 const acts = ((card.contents as { footer: { contents: Array<{ action: Act }> } }).footer.contents).map((b) => b.action);
 ok("ボタンは3つ", acts.length === 3);
@@ -82,7 +86,7 @@ ok(
 );
 ok("ラベルは40字以内", acts.every((a) => Array.from(a.label).length <= 40));
 const long = JSON.stringify(sateiDraftCard({ ...DRAFT, findings: ["あ".repeat(300)] }));
-ok("指摘は1件120字まで", long.includes(`・${"あ".repeat(120)}"`) && !long.includes("あ".repeat(121)));
+ok("指摘は1件200字まで", long.includes(`・${"あ".repeat(200)}"`) && !long.includes("あ".repeat(201)));
 ok("指摘が無ければ「指摘：なし」", JSON.stringify(sateiDraftCard({ ...DRAFT, findings: [] })).includes("指摘：なし"));
 ok("案件名が空なら（無題）", JSON.stringify(sateiDraftCard({ ...DRAFT, dealName: "" })).includes("（#J12・（無題））"));
 ok("Drive ID が無い draft は作らない", sateiNoticeMessages({ ...DRAFT, driveFileId: null }) === null);
@@ -95,6 +99,27 @@ ok(
   "failed materials",
   sateiNoticeText({ ...base, failReason: "materials", missing: ["成約事例のPDF", "専有面積"] }) ===
     `${HEAD}材料が足りないので作っていません：成約事例のPDF、専有面積。入れたら［査定書を作る］を押し直してください`,
+);
+ok(
+  "failed nothing-to-fix（担当の作業だけ）",
+  sateiNoticeText({ ...base, failReason: "nothing-to-fix", missing: ["売出事例の帯替え", "住宅地図の取得"] }) ===
+    `${HEAD}AI で直せる点が無いので、自動では作り直していません。残っているのは担当の作業です：売出事例の帯替え、住宅地図の取得。終わったら、案件カードの［査定書を作る］を押してください`,
+);
+ok(
+  "received（こう受け取りました）",
+  sateiNoticeText({ ...base, kind: "received", failReason: null, requests: ["査定価格の見直し", "売出件数の記載の訂正"], staffRequests: ["住宅地図の取得"] }) ===
+    `${HEAD}作り直しを始めました。差し戻しの理由からこう受け取りました：\n① 査定価格の見直し\n② 売出件数の記載の訂正\n【担当】住宅地図の取得\nずれていたら、下書きが届いたあとに［差し戻し］から言い直してください`,
+);
+ok(
+  "received で AI の点が0件",
+  sateiNoticeText({ ...base, kind: "received", failReason: null, requests: [], staffRequests: ["帯替え"] }).includes("（AI が直す点はありません）\n【担当】帯替え"),
+);
+ok(
+  "received は文字1通で 5000字に届かない",
+  (() => {
+    const m = sateiNoticeMessages({ ...base, kind: "received", failReason: null, requests: Array(15).fill("あ".repeat(150)), staffRequests: Array(15).fill("い".repeat(150)) });
+    return m !== null && m.length === 1 && Array.from((m[0] as { text: string }).text).length <= 4800;
+  })(),
 );
 ok("failed timeout", sateiNoticeText({ ...base, failReason: "timeout" }) === `${HEAD}作れませんでした（時間切れ）。押し直すと最初からやり直します`);
 ok("failed check", sateiNoticeText({ ...base, failReason: "check" }) === `${HEAD}作れませんでした（検品できませんでした）。押し直すと最初からやり直します`);

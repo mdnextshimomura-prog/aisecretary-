@@ -471,8 +471,8 @@ const quiet = (logs: string[]) => !logs.join("\n").includes(SHIMO) && !logs.join
   }
   {
     const m = mkR({ mark: MA });
-    await handleSateiReasonText(msg({ text: "あ".repeat(250) }), m.deps);
-    ok("理由：200字に切る", Array.from(m.r.reasons[0]?.text ?? "").length === 200);
+    await handleSateiReasonText(msg({ text: "あ".repeat(2500) }), m.deps);
+    ok("理由：2000字に切る（喋り言葉のまま送れる長さ）", Array.from(m.r.reasons[0]?.text ?? "").length === 2000);
   }
   {
     const m = mkR({ mark: MA });

@@ -30,7 +30,7 @@ export const msgSateiAccepted = (no: number) => `受け付けました。結果�
 export const msgSateiInProgress = (no: number) => `作成中です（${jobTag(no)}）`;
 export const msgSateiOk = (no: number) => `OK を受け付けました。案件フォルダに保存したら知らせます（${jobTag(no)}）`;
 export const msgSateiRejectAsk = (no: number) =>
-  `差し戻しました（${jobTag(no)}）。理由を一言返信してください（次の1通を理由として記録します）。検品の指摘は、こちらで作成役に渡します`;
+  `差し戻しました（${jobTag(no)}）。直してほしいことを返信してください。まとめなくて大丈夫です。喋ったまま（マイク入力でも）1通で送ってください（次の1通を理由として記録します）。検品の指摘は、こちらで作成役に渡します`;
 export const msgSateiRejected = (no: number) => `差し戻しました（${jobTag(no)}）`;
 export const msgSateiStale = (no: number) => `この下書きは古いか、もう処理済みです（${jobTag(no)}）`;
 export const msgSateiReasonSaved = (no: number) => `理由を記録しました（${jobTag(no)}）`;
@@ -47,7 +47,8 @@ export const msgSateiReasonFailed = (no: number) => `記録できませんでし
 export const msgSateiReasonClosed = (no: number) =>
   `理由を記録できませんでした。この差し戻しはもう閉じています（${jobTag(no)}）`;
 
-export type SateiNoticeKind = "draft" | "failed" | "saved" | "aborted";
+/** received：作り直しを始めたとき、Mac が差し戻し理由から抜き出した直す点（依頼箱を通さず Mac から直接。設計書 2026-11-19 spoken-reason 4） */
+export type SateiNoticeKind = "draft" | "failed" | "saved" | "aborted" | "received";
 
 export interface SateiNotice {
   no: number;
@@ -56,8 +57,11 @@ export interface SateiNotice {
   dealName: string;
   driveFileId: string | null;
   verdict: string | null;
-  /** 指摘（上位3件・各120字に切ったもの） */
+  /** 指摘（10件・各200字に切ったもの。カードに出すのは上位3件） */
   findings: string[];
+  /** received だけ：理由から抜き出した直す点（AI が直す・担当がやる。各15件・150字） */
+  requests: string[];
+  staffRequests: string[];
   missing: string[];
   failReason: string | null;
   artifactSha256: string | null;
@@ -65,7 +69,10 @@ export interface SateiNotice {
 
 const DEAL_NAME_MAX = 60;
 const FINDINGS_MAX = 3;
-const FINDING_LEN = 120;
+const FINDING_LEN = 200;
+/** LINE の文字のメッセージの上限 5000字より手前で切る */
+const TEXT_MAX = 4800;
+const CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮";
 
 const nameOf = (n: SateiNotice) => cut(n.dealName.trim() || "（無題）", DEAL_NAME_MAX);
 
@@ -77,8 +84,18 @@ const FAIL_LABEL: Record<string, string> = {
   internal: "内部のエラー",
 };
 
+function receivedBody(n: SateiNotice): string {
+  const lines = ["作り直しを始めました。差し戻しの理由からこう受け取りました："];
+  n.requests.forEach((r, i) => lines.push(`${CIRCLED[i] ?? `${i + 1}.`} ${r}`));
+  if (n.requests.length === 0) lines.push("（AI が直す点はありません）");
+  for (const r of n.staffRequests) lines.push(`【担当】${r}`);
+  lines.push("ずれていたら、下書きが届いたあとに［差し戻し］から言い直してください");
+  return lines.join("\n");
+}
+
 function bodyOf(n: SateiNotice): string {
   if (n.kind === "saved") return "案件フォルダの 02_査定・事例 に保存しました";
+  if (n.kind === "received") return receivedBody(n);
   if (n.kind === "aborted") {
     return n.failReason === "name-conflict"
       ? "同じ名前で中身の違うファイルがあるので保存していません"
@@ -90,13 +107,17 @@ function bodyOf(n: SateiNotice): string {
     return `材料が足りないので作っていません：${what}。入れたら［査定書を作る］を押し直してください`;
   }
   if (n.failReason === "folder") return "案件フォルダを確かめられませんでした";
+  if (n.failReason === "nothing-to-fix") {
+    const what = n.missing.length > 0 ? `残っているのは担当の作業です：${n.missing.join("、")}。` : "";
+    return `AI で直せる点が無いので、自動では作り直していません。${what}終わったら、案件カードの［査定書を作る］を押してください`;
+  }
   const label = FAIL_LABEL[n.failReason ?? ""] ?? FAIL_LABEL.internal;
   return `作れませんでした（${label}）。押し直すと最初からやり直します`;
 }
 
 /** draft 以外の通知の文 */
 export function sateiNoticeText(n: SateiNotice): string {
-  return `【査定書 ${jobTag(n.no)}・${nameOf(n)}】\n${bodyOf(n)}`;
+  return cut(`【査定書 ${jobTag(n.no)}・${nameOf(n)}】\n${bodyOf(n)}`, TEXT_MAX);
 }
 
 const postback = (label: string, data: string, displayText: string, primary: boolean) => ({
@@ -135,6 +156,9 @@ export function sateiDraftCard(n: SateiNotice): FlexMessage | null {
           { type: "text", text: head, weight: "bold", size: "md", wrap: true },
           { type: "text", text: `判定：${n.verdict}`, size: "sm", wrap: true },
           ...(findings.length > 0 ? findings : [{ type: "text", text: "指摘：なし", size: "sm", wrap: true }]),
+          ...(n.findings.length > FINDINGS_MAX
+            ? [{ type: "text", text: `ほかに${n.findings.length - FINDINGS_MAX}件（差し戻したときは全部、作成役に渡します）`, size: "xs", color: "#888888", wrap: true }]
+            : []),
         ],
       },
       footer: {

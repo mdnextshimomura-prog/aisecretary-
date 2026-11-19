@@ -44,7 +44,7 @@ export function sateiRetryKey(no: number, kind: string, generation: number): str
   return uuidv5(`${no}:${kind}:${generation}`, SATEI_RETRY_NAMESPACE);
 }
 
-const KINDS: ReadonlySet<string> = new Set<SateiNoticeKind>(["draft", "failed", "saved", "aborted"]);
+const KINDS: ReadonlySet<string> = new Set<SateiNoticeKind>(["draft", "failed", "saved", "aborted", "received"]);
 const VERDICTS: ReadonlySet<string> = new Set(["そのまま出せる", "要修正", "差し戻し"]);
 const FAIL_REASONS: ReadonlySet<string> = new Set([
   "materials",
@@ -56,6 +56,7 @@ const FAIL_REASONS: ReadonlySet<string> = new Set([
   "draft-changed",
   "folder-mismatch",
   "name-conflict",
+  "nothing-to-fix",
 ]);
 const DRIVE_ID_RE = /^[A-Za-z0-9_-]{10,200}$/;
 const SHA256_RE = /^[0-9a-f]{64}$/;
@@ -100,7 +101,9 @@ export function parseNotifyInput(body: unknown): SateiNotice | null {
   const verdict = optStr(b.verdict, (s) => VERDICTS.has(s));
   const failReason = optStr(b.failReason, (s) => FAIL_REASONS.has(s));
   const artifactSha256 = optStr(b.artifactSha256, (s) => SHA256_RE.test(s));
-  const findings = strList(b.findings, 3, 120);
+  const findings = strList(b.findings, 10, 200);
+  const requests = strList(b.requests, 15, 150);
+  const staffRequests = strList(b.staffRequests, 15, 150);
   const missing = strList(b.missing, 20, 60);
   if (
     driveFileId === undefined ||
@@ -108,6 +111,8 @@ export function parseNotifyInput(body: unknown): SateiNotice | null {
     failReason === undefined ||
     artifactSha256 === undefined ||
     findings === null ||
+    requests === null ||
+    staffRequests === null ||
     missing === null
   ) {
     return null;
@@ -122,6 +127,8 @@ export function parseNotifyInput(body: unknown): SateiNotice | null {
     driveFileId,
     verdict,
     findings,
+    requests,
+    staffRequests,
     missing,
     failReason,
     artifactSha256,

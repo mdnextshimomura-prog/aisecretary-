@@ -92,7 +92,7 @@ for (const d of [sa, so, sr]) {
   );
 }
 ok("理由の印の鍵", sateiReasonKey(SHIMO) === `satei:reason:${SHIMO}`);
-ok("理由の印は30分・200字", SATEI_REASON_TTL === 1800 && SATEI_REASON_MAX === 200);
+ok("理由の印は30分・2000字", SATEI_REASON_TTL === 1800 && SATEI_REASON_MAX === 2000);
 
 if (fail > 0) {
   console.log(`\n${fail} 件失敗`);
