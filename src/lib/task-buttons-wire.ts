@@ -324,7 +324,7 @@ export async function handleTaskPostbackEvent(
     candidates: over.candidates,
     satei: over.satei,
   };
-  // B2 査定書のボタン（v1|sa|・v1|so|・v1|sr|）。TASK_BUTTONS・TASK_MENU とは別のスイッチ（TASK_SATEI）なので、
+  // B2 査定書のボタン（v1|sa|・v1|so|・v1|sr|・v1|sx|）。TASK_BUTTONS・TASK_MENU とは別のスイッチ（TASK_SATEI）なので、
   // 「止めています」の判定より前に振り分ける。off・押せる人・二度押しの扱いは satei-actions.ts。
   // この3つの data は今まで出していないので、ほかのボタンの扱いは変わらない
   const satei = parseSateiData(data);

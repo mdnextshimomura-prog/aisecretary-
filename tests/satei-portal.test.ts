@@ -77,6 +77,14 @@ const headerOf = (c: Call, k: string) =>
   ok("鍵は x-job-token", headerOf(c[0], "x-job-token") === "tok");
   ok("本文は JSON", headerOf(c[0], "content-type") === "application/json");
   ok("本文は契約の6項目", c[0]?.init.body === JSON.stringify(REQ));
+  {
+    const cr: Call[] = [];
+    await sateiIntake({ ...REQ, resumeFrom: 12 }, opts(fakeFetch(201, { created: true, job: { no: 6, status: "受付" } }, cr)));
+    ok("再開のときだけ resumeFrom を足し、専用の口 /api/jobs/satei/resume へ", cr[0]?.init.body === JSON.stringify({ ...REQ, resumeFrom: 12 }) && cr[0]?.url === "https://portal.example.test/api/jobs/satei/resume");
+    const old: Call[] = [];
+    const r404 = await sateiIntake({ ...REQ, resumeFrom: 12 }, opts(fakeFetch(404, {}, old)));
+    ok("古い portal（再開の口が無い 404）は断り（作らない）", r404.kind === "rejected" && r404.status === 404);
+  }
   ok(
     "201 created → 新規",
     r1.kind === "ok" &&
@@ -186,7 +194,9 @@ const headerOf = (c: Call, k: string) =>
     return r.kind === "ok" ? JSON.stringify(r.value.redo ?? null) : "NG";
   };
   ok("redo {no,autoCount}", (await rd({ no: 15, autoCount: 2 })) === JSON.stringify({ kind: "started", no: 15, autoCount: 2 }));
-  ok("redo {limit:true}", (await rd({ limit: true })) === JSON.stringify({ kind: "limit" }));
+  ok("redo {limit:true}（古い portal＝案件なし）", (await rd({ limit: true })) === JSON.stringify({ kind: "limit", dealId: null }));
+  ok("redo {limit, dealId}", (await rd({ limit: true, dealId: "0123abcd0123456789ab0123456789ab" })) === JSON.stringify({ kind: "limit", dealId: "0123abcd0123456789ab0123456789ab" }));
+  ok("redo {limit, dealId が形違い} は案件なし", (await rd({ limit: true, dealId: "../x" })) === JSON.stringify({ kind: "limit", dealId: null }));
   ok("redo {skipped}", (await rd({ skipped: "BUSY" })) === JSON.stringify({ kind: "skipped" }));
   ok("redo null・無し", (await rd(null)) === "null" && (await rd(undefined)) === "null");
   for (const bad of [{ no: 0, autoCount: 1 }, { no: 1.5, autoCount: 1 }, { no: "15", autoCount: 1 }, { no: 15 }, { limit: false }, { limit: "true" }, { skipped: 3 }, {}, [], "x", 5, { no: 15, autoCount: 0 }])

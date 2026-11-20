@@ -123,7 +123,14 @@ export function sateiReasonDeps(): SateiReasonDeps {
   return {
     kv: sateiReasonKv(),
     reason: (no, text) => withPortal((o) => sateiReason(no, text, o)),
-    reply: (token, text) => sendLineMessage(token, text),
+    // 上限のときだけ［もう一度作る］のカードを2通目に付ける（無ければ今までどおり文字だけ）
+    // カードつきを LINE が 400 で断ったときだけ false（何も送られていない＝呼び手がボタンなしの文で送り直す）。
+    // それ以外の失敗（通信・5xx）は送れたか分からないので送り直さない
+    reply: async (token, text, card) => {
+      if (!card) return sendLineMessage(token, text);
+      const r = await replyTextAndCard(token, text, card);
+      return r.status === 400 ? false : undefined;
+    },
     log,
   };
 }

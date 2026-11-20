@@ -2,7 +2,8 @@
  * B2 査定書の下書き（2026-11-11）：スイッチ・押せる人・通知先・postback の data。
  * 契約 docs/superpowers/specs/2026-11-11-b2-satei-contract.md 第3節。
  * - TASK_SATEI=1 のときだけ動く（既定 off）。押せるのは TASK_SATEI_USER_IDS の人だけ（先頭が通知先＝下村さん）。
- * - data：案件カード `v1|sa|<dealId>`、個人カード `v1|so|<no>|<generation>|<sha256>`・`v1|sr|…`。
+ * - data：案件カード `v1|sa|<dealId>`、個人カード `v1|so|<no>|<generation>|<sha256>`・`v1|sr|…`、
+ *   上限からの［もう一度作る］`v1|sx|<dealId>|<元の依頼の番号>`（設計書 2026-11-20 resume-button）。
  */
 import { PAGE_ID_RE } from "./task-buttons";
 import { parseAllowedUserIds } from "./webhook-source";
@@ -35,10 +36,15 @@ export function sateiNotifyTarget(env: SateiEnv = process.env): string | null {
 export type SateiDecisionOp = "so" | "sr";
 export type SateiAction =
   | { op: "sa"; dealId: string }
+  | { op: "sx"; dealId: string; no: number }
   | { op: SateiDecisionOp; no: number; generation: number; sha256: string };
 
 export function encodeSateiStart(dealId: string): string {
   return `v1|sa|${dealId}`;
+}
+
+export function encodeSateiResume(dealId: string, no: number): string {
+  return `v1|sx|${dealId}|${no}`;
 }
 
 export function encodeSateiDecision(
@@ -57,6 +63,11 @@ export function parseSateiData(data: string): SateiAction | null {
   if (parts[0] !== "v1") return null;
   if (parts[1] === "sa") {
     return parts.length === 3 && PAGE_ID_RE.test(parts[2]) ? { op: "sa", dealId: parts[2] } : null;
+  }
+  if (parts[1] === "sx") {
+    return parts.length === 4 && PAGE_ID_RE.test(parts[2]) && JOB_NO_RE.test(parts[3])
+      ? { op: "sx", dealId: parts[2], no: Number(parts[3]) }
+      : null;
   }
   if ((parts[1] !== "so" && parts[1] !== "sr") || parts.length !== 5) return null;
   const [, op, no, generation, sha256] = parts;

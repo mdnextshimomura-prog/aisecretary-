@@ -1,12 +1,14 @@
 /**
  * B2 査定書：reins-report の依頼箱（契約 第2節）を呼ぶ。鍵はヘッダ `x-job-token`（帯替えと同じ JOB_API_TOKEN）。
  *   POST /api/jobs/satei/intake      … {eventId, dealId, dealNo, folderId, dealName, requestedBy} → {created, job:{no,status}}
+ *   POST /api/jobs/satei/resume      … 上の6項目＋resumeFrom（上限からの［もう一度作る］）→ 同じ形／409 SATEI_RESUME_STALE
  *   POST /api/jobs/{no}/satei/decide … {decision, by, artifactSha256, generation} → {status}／409 SATEI_MISMATCH
  *   POST /api/jobs/{no}/satei/reason … {text} → {ok:true}
  * 結果は3つに分ける：ok（2xx で中身が読めた）／rejected（4xx。はっきり断られた）／unknown（5xx・通信の失敗・中身が読めない）。
  * 例外は投げない。本文・鍵はログに出さない（この関数はログを出さない）。
  */
 import { parsePortalBaseUrl } from "./obi/config";
+import { PAGE_ID_RE } from "./task-buttons";
 
 export interface SateiPortalOpts {
   fetchImpl: typeof fetch;
@@ -108,7 +110,12 @@ export interface SateiIntakeReq {
   folderId: string;
   dealName: string;
   requestedBy: string;
+  /** 上限からの［もう一度作る］のときだけ：差し戻しで閉じた元の依頼の番号（portal は元の依頼ごとに1つだけ作る） */
+  resumeFrom?: number;
 }
+
+/** 再開のボタンが古い（元の依頼が最新の差し戻しでない・再開した依頼が終わっている）とき intake が返す code */
+export const SATEI_CODE_RESUME_STALE = "SATEI_RESUME_STALE";
 
 export interface SateiIntakeOk {
   created: boolean;
@@ -127,9 +134,12 @@ export async function sateiIntake(
     folderId: req.folderId,
     dealName: req.dealName,
     requestedBy: req.requestedBy,
+    ...(req.resumeFrom !== undefined ? { resumeFrom: req.resumeFrom } : {}),
   };
+  // 再開は専用の口（古い portal では 404＝断り。portal だけを古い版へ戻しても、古いボタンから通常の受付として作らない）
+  const path = req.resumeFrom !== undefined ? "/api/jobs/satei/resume" : "/api/jobs/satei/intake";
   return classify(
-    await postJson("/api/jobs/satei/intake", payload, opts),
+    await postJson(path, payload, opts),
     (b) => {
       const job = b.job as { no?: unknown; status?: unknown } | undefined;
       if (
@@ -203,7 +213,7 @@ export async function sateiDecide(
 /** reason の応答の `redo`（自動の作り直しの結果）。null＝無い・形が違う（スイッチ off・古い portal を含む） */
 export type SateiRedo =
   | { kind: "started"; no: number; autoCount: number }
-  | { kind: "limit" }
+  | { kind: "limit"; dealId: string | null }
   | { kind: "skipped" };
 
 export interface SateiReasonOk {
@@ -216,7 +226,8 @@ export function parseSateiRedo(v: unknown): SateiRedo | null {
   if (!v || typeof v !== "object" || Array.isArray(v)) return null;
   const r = v as Record<string, unknown>;
   if (isPositiveInt(r.no) && isPositiveInt(r.autoCount)) return { kind: "started", no: r.no, autoCount: r.autoCount };
-  if (r.limit === true) return { kind: "limit" };
+  // dealId は［もう一度作る］のため（古い portal は返さない＝ボタンを付けない）
+  if (r.limit === true) return { kind: "limit", dealId: typeof r.dealId === "string" && PAGE_ID_RE.test(r.dealId) ? r.dealId : null };
   if (typeof r.skipped === "string") return { kind: "skipped" };
   return null;
 }

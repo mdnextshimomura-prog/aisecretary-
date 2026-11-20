@@ -2,7 +2,7 @@
  * B2 査定書：返事・個人あての通知の文面と、下書きのカード（契約 第3節の「文面」）。
  * J番号は帯替えと同じ `#J<no>` の形。draft 以外の通知は、どの依頼か分かるよう頭に【査定書 #J番号・案件名】を付ける。
  */
-import { encodeSateiDecision } from "./satei-data";
+import { encodeSateiDecision, encodeSateiResume } from "./satei-data";
 import {
   ALT_TEXT_MAX,
   FLEX_LABEL_MAX,
@@ -39,6 +39,12 @@ export const msgSateiRedoStarted = (newNo: number, n: number) =>
   `理由を記録しました。検品の指摘と合わせて作り直します（${jobTag(newNo)}・作り直し ${n}回目／${SATEI_AUTO_REDO_MAX}回まで）`;
 export const msgSateiRedoLimit = (no: number) =>
   `理由を記録しました。自動の作り直しは${SATEI_AUTO_REDO_MAX}回までです。案件カードの［査定書を作る］から押し直してください（${jobTag(no)}）`;
+/** 上限のとき、その場の［もう一度作る］つき（設計書 2026-11-20 resume-button。portal が dealId を返したときだけ） */
+export const msgSateiRedoLimitResume = (no: number) =>
+  `理由を記録しました。自動の作り直しは${SATEI_AUTO_REDO_MAX}回までです。続けて作るときは、下の［もう一度作る］を押してください。いまの理由と検品の指摘で作り直します（${jobTag(no)}）`;
+/** ［もう一度作る］が古い（元の依頼のあとに別の依頼がある・再開した依頼が終わっている） */
+export const msgSateiResumeStale = (no: number) =>
+  `このボタンはもう使えません。作り直すときは、案件カードの［査定書を作る］から押してください（${jobTag(no)}）`;
 export const msgSateiRedoSkipped = (no: number) =>
   `理由を記録しました。いまは自動で作り直せませんでした。案件カードの［査定書を作る］を押してください（${jobTag(no)}）`;
 /** 通信の失敗・結果不明（印は残すので、次の1通をもう一度理由として受ける。契約 6-11 の文） */
@@ -192,4 +198,31 @@ export function sateiNoticeMessages(n: SateiNotice): unknown[] | null {
     return card ? [card] : null;
   }
   return [{ type: "text", text: sateiNoticeText(n) }];
+}
+
+/** 上限のときの［もう一度作る］のカード（押せるのは TASK_SATEI_USER_IDS の人だけ。押したときに確かめる） */
+export function sateiResumeCard(no: number, dealId: string): FlexMessage {
+  const head = `🔁 ${jobTag(no)} の続きを作りますか？`;
+  return {
+    type: "flex",
+    altText: cut(head, ALT_TEXT_MAX),
+    contents: {
+      type: "bubble",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [
+          { type: "text", text: head, weight: "bold", size: "md", wrap: true },
+          { type: "text", text: "担当の作業（帯替え・資料の取り寄せなど）が残っているときは、終えてから押してください", size: "xs", color: "#888888", wrap: true },
+        ],
+      },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [postback("もう一度作る", encodeSateiResume(dealId, no), "（ボタン）査定書をもう一度作る", true)],
+      },
+    },
+  };
 }

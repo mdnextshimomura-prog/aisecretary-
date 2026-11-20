@@ -15,8 +15,10 @@ import {
   type SateiAction,
 } from "./satei-data";
 import { judgeSateiDeal, type SateiDeal } from "./satei-deal";
+import type { FlexMessage } from "./task-card";
 import {
   SATEI_CODE_AWAITING_REASON,
+  SATEI_CODE_RESUME_STALE,
   type SateiCall,
   type SateiReasonOk,
   type SateiDecideReq,
@@ -40,6 +42,9 @@ import {
   msgSateiReasonFailed,
   msgSateiReasonSaved,
   msgSateiRedoLimit,
+  msgSateiRedoLimitResume,
+  msgSateiResumeStale,
+  sateiResumeCard,
   msgSateiRedoSkipped,
   msgSateiRedoStarted,
   msgSateiRejectAsk,
@@ -82,6 +87,8 @@ async function startSatei(
   eventId: string,
   userId: string,
   deps: SateiActionDeps,
+  /** 上限からの［もう一度作る］のときの元の依頼の番号（portal が元の依頼ごとに1つだけ作る） */
+  resumeFrom?: number,
 ): Promise<Outcome> {
   if (!deps.dealsDbId) return { text: MSG_SATEI_DEAL_NOT_FOUND, code: "config-missing", settled: true };
   let got: { deal: SateiDeal; kind: string | null } | null;
@@ -109,6 +116,7 @@ async function startSatei(
       folderId: j.deal.folderId,
       dealName: j.deal.name,
       requestedBy: userId,
+      ...(resumeFrom !== undefined ? { resumeFrom } : {}),
     });
   } catch {
     r = { kind: "unknown", reason: "exception" };
@@ -120,6 +128,9 @@ async function startSatei(
   }
   if (r.kind === "rejected") {
     // 契約 6-10：同じ案件が差し戻しで理由待ち（理由が来るか、30分で sweep が取消にするまで）
+    if (resumeFrom !== undefined && r.code === SATEI_CODE_RESUME_STALE) {
+      return { text: msgSateiResumeStale(resumeFrom), code: "resume-stale", settled: true };
+    }
     return r.code === SATEI_CODE_AWAITING_REASON
       ? { text: MSG_SATEI_AWAITING_REASON, code: "awaiting-reason", settled: true }
       : { text: MSG_SATEI_FAILED, code: "rejected", settled: true };
@@ -214,7 +225,9 @@ export async function handleSateiPostback(
     const r =
       action.op === "sa"
         ? await startSatei(action.dealId, eventId, userId, deps)
-        : await decideSatei(action, userId, deps);
+        : action.op === "sx"
+          ? await startSatei(action.dealId, eventId, userId, deps, action.no)
+          : await decideSatei(action, userId, deps);
     settled = r.settled;
     deps.log(`[satei] ${action.op} ${r.code}`);
     await say(r.text, r.code);
@@ -238,7 +251,8 @@ export interface SateiReasonKv {
 export interface SateiReasonDeps {
   kv: SateiReasonKv | null;
   reason(no: number, text: string): Promise<SateiCall<SateiReasonOk>>;
-  reply(replyToken: string, text: string): Promise<unknown>;
+  /** card は上限のときの［もう一度作る］（文字のあとに2通目で付ける）。card つきが送れなければ false を返す */
+  reply(replyToken: string, text: string, card?: FlexMessage): Promise<unknown>;
   log(line: string): void;
 }
 
@@ -298,18 +312,28 @@ export async function handleSateiReasonText(m: SateiReasonMessage, deps: SateiRe
   }
   const redo = r.kind === "ok" ? (r.value.redo ?? null) : null;
   if (redo) deps.log(`[satei] reason #J${no} redo-${redo.kind}`);
+  // 上限で portal が案件を返したら、その場の［もう一度作る］を付ける（グループの案件カードへ移らなくて済む）
+  const resumeCard = redo?.kind === "limit" && redo.dealId ? sateiResumeCard(no, redo.dealId) : undefined;
   const savedText =
     redo?.kind === "started"
       ? msgSateiRedoStarted(redo.no, redo.autoCount)
       : redo?.kind === "limit"
-        ? msgSateiRedoLimit(no)
+        ? resumeCard
+          ? msgSateiRedoLimitResume(no)
+          : msgSateiRedoLimit(no)
         : redo?.kind === "skipped"
           ? msgSateiRedoSkipped(no)
           : msgSateiReasonSaved(no);
   const reply =
     outcome === "saved" ? savedText : outcome === "closed" ? msgSateiReasonClosed(no) : msgSateiReasonFailed(no);
   try {
-    await deps.reply(m.replyToken, reply);
+    if (outcome === "saved" && resumeCard) {
+      if ((await deps.reply(m.replyToken, reply, resumeCard)) === false) {
+        deps.log("[satei] reply-failed resume-card");
+        const again = await deps.reply(m.replyToken, msgSateiRedoLimit(no));
+        if (again === null) deps.log("[satei] reply-failed resume-fallback");
+      }
+    } else await deps.reply(m.replyToken, reply);
   } catch {
     deps.log("[satei] reply-failed reason");
   }

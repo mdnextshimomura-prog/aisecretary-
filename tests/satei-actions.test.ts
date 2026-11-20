@@ -334,6 +334,8 @@ const quiet = (logs: string[]) => !logs.join("\n").includes(SHIMO) && !logs.join
       delThrows?: boolean;
       /** reason の応答待ちのあいだに起きること（別の差し戻しが印を書き換える、など） */
       during?: (store: Map<string, unknown>) => void;
+      /** カードつきの返事を LINE が断ったことにする */
+      cardRejected?: boolean;
     } = {},
   ) {
     const store = new Map<string, unknown>();
@@ -344,6 +346,7 @@ const quiet = (logs: string[]) => !logs.join("\n").includes(SHIMO) && !logs.join
       dels: [] as Array<{ key: string; token: string }>,
       reasons: [] as Array<{ no: number; text: string }>,
       replies: [] as string[],
+      cards: [] as unknown[],
       logs: [] as string[],
     };
     const deps: SateiReasonDeps = {
@@ -373,8 +376,12 @@ const quiet = (logs: string[]) => !logs.join("\n").includes(SHIMO) && !logs.join
         o.during?.(store);
         return results.shift() ?? { kind: "ok", value: { ok: true } };
       },
-      reply: async (_t, text) => {
+      reply: async (_t, text, card) => {
         r.replies.push(text);
+        if (card) {
+          r.cards.push(card);
+          return !o.cardRejected;
+        }
       },
       log: (l) => r.logs.push(l),
     };
@@ -495,7 +502,7 @@ const quiet = (logs: string[]) => !logs.join("\n").includes(SHIMO) && !logs.join
   // ── 自動の作り直し（redo）の返事 ──
   for (const [label, value, want, logLine] of [
     ["started", { ok: true, redo: { kind: "started", no: 15, autoCount: 2 } }, T.msgSateiRedoStarted(15, 2), "[satei] reason #J12 redo-started"],
-    ["limit", { ok: true, redo: { kind: "limit" } }, T.msgSateiRedoLimit(12), "[satei] reason #J12 redo-limit"],
+    ["limit", { ok: true, redo: { kind: "limit", dealId: null } }, T.msgSateiRedoLimit(12), "[satei] reason #J12 redo-limit"],
     ["skipped", { ok: true, redo: { kind: "skipped" } }, T.msgSateiRedoSkipped(12), "[satei] reason #J12 redo-skipped"],
     ["null", { ok: true, redo: null }, T.msgSateiReasonSaved(12), ""],
     ["無し", { ok: true }, T.msgSateiReasonSaved(12), ""],
@@ -520,6 +527,71 @@ const quiet = (logs: string[]) => !logs.join("\n").includes(SHIMO) && !logs.join
     await handleSateiReasonText(msg(), m.deps);
     ok("redo：結果不明は今どおり", m.r.replies[0] === T.msgSateiReasonFailed(12) && m.store.has(KEY));
   }
+  // ── 上限からの［もう一度作る］（設計書 2026-11-20 resume-button） ──
+  {
+    const m = mkR({ mark: MA, reasons: [{ kind: "ok", value: { ok: true, redo: { kind: "limit", dealId: DEAL } } }] });
+    await handleSateiReasonText(msg(), m.deps);
+    const data = JSON.stringify(m.r.cards[0] ?? null);
+    ok("上限で案件が分かれば、文字＋［もう一度作る］のカードを1回の返事で", m.r.replies.length === 1 && m.r.replies[0] === T.msgSateiRedoLimitResume(12) && m.r.cards.length === 1);
+    ok("カードのボタンは v1|sx|<案件>|<元の番号>", data.includes(`v1|sx|${DEAL}|12`) && data.includes("もう一度作る"));
+    ok("カードのログに案件の ID を出さない", !m.r.logs.join("").includes(DEAL));
+  }
+  {
+    const m = mkR({ mark: MA, cardRejected: true, reasons: [{ kind: "ok", value: { ok: true, redo: { kind: "limit", dealId: DEAL } } }] });
+    await handleSateiReasonText(msg(), m.deps);
+    ok(
+      "カードつきを LINE が断ったら、ボタンなしの今の文で送り直す",
+      m.r.replies.length === 2 && m.r.replies[1] === T.msgSateiRedoLimit(12) && m.r.logs.includes("[satei] reply-failed resume-card"),
+    );
+  }
+  {
+    const m = mkR({ mark: MA, reasons: [{ kind: "ok", value: { ok: true, redo: { kind: "limit", dealId: DEAL } } }] });
+    m.deps.reply = async (_t, text, card) => {
+      m.r.replies.push(text);
+      if (card) return false;
+      return null;
+    };
+    await handleSateiReasonText(msg(), m.deps);
+    ok("送り直しも送れなければログに残す", m.r.logs.includes("[satei] reply-failed resume-fallback"));
+  }
+  ok(
+    "［もう一度作る］の文が設計どおり",
+    T.msgSateiRedoLimitResume(12) ===
+      "理由を記録しました。自動の作り直しは2回までです。続けて作るときは、下の［もう一度作る］を押してください。いまの理由と検品の指摘で作り直します（#J12）" &&
+      T.msgSateiResumeStale(12) === "このボタンはもう使えません。作り直すときは、案件カードの［査定書を作る］から押してください（#J12）",
+  );
+  const SX = parseSateiData(`v1|sx|${DEAL}|12`) as SateiAction;
+  {
+    const m = mk({ intake: { kind: "ok", value: { created: true, no: 16, status: "受付" } } });
+    await handleSateiPostback(SX, ev(), m.deps);
+    ok("sx：案件を読み直して、portal へ resumeFrom つきの人の受付", m.r.reads === 1 && m.r.intakes.length === 1 && m.r.intakes[0].resumeFrom === 12 && m.r.intakes[0].dealId === DEAL);
+    ok("sx：作れたら受け付けましたの文", m.r.replies[0] === T.msgSateiAccepted(16) && m.r.logs.includes("[satei] sx accepted"));
+  }
+  {
+    const m = mk({ intake: { kind: "rejected", status: 409, code: "SATEI_RESUME_STALE" } });
+    await handleSateiPostback(SX, ev(), m.deps);
+    ok("sx：古いボタンは「もう使えません」", m.r.replies[0] === T.msgSateiResumeStale(12) && m.r.logs.includes("[satei] sx resume-stale"));
+  }
+  {
+    const m = mk({ intake: { kind: "ok", value: { created: false, no: 16, status: "下準備中" } } });
+    await handleSateiPostback(SX, ev(), m.deps);
+    ok("sx：押し直しは作成中の文（2つ目は作らない）", m.r.replies[0] === T.msgSateiInProgress(16));
+  }
+  {
+    const m = mk();
+    await handleSateiPostback(SX, ev(STAFF), m.deps);
+    ok("sx：TASK_SATEI_USER_IDS に無い人は押せない（読まない・呼ばない）", m.r.replies[0] === T.MSG_SATEI_FORBIDDEN && m.r.reads === 0 && m.r.intakes.length === 0);
+  }
+  {
+    const m = mk();
+    await handleSateiPostback(SA, ev(), m.deps);
+    ok("sa：今までどおり resumeFrom を付けない", m.r.intakes.length === 1 && !("resumeFrom" in m.r.intakes[0]));
+  }
+  ok(
+    "sx の data：形が違えば読まない",
+    parseSateiData(`v1|sx|${DEAL}`) === null && parseSateiData(`v1|sx|${DEAL}|0`) === null && parseSateiData(`v1|sx|xx|12`) === null &&
+      parseSateiData(`v1|sx|${DEAL}|12|1`) === null,
+  );
   delete process.env.TASK_SATEI_USER_IDS;
 
   if (fail > 0) {

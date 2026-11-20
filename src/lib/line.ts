@@ -38,7 +38,7 @@ export async function replyTextAndCard(
   replyToken: string,
   text: string,
   card?: FlexMessage
-): Promise<{ textId: string | null; cardId: string | null }> {
+): Promise<{ textId: string | null; cardId: string | null; status?: number }> {
   const res = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
     headers: {
@@ -50,7 +50,8 @@ export async function replyTextAndCard(
       messages: card ? [{ type: "text", text }, card] : [{ type: "text", text }],
     }),
   });
-  if (!res.ok) return { textId: null, cardId: null };
+  // status は呼び手が「LINE が中身を断った（400＝何も送っていない）」を見分けるため
+  if (!res.ok) return { textId: null, cardId: null, status: res.status };
   const data = (await res.json()) as {
     sentMessages?: Array<{ id: string }>;
   };
