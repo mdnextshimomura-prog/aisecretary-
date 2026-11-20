@@ -144,6 +144,38 @@ export async function sateiIntake(
   );
 }
 
+/**
+ * 機械からの受付（aisecretary POST /api/satei/request。約束 agent-hub 2026-11-19-satei-request）。
+ * 本文に machine:true を足す（portal は直前の依頼が保存済みのときだけ受ける）。
+ * 受付を止めている（503 INTAKE_STOPPED）ときは、はっきり断られた扱いにする（人のボタンの sateiIntake は今のまま）
+ */
+export async function sateiMachineIntake(
+  req: SateiIntakeReq,
+  opts: SateiPortalOpts,
+): Promise<SateiCall<SateiIntakeOk>> {
+  const raw = await postJson(
+    "/api/jobs/satei/intake",
+    {
+      eventId: req.eventId,
+      dealId: req.dealId,
+      dealNo: req.dealNo,
+      folderId: req.folderId,
+      dealName: req.dealName,
+      requestedBy: req.requestedBy,
+      machine: true,
+    },
+    opts,
+  );
+  if (raw.kind === "http" && raw.status === 503 && raw.body.code === "INTAKE_STOPPED") {
+    return { kind: "rejected", status: 503, code: "INTAKE_STOPPED" };
+  }
+  return classify(raw, (b) => {
+    const job = b.job as { no?: unknown; status?: unknown } | undefined;
+    if (typeof b.created !== "boolean" || !job || !isPositiveInt(job.no) || typeof job.status !== "string") return null;
+    return { created: b.created, no: job.no, status: job.status };
+  });
+}
+
 export interface SateiDecideReq {
   decision: "ok" | "reject";
   by: string;

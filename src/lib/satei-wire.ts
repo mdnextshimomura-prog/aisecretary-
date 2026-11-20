@@ -15,6 +15,7 @@ import { readPropertyKind, readSateiDealPage, type SateiDeal } from "./satei-dea
 import {
   sateiDecide,
   sateiIntake,
+  sateiMachineIntake,
   sateiPortalConfig,
   sateiReason,
   SATEI_PORTAL_TIMEOUT_MS,
@@ -24,6 +25,7 @@ import {
 import type { SateiActionDeps, SateiReasonDeps, SateiReasonKv } from "./satei-actions";
 import type { SateiNotifyDeps } from "./satei-notify";
 import type { FolderCheckDeps } from "./satei-folder-check";
+import type { SateiRequestDeps } from "./satei-request";
 
 /**
  * satei 用の CRM の Notion Client。SDK の既定のログ（失敗時に error.message＝ページ ID を含む）を出さないよう、
@@ -136,4 +138,16 @@ export function sateiNotifyDeps(): SateiNotifyDeps {
 
 export function sateiFolderCheckDeps(): FolderCheckDeps {
   return { env: process.env, readDealPage: (dealId) => readSateiDealPageReal(dealId), log };
+}
+
+export function sateiRequestDeps(): SateiRequestDeps {
+  return {
+    env: process.env,
+    dealsDbId: process.env.CRM_DEALS_DB_ID || null,
+    readDeal: (dealId) => readSateiDealReal(dealId),
+    intake: (req) => withPortal((o) => sateiMachineIntake(req, o)),
+    push: (to, messages, retryKey) => pushMessagesWithRetryKey(to, messages, retryKey),
+    now: () => Date.now(),
+    log,
+  };
 }
