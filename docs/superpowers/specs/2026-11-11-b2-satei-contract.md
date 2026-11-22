@@ -67,7 +67,7 @@
   - aborted：「資料が変わったので保存していません。［査定書を作る］を押し直してください」（name-conflict は「同じ名前で中身の違うファイルがあるので保存していません」）
 
 ## 4. 入力の版
-`01_物件資料`・`02_査定・事例` の直下のファイルと `00_案件.md` について、`相対パス + "\0" + SHA-256` を相対パスの昇順に改行で連結し、その SHA-256 の hex。ただし、その案件の satei で登録した `artifactSha256`（依頼箱の saves／claim の応答に付ける `knownArtifacts`）と一致するファイルは除く。Google ドキュメントなど中身を落とせない形式は `相対パス + "\0" + "gdoc:" + modifiedTime`。
+`01_物件資料`・`02_査定・事例` の直下と1階層下のサブフォルダの中のファイル（2026-11-22 から。拾う範囲・拾わないもの・相対パス（論理パス）の決め方は line-secretary `docs/superpowers/specs/2026-11-22-satei-subfolders-design.md` の 1・2）と `00_案件.md` について、`相対パス + "\0" + SHA-256` を相対パスの昇順に改行で連結し、その SHA-256 の hex。ただし、その案件の satei で登録した `artifactSha256`（依頼箱の saves／claim の応答に付ける `knownArtifacts`）と一致するファイルは除く。Google ドキュメントなど中身を落とせない形式は `相対パス + "\0" + "gdoc:" + modifiedTime`。
 
 ## 5. Mac の査定係（line-secretary `src/satei/`）
 - 1回の起動（120秒おき・同時に1つだけ。`state/satei.lock`）で ① saves を処理 ② notices を送り直す ③ claim して1件作る、の順
