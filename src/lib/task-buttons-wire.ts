@@ -40,6 +40,8 @@ import {
 import { dealDeps } from "./deal-card-wire";
 import { parseSateiData } from "./satei-data";
 import { handleSateiPostback, type SateiActionDeps } from "./satei-actions";
+import { handleSateiAskPostback, parseSateiAskData, type SateiAskActionDeps } from "./satei-ask";
+import { sateiAskActionDeps } from "./satei-ask-wire";
 import { sateiActionDeps } from "./satei-wire";
 import type { ListPage } from "./task-menu";
 import {
@@ -297,6 +299,8 @@ export interface PostbackIo {
   candidates?: Partial<CandidateActionDeps>;
   /** 査定書のボタン（B2。v1|sa|・v1|so|・v1|sr|）。省いた部品は本物（satei-wire.ts） */
   satei?: Partial<SateiActionDeps>;
+  /** 「案件はどれですか」のカードのボタン（v1|qa|・v1|ql|・v1|qn|）。省いた部品は本物（satei-ask-wire.ts） */
+  sateiAsk?: Partial<SateiAskActionDeps>;
 }
 
 /**
@@ -323,6 +327,7 @@ export async function handleTaskPostbackEvent(
     deal: over.deal,
     candidates: over.candidates,
     satei: over.satei,
+    sateiAsk: over.sateiAsk,
   };
   // B2 査定書のボタン（v1|sa|・v1|so|・v1|sr|・v1|sx|）。TASK_BUTTONS・TASK_MENU とは別のスイッチ（TASK_SATEI）なので、
   // 「止めています」の判定より前に振り分ける。off・押せる人・二度押しの扱いは satei-actions.ts。
@@ -339,6 +344,23 @@ export async function handleTaskPostbackEvent(
         reply: (token, text) => io.reply(token, text),
         log: io.log,
         ...io.satei,
+      },
+    );
+    return;
+  }
+  // 「案件はどれですか」のカード（v1|qa|・v1|ql|・v1|qn|）。スイッチは査定と同じ TASK_SATEI（off・押せる人は satei-ask.ts）
+  const ask = parseSateiAskData(data);
+  if (ask) {
+    await handleSateiAskPostback(
+      ask,
+      { replyToken, webhookEventId: event.webhookEventId, source: event.source },
+      {
+        ...sateiAskActionDeps(),
+        reserve: io.reserve,
+        complete: io.complete,
+        reply: (token, text, card) => io.reply(token, text, card),
+        log: io.log,
+        ...io.sateiAsk,
       },
     );
     return;

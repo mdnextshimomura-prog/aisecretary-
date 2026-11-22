@@ -90,6 +90,31 @@ export function matchDeals(
   return { state: "未割当", dealId: null, names: [] };
 }
 
+/**
+ * 人に選んでもらうための候補（「案件はどれですか」のカード）。完全一致 → 部分一致の順で最大 max 件。
+ * matchDeals と同じ鍵の作り方。1 件でも確定には使わない（ボタンを出すだけ）。
+ */
+export function candidateDeals(
+  propertyKey: string | null | undefined,
+  deals: DealRef[],
+  max = MAX_NAMES
+): DealRef[] {
+  const key = (propertyKey ?? "").trim();
+  if (!key) return [];
+  const exact: DealRef[] = [];
+  const partial: DealRef[] = [];
+  for (const d of deals) {
+    const keys = dealKeys(d.name);
+    if (keys.includes(key)) exact.push(d);
+    else if (
+      key.length >= MIN_PARTIAL_LENGTH &&
+      keys.some((k) => k.length >= MIN_PARTIAL_LENGTH && (k.includes(key) || key.includes(k)))
+    )
+      partial.push(d);
+  }
+  return [...exact, ...partial].slice(0, max);
+}
+
 export interface RecordInfo {
   /** 頼んだ人（名簿の氏名）。分からなければ null */
   requester: string | null;

@@ -186,3 +186,5 @@ npm run db:studio    # DB確認
 - 1対1：`SECRETARY_ALLOWED_USER_IDS`（カンマ区切り）の人だけ。空なら `TASK_BUTTONS_ADMIN_IDS` の人だけ。両方空なら全員拒否。複数人トーク（room）は常に拒否。
 - Cron（remind・remind-due・report・candidates-ask）は `CRON_SECRET` 必須。未設定なら 401。
 - 新しいグループで Bot を使い始めるときは `SECRETARY_ALLOWED_GROUP_IDS` に足す（Vercel ログの「送り主の制限で読み飛ばし: group group-mismatch」が手がかり）。
+
+（「案件はどれですか」のカード・2026-11-22）`POST /api/satei/ask`（Mac が頼むと、下村さん＝`TASK_SATEI_USER_IDS` の先頭との1対1に案件の候補のカードを push）と `POST /api/satei/ask/answers`（Mac が答えを取りに来る）。合言葉はヘッダ `x-satei-token` = HMAC-SHA256(`JOB_API_TOKEN`, `"satei-ask"`)。新しい環境変数は無い（`TASK_SATEI=1` のときだけ動く）。ボタンは `v1|qa|<askId>|<案件ID>`・`v1|ql|<askId>|<オフセット>`・`v1|qn|<askId>`（押せるのは `TASK_SATEI_USER_IDS` の人だけ。答えは最初の1回だけ有効）。答えは KV（`sateiask:*`）に7日、目次は Lua で振る通し番号の順。秘書は査定を始めない（Mac が hub に出し直す）。設計 `docs/superpowers/specs/2026-11-22-satei-ask-card-design.md`。`src/middleware.ts` の matcher には入れない。
