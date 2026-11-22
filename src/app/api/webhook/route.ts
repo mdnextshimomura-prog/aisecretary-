@@ -130,6 +130,8 @@ import {
 import { statusForConfirmComplete } from "@/lib/task-closed";
 import { bareMentionMenu, menuWordEntry } from "@/lib/task-menu";
 import { dealWordEntry } from "@/lib/deal-card";
+import { maybeAskPhotoMention } from "@/lib/photo-ask";
+import { photoAskDeps } from "@/lib/photo-ask-wire";
 import { recordAfterCreateWithPick } from "@/lib/deal-card-wire";
 import { handleSateiReasonText } from "@/lib/satei-actions";
 import { sateiReasonDeps } from "@/lib/satei-wire";
@@ -1571,6 +1573,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           console.error("候補の控えに失敗（何もしない）:", err);
         }
       }
+      // 画像のあとの「@下村」だけの名指し（PHOTO_MENTION_ASK=1 のときだけ）：画像を読み、査定の依頼らしければ
+      // 下村さんの1対1へ push で聞く。グループには返さない（replyToken は使わない）。失敗してもほかの流れは今のまま
+      await maybeAskPhotoMention(
+        {
+          messageId: event.message.id,
+          groupId: source.groupId,
+          senderId: source.userId,
+          mentionees: event.message.mention?.mentionees ?? [],
+          text,
+          botUserId: BOT_USER_ID,
+          timestamp: event.timestamp ?? Date.now(),
+          quotedMessageId: event.message.quotedMessageId,
+        },
+        photoAskDeps(todayLabel(jstNow())),
+      );
       // 理由の符号だけログ。グループで「@秘書」を手打ちしただけのときは、一覧から選ぶよう返す
       await finishNoBotMention({
         isGroup: Boolean(source.groupId),

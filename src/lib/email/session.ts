@@ -229,6 +229,8 @@ export interface PendingMedia {
   messageId: string;
   fileName: string; // ファイル名（画像はダミー可）
   kind: "image" | "file";
+  /** 控えた時刻（ミリ秒。2026-11-22〜。画像のあとの名指しで「発言の30分前から」を選ぶため。古い控えには無い） */
+  at?: number;
 }
 
 const MEDIA_PREFIX = "emailmedia";

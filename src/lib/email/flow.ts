@@ -598,6 +598,7 @@ export async function handleIncomingImage(
     messageId,
     fileName: "image",
     kind: "image",
+    at: Date.now(),
   });
 }
 

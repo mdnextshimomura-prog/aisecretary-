@@ -20,8 +20,8 @@ const crmNotion = new Client({
 const CACHE_TTL_MS = 5 * 60 * 1000;
 let cache: { at: number; deals: DealRef[] } | null = null;
 
-/** 進行中（完了・失注以外）の案件の ID と名前。5 分だけ覚えておく。 */
-export async function loadActiveDeals(): Promise<DealRef[]> {
+/** 進行中（完了・失注以外）の案件の ID と名前。5 分だけ覚えておく。client はログを抑えた Client を渡すとき用（既定は今のまま） */
+export async function loadActiveDeals(client: Client = crmNotion): Promise<DealRef[]> {
   const dbId = process.env.CRM_DEALS_DB_ID;
   if (!dbId) throw new Error("CRM_DEALS_DB_ID 未設定");
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.deals;
@@ -29,7 +29,7 @@ export async function loadActiveDeals(): Promise<DealRef[]> {
   const deals: DealRef[] = [];
   let cursor: string | undefined;
   do {
-    const res = await crmNotion.databases.query({
+    const res = await client.databases.query({
       database_id: dbId,
       start_cursor: cursor,
       page_size: 100,

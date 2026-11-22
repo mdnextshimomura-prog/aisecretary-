@@ -162,6 +162,8 @@ Notion「LINEタスク」へ `依頼者`・`依頼者ID`・`発生元`（グル�
 - ログ：`[satei] sa accepted`・`[satei] so stale`・`[satei] sr rejected-ask`・`[satei] reason #J12 saved`・`[satei] notify #J12 draft sent`・`[satei] folder-check #J12 match`・`[satei] config-missing portal` の形（操作名・J番号・kind・結果の符号だけ。案件名・userId・本文・Drive ID は出さない）。
 - 本番で on にする・env を足すのは下村さんの承認後（値を画面に出さない方法で入れる）。
 
+（画像のあとの名指し・2026-11-22）`PHOTO_MENTION_ASK`（`1` のときだけ動く。既定 off）／`PHOTO_MENTION_GROUP_IDS`（対象のグループ。カンマ区切り。空なら何もしない）。グループで、mention の userId が下村さん（`TASK_SATEI_USER_IDS` の先頭）・AI秘書は名指しなし・本文が20字以内・送り主が下村さん以外・送り主の控えに画像（引用リプライなら引用された画像だけ、無ければ30分以内の新しい3枚）があるとき、画像を既存のタスク判定（Claude）で読み、査定の依頼らしければ（確信度0.5以上。0.7未満は「かもしれません」）下村さんの1対1へ push（案件が1件に絞れれば既存の［査定書を作る］`v1|sa|` のカード）。読めないときも「画像を読めませんでした」を送る。グループには返さない。同じ画像の組では二度聞かない（`photoask:img:…` SET NX 1日、push は retry key つき）。控えの画像は消さない。ログは `[photo-ask] asked|asked card|not-satei|unread …|skip:…|push-failed …`（符号だけ）。`src/lib/photo-ask.ts`・`photo-ask-wire.ts`。設計 `docs/superpowers/specs/2026-11-22-photo-mention-ask-design.md`。on にする・グループを入れるのは下村さんの承認後。
+
 ## よく使うコマンド
 ```bash
 npm run dev          # ローカル開発
