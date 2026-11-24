@@ -1,0 +1,141 @@
+/**
+ * 普通のグループの査定依頼（2026-11-24 設計 docs/superpowers/specs/2026-11-24-group-satei-intake-design.md）：
+ * スイッチ・定数・KV の鍵・受付票の型・ボタンの data。通信はしない。
+ * - GROUP_SATEI=1 かつ GROUP_SATEI_GROUP_IDS に入ったグループだけ（既定 off）。
+ * - 受付票に本文・ファイル名・お客様の名前は入れない（所在・物件名だけ）。
+ */
+import { createHash } from "node:crypto";
+import { PAGE_ID_RE } from "./task-buttons";
+import { parseAllowedUserIds } from "./webhook-source";
+
+export type GsEnv = Record<string, string | undefined>;
+
+export const groupSateiActive = (env: GsEnv = process.env) => env.GROUP_SATEI === "1";
+export const groupSateiGroupIds = (env: GsEnv = process.env) => parseAllowedUserIds(env.GROUP_SATEI_GROUP_IDS);
+export function groupSateiOn(groupId: string | undefined, env: GsEnv = process.env): boolean {
+  return Boolean(groupId) && groupSateiActive(env) && groupSateiGroupIds(env).includes(groupId as string);
+}
+
+export const GS_TICKET_TTL = 7 * 24 * 60 * 60;
+export const GS_MEDIA_TTL = 3 * 60 * 60;
+export const GS_MEDIA_MAX = 30;
+export const GS_MATERIALS_MAX = 8;
+export const GS_READS_PER_DAY = 20;
+export const GS_MIN = 0.5;
+export const GS_SURE = 0.7;
+export const GS_CANDIDATES_MAX = 5;
+export const GS_PAGE = 10;
+/** 本人の資料を束ねる幅（入口の発言の30分前〜1分後。後から来る分は段2） */
+export const GS_BEFORE_MS = 30 * 60 * 1000;
+export const GS_AFTER_MS = 60 * 1000;
+// X-Line-Retry-Key の uuidv5 の名前空間（固定。変えると二重防止が効かなくなる）
+export const GS_RETRY_NAMESPACE = "3f6a1c9e-8b2d-4e7f-a5c1-9d0e2b4f6a8c";
+
+export const gsMediaKey = (groupId: string) => `gsatei:media:${groupId}`;
+export const gsTicketKey = (tid: string) => `gsatei:t:${tid}`;
+export const GS_SEQ_KEY = "gsatei:seq";
+export const gsOpenKey = (groupId: string) => `gsatei:open:${groupId}`;
+export const gsMsgKey = (messageId: string) => `gsatei:msg:${messageId}`;
+export const gsDecKey = (tid: string) => `gsatei:dec:${tid}`;
+export const gsReadsKey = (ymd: string) => `gsatei:reads:${ymd}`;
+
+export const ticketIdOf = (messageId: string) => createHash("sha256").update(messageId).digest("hex").slice(0, 16);
+export const receiptOf = (no: number) => `G${no}`;
+export const gsEventId = (tid: string) => `gs${tid}`;
+
+export type GsKind = "マンション" | "戸建" | "土地" | "不明";
+export const GS_KINDS: readonly GsKind[] = ["マンション", "戸建", "土地", "不明"];
+export type GsBasis = "本文" | "登記" | "地図" | "チラシ" | "その他";
+export const GS_BASES: readonly GsBasis[] = ["本文", "登記", "地図", "チラシ", "その他"];
+
+export interface GsRead {
+  address: string | null;
+  propertyName: string | null;
+  kind: GsKind;
+  basis: GsBasis;
+  confidence: number;
+}
+
+/** グループ単位の控えの1行（ファイル名は持たない） */
+export interface GsMedia {
+  messageId: string;
+  kind: "image" | "pdf" | "other";
+  senderId: string;
+  at: number;
+  quoted?: string;
+}
+
+export type GsState = "asking" | "started" | "manual" | "dismissed";
+
+export interface GsTicket {
+  no: number;
+  ver: number;
+  groupId: string;
+  requesterId: string;
+  at: number;
+  triggerMsgIds: string[];
+  mediaIds: string[];
+  read: GsRead | null;
+  /** 読めなかった理由の符号（cap・read-failed・no-material 等）。読めたら無い */
+  readFailed?: string;
+  state: GsState;
+  /** ［案件がまだ無い］の仮の決定（7日以内に1回だけ選び直せる） */
+  provisional?: boolean;
+  dealId?: string;
+  jobNo?: number;
+  /** portal の受付の結果が分からない */
+  unknown?: boolean;
+}
+
+const STATES: readonly GsState[] = ["asking", "started", "manual", "dismissed"];
+
+export function asTicket(raw: unknown): GsTicket | null {
+  let v = raw;
+  if (typeof v === "string") {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
+  if (!v || typeof v !== "object") return null;
+  const r = v as Record<string, unknown>;
+  const strs = (x: unknown) => Array.isArray(x) && x.every((s) => typeof s === "string");
+  if (typeof r.no !== "number" || typeof r.ver !== "number" || typeof r.groupId !== "string") return null;
+  if (typeof r.requesterId !== "string" || typeof r.at !== "number") return null;
+  if (!strs(r.triggerMsgIds) || !strs(r.mediaIds) || !STATES.includes(r.state as GsState)) return null;
+  return r as unknown as GsTicket;
+}
+
+export type GsAction =
+  | { op: "gs"; tid: string; ver: number; dealId: string }
+  | { op: "gl"; tid: string; ver: number; offset: number }
+  | { op: "gm"; tid: string; ver: number }
+  | { op: "gn"; tid: string; ver: number };
+
+const TID_RE = /^[0-9a-f]{16}$/;
+const VER_RE = /^[1-9][0-9]?$/;
+const OFFSET_RE = /^(0|[1-9][0-9]{0,2})$/;
+const OFFSET_MAX = 500;
+
+export const encodeGsPick = (tid: string, ver: number, dealId: string) => `v1|gs|${tid}|${ver}|${dealId}`;
+export const encodeGsList = (tid: string, ver: number, offset: number) => `v1|gl|${tid}|${ver}|${offset}`;
+export const encodeGsManual = (tid: string, ver: number) => `v1|gm|${tid}|${ver}`;
+export const encodeGsNone = (tid: string, ver: number) => `v1|gn|${tid}|${ver}`;
+
+/** このカードのボタンの data を読む。形が違えば null（ほかのボタンは読まない） */
+export function parseGsData(data: string): GsAction | null {
+  if (!data || data.length > 300) return null;
+  const p = data.split("|");
+  if (p[0] !== "v1" || !TID_RE.test(p[2] ?? "") || !VER_RE.test(p[3] ?? "")) return null;
+  const tid = p[2];
+  const ver = Number(p[3]);
+  if (p[1] === "gs") return p.length === 5 && PAGE_ID_RE.test(p[4]) ? { op: "gs", tid, ver, dealId: p[4] } : null;
+  if (p[1] === "gl") {
+    if (p.length !== 5 || !OFFSET_RE.test(p[4]) || Number(p[4]) > OFFSET_MAX) return null;
+    return { op: "gl", tid, ver, offset: Number(p[4]) };
+  }
+  if (p[1] === "gm" && p.length === 4) return { op: "gm", tid, ver };
+  if (p[1] === "gn" && p.length === 4) return { op: "gn", tid, ver };
+  return null;
+}
