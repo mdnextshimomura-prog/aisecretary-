@@ -37,9 +37,14 @@ export const GS_QUIET_MS = 60 * 1000;
 export const GS_DEFER_MS = 90 * 1000;
 /** 知らせたあとの読み直し（版を上げて出し直す）の上限 */
 export const GS_REREAD_MAX = 2;
-/** 1回の見回りで読み直す票の数（見回りの時間の上限 60 秒に収める） */
-export const GS_REREAD_PER_TICK = 1;
-export const GS_REREAD_SET = "gsatei:reread";
+/** 読み直しの係（webhook の中で動く。関数の上限は 300 秒） */
+export const GS_WORKER_DEADLINE_MS = 250 * 1000;
+/** 1周（読み取り40秒＋候補・種別16秒＋名前3秒＋送信）に要る時間。これより残りが少なければ始めない */
+export const GS_ROUND_MS = 75 * 1000;
+/** 待つときに KV を見直す間隔 */
+export const GS_POLL_MS = 5 * 1000;
+/** 係の印の期限（関数の上限 300 秒より短く、係の打ち切り 250 秒より長く） */
+export const GS_LOCK_TTL_S = 280;
 /** あとから届いた資料の控え（受付票ごとの集合。要素は "image:<id>" か "pdf:<id>"。足すのは原子的な sadd だけ） */
 export const gsLateKey = (tid: string) => `gsatei:late:${tid}`;
 /** 読み直す時刻（受付票とは別に置く＝資料が届くたびに受付票を書き戻さない） */

@@ -12,11 +12,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { kv } from "@vercel/kv";
 import { parseTaskFromMessage, type TaskAttachment } from "./claude";
-import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiActive, groupSateiOn } from "./group-satei-data";
+import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiOn, ticketIdOf } from "./group-satei-data";
 import { gsEntryAOk, gsEntryBGate, gsMediaRow, looksLikeSateiWords } from "./group-satei-gate";
 import {
-  attachLateMedia, openGroupSatei, recordGroupSateiMedia, runGroupSateiRereads,
-  type GsKv, type GsOpenDeps, type GsRereadKv,
+  attachLateMedia, openGroupSatei, recordGroupSateiMedia, runRereadWorker,
+  type GsKv, type GsOpenDeps, type GsRereadKv, type GsWorkerDeps,
 } from "./group-satei-open";
 import type { GsActionDeps } from "./group-satei-actions";
 import { capByTotalBytes, readGsMaterials, type GsCreate } from "./group-satei-read";
@@ -30,6 +30,8 @@ import { loadActiveDeals } from "./task-record-wire";
 const log = (l: string) => console.log(l);
 const CONTENT_TIMEOUT_MS = 8_000;
 const READ_TIMEOUT_MS = 40_000;
+// あとの資料を足す処理（開いている票を数件読む）の上限。控えの3秒とは別
+const LATE_KV_TIMEOUT_MS = 8_000;
 const CRM_TIMEOUT_MS = 8_000;
 const MEDIA_KV_TIMEOUT_MS = 3_000;
 // Claude に渡せる添付のサイズ上限（photo-ask-wire.ts・media.ts と同じ考え方）
@@ -185,7 +187,11 @@ export function groupSateiActionDeps(): Omit<GsActionDeps, "reserve" | "complete
   };
 }
 
-/** webhook の画像・ファイル：対象グループのときだけ控える。off・対象外なら何もしない。例外は投げない */
+/**
+ * webhook の画像・ファイル：対象グループのときだけ控える。off・対象外なら何もしない。例外は投げない。
+ * 依頼のあとに届いた資料なら開いている受付票に足し、読み直しの係（job）を返す。
+ * 呼ぶ側は job を待たずに gsJobs に入れ、POST を返す直前にまとめて待つ（画像の処理を遅らせない）。
+ */
 export async function recordGroupSateiMediaEvent(m: {
   messageId: string;
   groupId?: string;
@@ -193,18 +199,27 @@ export async function recordGroupSateiMediaEvent(m: {
   type: "image" | "file";
   fileName?: string;
   at: number;
-}): Promise<void> {
+}): Promise<{ job: Promise<void> } | null> {
   try {
-    if (!groupSateiOn(m.groupId)) return;
+    if (!groupSateiOn(m.groupId)) return null;
     const row = gsMediaRow(m);
-    if (!row) return;
+    if (!row) return null;
     const store = groupSateiKv();
     await within(recordGroupSateiMedia(row, m.groupId as string, store, log), MEDIA_KV_TIMEOUT_MS);
-    // 依頼のあとに届いた資料なら、開いている受付票に足す（読み直すのは毎分の見回り）
-    await within(attachLateMedia(row, m.groupId as string, { kv: store, now: () => Date.now(), log }), MEDIA_KV_TIMEOUT_MS);
+    const tid = await within(attachLateMedia(row, m.groupId as string, { kv: store, now: () => Date.now(), log }), LATE_KV_TIMEOUT_MS);
+    return tid ? { job: runRereadWorker(tid, workerDeps()) } : null;
   } catch {
     log("[group-satei] skip:media-exception");
+    return null;
   }
+}
+
+function workerDeps(): GsWorkerDeps {
+  return {
+    ...groupSateiOpenDeps(ymdJst(Date.now())),
+    kv: groupSateiKv(),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  };
 }
 
 /** 入口 A（@AI秘書 あてで査定書と判定された依頼。返事を送ったあとに呼ぶ）。例外は投げない */
@@ -236,6 +251,8 @@ export async function maybeOpenGroupSateiA(
       },
       groupSateiOpenDeps(today),
     );
+    // 文字だけで読めなかった・読むあいだに資料が増えた票は、ここで待って読み直す（ほかは何もせず戻る）
+    await runRereadWorker(ticketIdOf(p.messageId), workerDeps());
   } catch {
     log("[group-satei] skip:exception A");
   }
@@ -270,18 +287,8 @@ export async function maybeOpenGroupSateiB(
       },
       groupSateiOpenDeps(today),
     );
+    await runRereadWorker(ticketIdOf(p.messageId), workerDeps());
   } catch {
     log("[group-satei] skip:exception B");
-  }
-}
-
-/** 毎分の見回り（/api/obi/cloud-tick に相乗り）：あとから届いた資料で読み直す。off なら KV も読まない。例外は投げない */
-export async function runGroupSateiRereadsOnTick(): Promise<void> {
-  try {
-    if (!groupSateiActive()) return;
-    const today = ymdJst(Date.now());
-    await runGroupSateiRereads({ ...groupSateiOpenDeps(today), kv: groupSateiKv() });
-  } catch {
-    log("[group-satei] reread skip:tick-exception");
   }
 }

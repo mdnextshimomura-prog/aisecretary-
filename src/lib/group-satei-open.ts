@@ -8,8 +8,8 @@ import { normalizeProperty } from "./property";
 import { sateiNotifyTarget } from "./satei-data";
 import {
   GS_CANDIDATES_MAX, GS_DEFER_MS, GS_MATERIALS_MAX, GS_MEDIA_MAX, GS_MEDIA_TTL, GS_QUIET_MS, GS_READS_PER_DAY,
-  GS_REREAD_MAX, GS_REREAD_PER_TICK, GS_REREAD_SET, GS_SEQ_KEY, GS_TICKET_TTL,
-  asTicket, groupSateiActive, groupSateiOn, gsLateKey, gsMediaKey, gsMsgKey, gsOpenKey, gsReadsKey, gsRereadAtKey,
+  GS_LOCK_TTL_S, GS_POLL_MS, GS_REREAD_MAX, GS_ROUND_MS, GS_SEQ_KEY, GS_TICKET_TTL, GS_WORKER_DEADLINE_MS,
+  asTicket, groupSateiActive, groupSateiOn, gsDecKey, gsLateKey, gsMediaKey, gsMsgKey, gsOpenKey, gsReadsKey, gsRereadAtKey,
   gsRereadLockKey, gsTicketKey, receiptOf, ticketIdOf,
   type GsEnv, type GsMedia, type GsRead, type GsTicket,
 } from "./group-satei-data";
@@ -109,6 +109,8 @@ export async function openGroupSatei(ev: GsOpenEvent, deps: GsOpenDeps): Promise
     ticket.no = await kv.incr(GS_SEQ_KEY);
     ticket.state = "asking";
     await kv.set(gsTicketKey(tid), ticket, GS_TICKET_TTL);
+    // 読んでいるあいだに貼られた資料も足せるよう、開いている票の目次には先に入れる（11/25 レビュー 1）
+    await kv.sadd(gsOpenKey(ev.groupId), tid);
   } catch {
     deps.log("[group-satei] skip:kv");
     return "skip";
@@ -146,20 +148,39 @@ export async function openGroupSatei(ev: GsOpenEvent, deps: GsOpenDeps): Promise
 
   ticket.materials = { images: materials.images, pdfs: materials.pdfs };
 
-  // 文字だけで読めず資料も無い：すぐ知らせず、あとから貼られる画像・PDF を待つ（11/25 社長の依頼の型）
-  if (!ticket.read && ticket.mediaIds.length === 0 && ticket.readFailed === "read-failed") {
-    ticket.readFailed = "no-material";
+  // 読んでいるあいだに貼られた資料：あとの資料の控えへ回し、知らせはそれも読んでから1回にする
+  let lateNow = 0;
+  try {
+    const after = (await kv.lrange(gsMediaKey(ev.groupId))).map(asMedia).filter((m): m is GsMedia => m !== null);
+    const admin = sateiNotifyTarget(env);
+    for (const m of after) {
+      if (ticket.mediaIds.includes(m.messageId)) continue;
+      // ほかに開いている票があるかは見ない＝本人の資料と引用だけ（他人の資料は attachLateMedia の判定で）
+      if (!lateMediaMatches(ticket, m, 2, admin)) continue;
+      await kv.sadd(gsLateKey(tid), lateMember(m));
+      lateNow++;
+    }
+    if (lateNow) await kv.expire(gsLateKey(tid), GS_TICKET_TTL);
+  } catch {
+    deps.log(`[group-satei] ticket ${receipt} late-scan-failed`);
+  }
+
+  // 文字だけで読めず資料も無い（社長の「文字 → 画像」の型）か、読むあいだに資料が増えた：
+  // すぐ知らせず待つ。待って読み直して知らせるのは、同じ呼び出しの runRereadWorker（webhook の時間の中）
+  const noMaterial = !ticket.read && ticket.mediaIds.length === 0 && ticket.readFailed === "read-failed";
+  if (noMaterial || lateNow > 0) {
+    if (noMaterial) ticket.readFailed = "no-material";
     ticket.deferred = true;
     await saveTicket(kv, tid, ticket, receipt, deps);
     try {
-      await kv.set(gsRereadAtKey(tid), deps.now() + GS_DEFER_MS, GS_TICKET_TTL);
-      await kv.sadd(GS_REREAD_SET, tid);
+      await kv.set(gsRereadAtKey(tid), deps.now() + (lateNow > 0 ? GS_QUIET_MS : GS_DEFER_MS), GS_TICKET_TTL);
       deps.log(`[group-satei] ticket ${receipt} opened ${ev.entry} deferred`);
       return "opened";
     } catch {
       // 待つ印が置けなければ、待たずに今知らせる（黙らない）
       ticket.deferred = false;
       deps.log(`[group-satei] ticket ${receipt} defer-failed`);
+      await saveTicket(kv, tid, ticket, receipt, deps);
     }
   } else {
     await saveTicket(kv, tid, ticket, receipt, deps);
@@ -238,7 +259,12 @@ async function notifyTicket(
   if (sent) {
     ticket.pushed = true;
     try {
-      await kv.set(gsTicketKey(tid), ticket, GS_TICKET_TTL);
+      // 押されたあと（状態・版が変わった・決定の印がある）の票を、手元の asking で上書きしない（11/25 レビュー 2）
+      const now = asTicket(await kv.get(gsTicketKey(tid)));
+      const decided = await kv.get(gsDecKey(tid));
+      if (now && now.state === "asking" && now.ver === ticket.ver && !decided) {
+        await kv.set(gsTicketKey(tid), { ...now, pushed: true }, GS_TICKET_TTL);
+      }
     } catch {
       deps.log(`[group-satei] ticket ${receiptOf(ticket.no)} pushed-mark-failed`);
     }
@@ -264,17 +290,18 @@ function parseLate(v: unknown): { kind: "image" | "pdf"; id: string } | null {
 /**
  * あとから届いた画像・PDF を、そのグループの開いている受付票に足す（11/25）。
  * 受付票そのものは書き換えない（同時に届いた画像どうし・ボタンの処理と書き合いにならないよう、
- * 足すのは受付票ごとの集合への sadd と、読み直す時刻だけ）。読み直すのは毎分の見回り。例外は投げない。
+ * 足すのは受付票ごとの集合への sadd と、読み直す時刻だけ）。足した受付票の ID を返す（読み直すのは runRereadWorker）。
+ * 例外は投げない。
  */
 export async function attachLateMedia(
   row: GsMedia,
   groupId: string,
   deps: { env?: GsEnv; kv: GsRereadKv | null; now(): number; log(l: string): void },
-): Promise<void> {
+): Promise<string | null> {
   const env = deps.env ?? process.env;
-  if (!groupSateiOn(groupId, env)) return;
+  if (!groupSateiOn(groupId, env)) return null;
   const kv = deps.kv;
-  if (!kv) return;
+  if (!kv) return null;
   try {
     const tids = (await kv.smembers(gsOpenKey(groupId))).filter((x): x is string => typeof x === "string");
     const open: Array<{ tid: string; t: GsTicket }> = [];
@@ -287,75 +314,95 @@ export async function attachLateMedia(
     for (const { tid, t } of open) {
       if (!lateMediaMatches(t, row, open.length, admin)) continue;
       const receipt = receiptOf(t.no);
-      if (!t.deferred && (t.rereads ?? 0) >= GS_REREAD_MAX) {
+      if (!t.deferred && ((t.rereads ?? 0) >= GS_REREAD_MAX || t.mediaIds.length >= GS_MATERIALS_MAX)) {
         deps.log(`[group-satei] ticket ${receipt} late-media over`);
-        return;
+        return null;
       }
+      // 読み直す時刻を先に延ばしてから資料を足す（読む側が「静かになった」と見て、この資料を取りこぼさない）
+      await kv.set(gsRereadAtKey(tid), deps.now() + GS_QUIET_MS, GS_TICKET_TTL);
       await kv.sadd(gsLateKey(tid), lateMember(row));
       await kv.expire(gsLateKey(tid), GS_TICKET_TTL);
       await kv.set(gsMsgKey(row.messageId), tid, GS_TICKET_TTL);
-      await kv.set(gsRereadAtKey(tid), deps.now() + GS_QUIET_MS, GS_TICKET_TTL);
-      await kv.sadd(GS_REREAD_SET, tid);
       deps.log(`[group-satei] ticket ${receipt} late-media`);
-      return;
+      return tid;
     }
   } catch {
     deps.log("[group-satei] skip:late-media-kv");
   }
+  return null;
+}
+
+export interface GsWorkerDeps extends GsOpenDeps {
+  kv: GsRereadKv | null;
+  sleep(ms: number): Promise<void>;
 }
 
 /**
- * 毎分の見回り：読み直しの時刻が来た受付票を読み直し、下村さんへ知らせる（11/25）。
- * - 待っていた最初の知らせ（deferred）：版は1のまま、資料が無ければ AI を呼ばずに「まだ届いていません」
- * - 知らせたあとの読み直し：版を上げて出し直す（前のカードは古い版になる）。2回まで
- * 読むあいだにボタンが押された（状態・版が変わった）ら、何も書かない。例外は投げない。
+ * 読み直しの係（11/25）。webhook の中（gsJobs。maxDuration 300 秒）で動き、毎分の見回りには頼らない。
+ * - 受付票ごとに1つだけ（印 gsatei:rlock:<tid>）。印を取れなければ、取れるまで待ってから、自分の資料が残っていれば引き継ぐ。
+ * - 読み直す時刻（最後の資料から1分・資料なしは90秒）まで待ち、読み直して知らせる。読むあいだに資料が増えたら、もう1周。
+ * - 開始から 250 秒で打ち切る（関数の上限 300 秒の内側）。1周に要る時間（読み取り40秒＋候補＋送信）が残らなければ始めない。
+ * 例外は投げない。
  */
-export async function runGroupSateiRereads(deps: GsOpenDeps & { kv: GsRereadKv | null }): Promise<void> {
+export async function runRereadWorker(tid: string, deps: GsWorkerDeps): Promise<void> {
   const env = deps.env ?? process.env;
   if (!groupSateiActive(env)) return;
   const kv = deps.kv;
   if (!kv) return;
-  let done = 0;
-  let tids: string[] = [];
+  const start = deps.now();
+  const left = () => GS_WORKER_DEADLINE_MS - (deps.now() - start);
   try {
-    tids = (await kv.smembers(GS_REREAD_SET)).filter((x): x is string => typeof x === "string");
-  } catch {
-    deps.log("[group-satei] reread skip:kv");
-    return;
-  }
-  for (const tid of tids) {
-    if (done >= GS_REREAD_PER_TICK) break;
-    try {
-      const t = asTicket(await kv.get(gsTicketKey(tid)));
-      if (!t || t.state !== "asking") {
-        await kv.srem(GS_REREAD_SET, tid);
-        continue;
-      }
-      const at = Number(await kv.get(gsRereadAtKey(tid)));
-      if (Number.isFinite(at) && at > deps.now()) continue;
-      if (!(await kv.setNx(gsRereadLockKey(tid), 1, 120))) continue;
-      done++;
-      try {
-        await rereadOne(tid, t, deps, kv);
-      } finally {
-        await kv.del(gsRereadLockKey(tid)).catch(() => undefined);
-      }
-    } catch {
-      deps.log("[group-satei] reread skip:exception");
+    for (;;) {
+      if (await hasNothingToDo(tid, kv)) return;
+      if (await kv.setNx(gsRereadLockKey(tid), 1, GS_LOCK_TTL_S)) break;
+      // ほかの呼び出しが読んでいる：終わるのを待つ（その係が残りも拾うので、多くはここで仕事が無くなる）
+      if (left() < GS_ROUND_MS) return;
+      await deps.sleep(GS_POLL_MS);
     }
+    try {
+      for (let round = 0; round < GS_REREAD_MAX + 1; round++) {
+        // 静かになるまで待つ（資料が届くたびに時刻が延びる）
+        for (;;) {
+          const at = Number(await kv.get(gsRereadAtKey(tid)));
+          const wait = Number.isFinite(at) ? at - deps.now() : 0;
+          if (wait <= 0) break;
+          if (left() - GS_ROUND_MS < Math.min(wait, GS_POLL_MS)) break;
+          await deps.sleep(Math.min(wait, GS_POLL_MS));
+        }
+        if (left() < GS_ROUND_MS) {
+          deps.log("[group-satei] reread out-of-time");
+          return;
+        }
+        const more = await rereadOne(tid, deps, kv);
+        if (!more) return;
+      }
+    } finally {
+      await kv.del(gsRereadLockKey(tid)).catch(() => undefined);
+    }
+  } catch {
+    deps.log("[group-satei] reread skip:exception");
   }
 }
 
-async function rereadOne(tid: string, t: GsTicket, deps: GsOpenDeps, kv: GsRereadKv): Promise<void> {
+/** まだ asking で、待っている最初の知らせか、足していない資料があるか */
+async function hasNothingToDo(tid: string, kv: GsRereadKv): Promise<boolean> {
+  const t = asTicket(await kv.get(gsTicketKey(tid)));
+  if (!t || t.state !== "asking" || (await kv.get(gsDecKey(tid)))) return true;
+  if (t.deferred) return false;
+  const late = (await kv.smembers(gsLateKey(tid))).map(parseLate).filter((x) => x && !t.mediaIds.includes(x.id));
+  return late.length === 0 || (t.rereads ?? 0) >= GS_REREAD_MAX || t.mediaIds.length >= GS_MATERIALS_MAX;
+}
+
+/** 1回読み直して知らせる。まだ足していない資料が残っていれば true（もう1周） */
+async function rereadOne(tid: string, deps: GsOpenDeps, kv: GsRereadKv): Promise<boolean> {
+  const t = asTicket(await kv.get(gsTicketKey(tid)));
+  if (!t || t.state !== "asking" || (await kv.get(gsDecKey(tid)))) return false;
   const receipt = receiptOf(t.no);
   const late = (await kv.smembers(gsLateKey(tid))).map(parseLate).filter((x): x is { kind: "image" | "pdf"; id: string } => x !== null);
   const fresh = late.filter((l) => !t.mediaIds.includes(l.id));
-  if (!t.deferred && (fresh.length === 0 || (t.rereads ?? 0) >= GS_REREAD_MAX)) {
-    await kv.srem(GS_REREAD_SET, tid);
-    return;
-  }
   const room = Math.max(0, GS_MATERIALS_MAX - t.mediaIds.length);
   const added = fresh.slice(0, room);
+  if (!t.deferred && (added.length === 0 || (t.rereads ?? 0) >= GS_REREAD_MAX)) return false;
   const mediaIds = [...t.mediaIds, ...added.map((l) => l.id)];
   const base = t.materials ?? { images: 0, pdfs: 0 };
   const materials = {
@@ -363,11 +410,9 @@ async function rereadOne(tid: string, t: GsTicket, deps: GsOpenDeps, kv: GsRerea
     pdfs: base.pdfs + added.filter((l) => l.kind === "pdf").length,
   };
 
-  let read: GsRead | null = null;
-  let readFailed: string | undefined;
-  if (mediaIds.length === 0) {
-    readFailed = "no-material";
-  } else {
+  let read: GsRead | null = t.deferred && added.length === 0 ? t.read : null;
+  let readFailed: string | undefined = t.deferred && added.length === 0 ? t.readFailed : undefined;
+  if (!(t.deferred && added.length === 0)) {
     let capped = false;
     try {
       const n = await kv.incr(gsReadsKey(deps.ymd()));
@@ -386,27 +431,27 @@ async function rereadOne(tid: string, t: GsTicket, deps: GsOpenDeps, kv: GsRerea
     }
   }
 
-  // 読んでいるあいだに押された・別の読み直しで版が進んだ → 書かない
+  // 読んでいるあいだに押された・版が進んだ → 書かない（11/25 レビュー 2）
   const now = asTicket(await kv.get(gsTicketKey(tid)));
-  if (!now || now.state !== "asking" || now.ver !== t.ver) {
+  if (!now || now.state !== "asking" || now.ver !== t.ver || (await kv.get(gsDecKey(tid)))) {
     deps.log(`[group-satei] ticket ${receipt} reread stale`);
-    await kv.srem(GS_REREAD_SET, tid);
-    return;
+    return false;
   }
+  const wasDeferred = Boolean(t.deferred);
   const next: GsTicket = { ...now, mediaIds, materials, read, deferred: false, pushed: false };
   if (readFailed) next.readFailed = readFailed;
   else delete next.readFailed;
-  const wasDeferred = Boolean(t.deferred);
   if (!wasDeferred) {
     next.ver = now.ver + 1;
     next.rereads = (now.rereads ?? 0) + 1;
   }
   await saveTicket(kv, tid, next, receipt, deps);
-  await kv.srem(GS_REREAD_SET, tid);
   for (const l of added) await kv.srem(gsLateKey(tid), `${l.kind}:${l.id}`);
-  await kv.del(gsRereadAtKey(tid)).catch(() => undefined);
   const { sent } = await notifyTicket(tid, next, deps, kv, !wasDeferred);
   deps.log(
     `[group-satei] ticket ${receipt} reread ${next.read ? "read ok" : `read ${next.readFailed}`} ${wasDeferred ? "first" : `v${next.ver}`}${sent ? "" : " push-failed"}`,
   );
+  // 読むあいだに届いた資料が残っていれば、もう1周（11/25 レビュー 3）
+  const rest = (await kv.smembers(gsLateKey(tid))).map(parseLate).filter((x) => x && !mediaIds.includes(x.id));
+  return rest.length > 0 && (next.rereads ?? 0) < GS_REREAD_MAX && mediaIds.length < GS_MATERIALS_MAX;
 }

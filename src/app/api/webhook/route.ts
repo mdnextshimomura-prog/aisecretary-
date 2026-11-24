@@ -810,13 +810,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // ただし下書きの宛先待ち中は、その場で名刺として読み宛先に設定して返信する。
     if (event.message.type === "image") {
       // 普通のグループの査定依頼の控え（GROUP_SATEI=1 かつ対象グループのときだけ。off なら KV にも触れない。例外は投げない）
-      await recordGroupSateiMediaEvent({
+      const gsLateImage = await recordGroupSateiMediaEvent({
         messageId: event.message.id,
         groupId: source.groupId,
         senderId: source.userId,
         type: "image",
         at: event.timestamp ?? Date.now(),
       });
+      // あとから貼られた資料の読み直しは待たずに始め、返す直前にまとめて待つ
+      if (gsLateImage) gsJobs.push(gsLateImage.job);
       await handleIncomingImage(event.message.id, source, replyToken);
       continue;
     }
@@ -825,7 +827,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // 下書き作成中は、名刺PDFなら宛先に、そうでなければ添付候補として案内する。
     if (event.message.type === "file") {
       // 普通のグループの査定依頼の控え（同上。ファイル名は PDF かどうかを見るだけで控えない）
-      await recordGroupSateiMediaEvent({
+      const gsLateFile = await recordGroupSateiMediaEvent({
         messageId: event.message.id,
         groupId: source.groupId,
         senderId: source.userId,
@@ -833,6 +835,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         fileName: event.message.fileName,
         at: event.timestamp ?? Date.now(),
       });
+      if (gsLateFile) gsJobs.push(gsLateFile.job);
       await handleIncomingFile(
         event.message.id,
         event.message.fileName ?? "file",

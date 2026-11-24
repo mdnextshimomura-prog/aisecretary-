@@ -1,11 +1,13 @@
 /** 普通のグループの査定依頼：あとから届いた資料で読み直す（11/25。社長の依頼が「資料を読めませんでした」になった件） */
 import assert from "node:assert/strict";
 import {
-  attachLateMedia, openGroupSatei, recordGroupSateiMedia, runGroupSateiRereads,
-  type GsOpenDeps, type GsRereadKv,
+  attachLateMedia, openGroupSatei, recordGroupSateiMedia, runRereadWorker,
+  type GsRereadKv, type GsWorkerDeps,
 } from "../src/lib/group-satei-open";
 import { lateMediaMatches } from "../src/lib/group-satei-gate";
-import { GS_REREAD_SET, asTicket, gsLateKey, gsTicketKey, ticketIdOf, type GsMedia, type GsRead } from "../src/lib/group-satei-data";
+import {
+  asTicket, gsDecKey, gsLateKey, gsRereadAtKey, gsRereadLockKey, gsTicketKey, ticketIdOf, type GsMedia, type GsRead,
+} from "../src/lib/group-satei-data";
 import { loadGroupSateiMaterials } from "../src/lib/group-satei-wire";
 
 let n = 0;
@@ -43,8 +45,12 @@ function mk(reads: Array<GsRead | "throw"> = [READ]) {
   const logs: string[] = [];
   const pushes: Array<{ messages: unknown[]; key: string }> = [];
   const readCalls: string[][] = [];
+  const readAt: number[] = [];
   let clock = NOW;
-  const deps: GsOpenDeps & { kv: GsRereadKv } = {
+  let onRead: (call: number) => unknown = () => undefined;
+  let onPush: () => void = () => undefined;
+  let onSleep: () => unknown = () => undefined;
+  const deps: GsWorkerDeps & { kv: GsRereadKv } = {
     env: ENV,
     kv,
     now: () => clock,
@@ -52,6 +58,8 @@ function mk(reads: Array<GsRead | "throw"> = [READ]) {
     ymd: () => "2026-11-25",
     read: async (ids) => {
       readCalls.push(ids);
+      readAt.push(clock);
+      await onRead(readCalls.length);
       const r = reads.length > 1 ? reads.shift()! : reads[0];
       if (r === "throw") throw new Error("unreadable");
       return r;
@@ -59,11 +67,19 @@ function mk(reads: Array<GsRead | "throw"> = [READ]) {
     loadDeals: async () => [],
     kindOf: async () => null,
     requesterName: async () => "前田",
-    push: async (_to, messages, key) => { pushes.push({ messages, key }); return true; },
+    push: async (_to, messages, key) => { pushes.push({ messages, key }); onPush(); return true; },
     log: (l) => logs.push(l),
+    sleep: async (ms) => { clock += ms; await onSleep(); },
   };
-  return { deps, kv, m, logs, pushes, readCalls, tick: (ms: number) => { clock += ms; } };
+  return {
+    deps, kv, m, logs, pushes, readCalls, readAt,
+    clock: () => clock,
+    onRead: (f: (call: number) => unknown) => { onRead = f; },
+    onPush: (f: () => void) => { onPush = f; },
+    onSleep: (f: () => unknown) => { onSleep = f; },
+  };
 }
+const TID = ticketIdOf("m1");
 const ev = (over = {}) => ({ messageId: "m1", groupId: G, requesterId: BOSS, at: NOW, text: "査定お願いできますか！", entry: "B" as const, ...over });
 const img = (id: string, o: Partial<GsMedia> = {}): GsMedia => ({ messageId: id, kind: "image", senderId: BOSS, at: NOW + 20_000, ...o });
 const tk = (m: Map<string, unknown>, id = "m1") => asTicket(m.get(gsTicketKey(ticketIdOf(id))))!;
@@ -97,60 +113,69 @@ const text0 = (p: { messages: unknown[] }) => (p.messages[0] as { text: string }
   });
 
   // ── 文字だけで読めない依頼は、すぐ知らせずに資料を待つ ──
-  await t("資料が無く本文でも読めない：知らせを待つ（push しない・読み直しの予約）", async () => {
+  await t("資料が無く本文でも読めない：知らせを待つ（push しない・読み直す時刻を置く）", async () => {
     const x = mk(["throw"]);
     assert.equal(await openGroupSatei(ev(), x.deps), "opened");
     assert.equal(x.pushes.length, 0);
     const k = tk(x.m);
     assert.equal(k.deferred, true);
     assert.equal(k.readFailed, "no-material");
-    assert.ok((x.m.get(GS_REREAD_SET) as Set<string>).has(ticketIdOf("m1")));
+    assert.equal(x.m.get(gsRereadAtKey(TID)), NOW + 90_000);
     assert.ok(x.logs.some((l) => /ticket G1 opened B deferred/.test(l)));
   });
-  await t("本文だけで読めた：その場で知らせる（待たない）", async () => {
+  await t("本文だけで読めた：その場で知らせる（待たない）・係は何もしない", async () => {
     const x = mk([READ]);
     await openGroupSatei(ev(), x.deps);
     assert.equal(x.pushes.length, 1);
-    assert.equal(tk(x.m).deferred, undefined);
+    await runRereadWorker(TID, x.deps);
+    assert.equal(x.pushes.length, 1);
+    assert.equal(x.clock(), NOW, "待たない");
   });
 
-  // ── あとから画像 → 静かになってから1回読んで、1回だけ知らせる ──
-  await t("社長の型：文字 → 画像2枚 → 1分静か → 読んで1回知らせる", async () => {
+  // ── 社長の型：文字 → 画像2枚 → 1分静か → 読んで1回知らせる ──
+  await t("社長の型：文字 → 画像2枚 → 静かになってから読んで1回知らせる", async () => {
     const x = mk(["throw", READ]);
     await openGroupSatei(ev(), x.deps);
     for (const id of ["i1", "i2"]) {
       const row = img(id);
       await recordGroupSateiMedia(row, G, x.kv, () => undefined);
-      await attachLateMedia(row, G, x.deps);
+      assert.equal(await attachLateMedia(row, G, x.deps), TID);
     }
-    assert.deepEqual(Array.from(x.m.get(gsLateKey(ticketIdOf("m1"))) as Set<string>).sort(), ["image:i1", "image:i2"]);
-    assert.deepEqual(tk(x.m).mediaIds, [], "受付票そのものは見回りまで書き換えない");
-    x.tick(30_000);
-    await runGroupSateiRereads(x.deps);
-    assert.equal(x.pushes.length, 0, "静かになる前は読まない");
-    x.tick(60_000);
-    await runGroupSateiRereads(x.deps);
+    assert.deepEqual(Array.from(x.m.get(gsLateKey(TID)) as Set<string>).sort(), ["image:i1", "image:i2"]);
+    assert.deepEqual(tk(x.m).mediaIds, [], "受付票そのものは係が読むまで書き換えない");
+    await runRereadWorker(TID, x.deps);
     assert.equal(x.pushes.length, 1);
+    assert.ok(x.readAt.at(-1)! >= NOW + 60_000, "最後の資料から1分たってから読む");
     assert.deepEqual(x.readCalls.at(-1), ["i1", "i2"]);
     assert.match(text0(x.pushes[0]), /大阪市北区テスト1丁目2/);
     assert.match(text0(x.pushes[0]), /画像2枚/);
     const k = tk(x.m);
     assert.equal(k.deferred, false);
     assert.equal(k.ver, 1, "最初の知らせなので版は1のまま");
-    assert.equal(k.rereads ?? 0, 0);
-    assert.ok(!(x.m.get(GS_REREAD_SET) as Set<string>).has(ticketIdOf("m1")));
-    await runGroupSateiRereads(x.deps);
+    assert.equal(k.pushed, true);
+    await runRereadWorker(TID, x.deps);
     assert.equal(x.pushes.length, 1, "二度は知らせない");
   });
-  await t("待っても資料が来ない：90秒後に「まだ届いていません」で知らせる", async () => {
+  await t("待っても資料が来ない：90秒後に「まだ届いていません」で知らせる（AI は呼び直さない）", async () => {
     const x = mk(["throw"]);
     await openGroupSatei(ev(), x.deps);
-    x.tick(91_000);
-    await runGroupSateiRereads(x.deps);
+    await runRereadWorker(TID, x.deps);
     assert.equal(x.pushes.length, 1);
+    assert.ok(x.clock() >= NOW + 90_000);
     assert.match(text0(x.pushes[0]), /まだ届いていません/);
     assert.match(text0(x.pushes[0]), /読み直して/);
-    assert.equal(x.readCalls.length, 1, "資料が無いので2回目は AI を呼ばない");
+    assert.equal(x.readCalls.length, 1);
+  });
+  await t("開いて読んでいるあいだに本人の画像が貼られた：取りこぼさず、読んでから1回知らせる（レビュー1）", async () => {
+    const x = mk([READ, READ]);
+    x.onRead((call) => {
+      if (call === 1) return recordGroupSateiMedia(img("i9", { at: NOW + 3_000 }), G, x.kv, () => undefined);
+    });
+    await openGroupSatei(ev(), x.deps);
+    assert.equal(x.pushes.length, 0, "読むあいだに資料が増えたので、まだ知らせない");
+    await runRereadWorker(TID, x.deps);
+    assert.equal(x.pushes.length, 1);
+    assert.deepEqual(x.readCalls.at(-1), ["i9"]);
   });
 
   // ── 知らせたあとに資料が増えた：版を上げて出し直す（2回まで）──
@@ -159,54 +184,103 @@ const text0 = (p: { messages: unknown[] }) => (p.messages[0] as { text: string }
     await recordGroupSateiMedia(img("i0", { at: NOW - 60_000 }), G, x.kv, () => undefined);
     await openGroupSatei(ev(), x.deps);
     assert.equal(x.pushes.length, 1);
-    const row = img("i1");
-    await recordGroupSateiMedia(row, G, x.kv, () => undefined);
-    await attachLateMedia(row, G, x.deps);
-    x.tick(61_000);
-    await runGroupSateiRereads(x.deps);
+    await attachLateMedia(img("i1"), G, x.deps);
+    await runRereadWorker(TID, x.deps);
     assert.equal(x.pushes.length, 2);
     assert.match(text0(x.pushes[1]), /読み直しました/);
     const k = tk(x.m);
     assert.equal(k.ver, 2);
     assert.equal(k.rereads, 1);
-    assert.equal(x.pushes[1].key, `${ticketIdOf("m1")}:2`);
+    assert.deepEqual(k.mediaIds, ["i0", "i1"]);
+    assert.equal(x.pushes[1].key, `${TID}:2`);
   });
-  await t("読み直しは2回まで（3回目の資料は足すだけ）", async () => {
+  await t("読み直しは2回まで（3回目の資料は足さない）", async () => {
     const x = mk([READ]);
     await openGroupSatei(ev(), x.deps);
     for (const id of ["i1", "i2", "i3"]) {
-      const row = img(id);
-      await attachLateMedia(row, G, x.deps);
-      x.tick(61_000);
-      await runGroupSateiRereads(x.deps);
+      await attachLateMedia(img(id), G, x.deps);
+      await runRereadWorker(TID, x.deps);
     }
     assert.equal(x.pushes.length, 3);
     assert.equal(tk(x.m).rereads, 2);
+    assert.ok(x.logs.some((l) => /late-media over/.test(l)));
+  });
+  await t("読むあいだに届いた画像：置き去りにせず、もう1周読む（レビュー3）", async () => {
+    const x = mk([READ]);
+    await openGroupSatei(ev(), x.deps);
+    await attachLateMedia(img("i1"), G, x.deps);
+    x.onRead((call) => {
+      if (call === 2) return attachLateMedia(img("i2", { at: NOW + 30_000 }), G, x.deps).then(() => undefined);
+    });
+    await runRereadWorker(TID, x.deps);
+    assert.equal(x.pushes.length, 3);
+    assert.deepEqual(tk(x.m).mediaIds, ["i1", "i2"]);
+    assert.equal((x.m.get(gsLateKey(TID)) as Set<string>).size, 0);
+  });
+  await t("読むあいだにボタンが押された：押した結果を上書きしない・知らせない（レビュー2）", async () => {
+    const x = mk([READ]);
+    await openGroupSatei(ev(), x.deps);
+    await attachLateMedia(img("i1"), G, x.deps);
+    x.onRead(async (call) => {
+      if (call === 2) {
+        x.m.set(gsDecKey(TID), "x");
+        x.m.set(gsTicketKey(TID), { ...tk(x.m), state: "started" });
+      }
+    });
+    await runRereadWorker(TID, x.deps);
+    assert.equal(x.pushes.length, 1);
+    assert.equal(tk(x.m).state, "started");
+    assert.ok(x.logs.some((l) => /reread stale/.test(l)));
+  });
+  await t("知らせの送信中にボタンが押された：pushed の印で asking に戻さない（レビュー2）", async () => {
+    const x = mk([READ]);
+    await openGroupSatei(ev(), x.deps);
+    await attachLateMedia(img("i1"), G, x.deps);
+    x.onPush(() => {
+      x.m.set(gsDecKey(TID), "x");
+      x.m.set(gsTicketKey(TID), { ...tk(x.m), state: "manual" });
+    });
+    await runRereadWorker(TID, x.deps);
+    assert.equal(tk(x.m).state, "manual");
   });
   await t("ボタンを押したあと（asking でない）は足さない", async () => {
     const x = mk([READ]);
     await openGroupSatei(ev(), x.deps);
-    const k = tk(x.m);
-    await x.kv.set(gsTicketKey(ticketIdOf("m1")), { ...k, state: "manual" }, 1);
-    await attachLateMedia(img("i1"), G, x.deps);
-    assert.equal(x.m.get(gsLateKey(ticketIdOf("m1"))), undefined);
-    assert.equal(tk(x.m).state, "manual", "押したあとの状態を書き戻さない");
+    x.m.set(gsTicketKey(TID), { ...tk(x.m), state: "manual" });
+    assert.equal(await attachLateMedia(img("i1"), G, x.deps), null);
+    assert.equal(x.m.get(gsLateKey(TID)), undefined);
+    assert.equal(tk(x.m).state, "manual");
   });
-  await t("off なら足さない・見回りも何もしない（KV を読まない）", async () => {
+  await t("ほかの呼び出しが係をしている：待って、時間内に終わらなければ黙って戻る（例外なし）", async () => {
+    const x = mk(["throw"]);
+    await openGroupSatei(ev(), x.deps);
+    x.m.set(gsRereadLockKey(TID), 1);
+    await runRereadWorker(TID, x.deps);
+    assert.equal(x.pushes.length, 0);
+    assert.ok(x.clock() - NOW <= 250_000);
+  });
+  await t("係は 250 秒の内側で終わる（資料が貼られ続けても）", async () => {
+    const x = mk([READ]);
+    await openGroupSatei(ev(), x.deps);
+    await attachLateMedia(img("i1"), G, x.deps);
+    x.onSleep(() => attachLateMedia(img(`k${x.clock()}`, { at: x.clock() }), G, x.deps).then(() => undefined));
+    await runRereadWorker(TID, x.deps);
+    assert.ok(x.clock() - NOW <= 250_000, `${x.clock() - NOW}`);
+  });
+  await t("off なら足さない・係も何もしない（KV を読まない）", async () => {
     const x = mk([READ]);
     let touched = false;
     const kv = new Proxy(x.kv, { get: (o, p) => { touched = true; return (o as never)[p]; } });
-    await attachLateMedia(img("i1"), G, { ...x.deps, env: {}, kv });
-    await runGroupSateiRereads({ ...x.deps, env: {}, kv });
+    assert.equal(await attachLateMedia(img("i1"), G, { ...x.deps, env: {}, kv }), null);
+    await runRereadWorker(TID, { ...x.deps, env: {}, kv });
     assert.equal(touched, false);
   });
-  await t("読み直しの知らせに名前が混ざらない・ログは符号だけ", async () => {
+  await t("ログは符号だけ（物件名・住所を出さない）", async () => {
     const x = mk(["throw", READ]);
     await openGroupSatei(ev(), x.deps);
     await attachLateMedia(img("i1"), G, x.deps);
-    x.tick(61_000);
-    await runGroupSateiRereads(x.deps);
-    assert.ok(x.logs.some((l) => /^\[group-satei\] ticket G1 reread read ok/.test(l)));
+    await runRereadWorker(TID, x.deps);
+    assert.ok(x.logs.some((l) => /^\[group-satei\] ticket G1 reread read ok first/.test(l)));
     assert.ok(!x.logs.join().includes("テスト"));
   });
 
