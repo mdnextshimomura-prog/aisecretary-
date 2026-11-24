@@ -56,13 +56,17 @@ export function pickMaterials(
   ev: { requesterId: string; at: number; triggerMsgIds: string[]; quotedMessageId?: string },
 ): string[] {
   const readable = media.filter((m) => m.kind === "image" || m.kind === "pdf");
-  const picked = readable.filter(
-    (m) =>
-      (m.senderId === ev.requesterId && m.at >= ev.at - GS_BEFORE_MS && m.at <= ev.at + GS_AFTER_MS) ||
-      (ev.quotedMessageId !== undefined && m.messageId === ev.quotedMessageId) ||
-      (m.quoted !== undefined && ev.triggerMsgIds.includes(m.quoted)),
-  );
-  const uniq = picked.filter((m, i) => picked.findIndex((x) => x.messageId === m.messageId) === i);
-  uniq.sort((a, b) => a.at - b.at);
-  return uniq.slice(-GS_MATERIALS_MAX).map((m) => m.messageId);
+  const byTime = (a: GsMedia, b: GsMedia) => a.at - b.at;
+  const isRef = (m: GsMedia) =>
+    (ev.quotedMessageId !== undefined && m.messageId === ev.quotedMessageId) ||
+    (m.quoted !== undefined && ev.triggerMsgIds.includes(m.quoted));
+  const isOwn = (m: GsMedia) => m.senderId === ev.requesterId && m.at >= ev.at - GS_BEFORE_MS && m.at <= ev.at + GS_AFTER_MS;
+  // 引用でつながる資料を先に確保し、残りの枠に本人の窓の新しいものを足す（古い順に返す）
+  const refs = readable.filter(isRef).sort(byTime).slice(-GS_MATERIALS_MAX);
+  const refIds = new Set(refs.map((m) => m.messageId));
+  const own = readable.filter((m) => isOwn(m) && !refIds.has(m.messageId)).sort(byTime);
+  const room = GS_MATERIALS_MAX - refs.length;
+  const fill = room > 0 ? own.slice(-room) : [];
+  const all = [...refs, ...fill].filter((m, i, a) => a.findIndex((x) => x.messageId === m.messageId) === i);
+  return all.sort(byTime).map((m) => m.messageId);
 }

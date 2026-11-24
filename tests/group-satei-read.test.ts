@@ -13,6 +13,14 @@ const t = async (name: string, f: () => void | Promise<void>) => { await f(); n+
     assert.equal(scrubNames("大阪市旭区大宮1丁目3番27"), "大阪市旭区大宮1丁目3番27");
     assert.equal(scrubNames(""), null);
   });
+  await t("名前らしいものは捨てる（殿・御中・名義・売主・買主・オーナー・夫妻・相続人）", () => {
+    for (const v of ["大阪市北区1-2 売主山田", "サウス御中", "山田殿", "山田名義", "買主田中", "オーナー宅", "山田夫妻", "相続人の家"]) assert.equal(scrubNames(v), null, v);
+    assert.equal(scrubNames("大阪市北区天神橋1丁目2番3"), "大阪市北区天神橋1丁目2番3");
+  });
+  await t("答えの検査：所在も物件名も無く種別も不明なら読めなかった扱い（例外）", () => {
+    assert.throws(() => parseGsReadText('{"所在":"山田様方","物件名":null,"種別の見込み":"不明","根拠":"本文","確信度":0.9}'));
+    assert.doesNotThrow(() => parseGsReadText('{"所在":null,"物件名":null,"種別の見込み":"土地","根拠":"本文","確信度":0.9}'));
+  });
   await t("答えの検査：正しい形", () => {
     const r = parseGsReadText('前置き {"所在":"大阪市北区1-2","物件名":null,"種別の見込み":"戸建","根拠":"登記","確信度":0.8} 後ろ');
     assert.deepEqual(r, { address: "大阪市北区1-2", propertyName: null, kind: "戸建", basis: "登記", confidence: 0.8 });
@@ -42,6 +50,15 @@ const t = async (name: string, f: () => void | Promise<void>) => { await f(); n+
     assert.equal(seen.messages[0].content[0].type, "image");
     assert.equal(seen.messages[0].content[1].type, "document");
     assert.match(seen.messages[0].content[2].text, /査定お願いできますか/);
+  });
+  await t("AI に渡す添付は先頭8件まで", async () => {
+    let seen: any = null;
+    const att = Array.from({ length: 10 }, () => ({ kind: "image" as const, mediaType: "image/png", base64: "AAAA" }));
+    await readGsMaterials(att, "x", "d", async (req) => {
+      seen = req;
+      return { content: [{ type: "text", text: '{"所在":"大阪市北区1-2","物件名":null,"種別の見込み":"土地","根拠":"地図","確信度":0.9}' }] };
+    });
+    assert.equal(seen.messages[0].content.length, 9);
   });
   console.log(`group-satei-read: ${n} ok`);
 })().catch((e) => { console.error(e); process.exit(1); });

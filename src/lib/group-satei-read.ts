@@ -4,7 +4,7 @@
  * AI の呼び出しは create を受け取る（本物は group-satei-wire.ts が Anthropic の client.messages.create を渡す）。
  */
 import type { TaskAttachment } from "./claude";
-import { GS_BASES, GS_KINDS, type GsBasis, type GsKind, type GsRead } from "./group-satei-data";
+import { GS_BASES, GS_KINDS, GS_MATERIALS_MAX, type GsBasis, type GsKind, type GsRead } from "./group-satei-data";
 
 export const GS_READ_MODEL = "claude-sonnet-4-6";
 
@@ -17,7 +17,7 @@ export const GS_READ_PROMPT = `あなたは不動産会社の査定の受付係�
  "確信度": 0〜1 の数}
 所有者・売主・人の名前は、どの欄にも書かないでください。`;
 
-const NAME_RE = /様|邸|さん|氏|所有者|持分/;
+const NAME_RE = /様|邸|さん|氏|所有者|持分|殿|御中|名義|売主|買主|オーナー|夫妻|相続人/;
 
 export function scrubNames(s: string | null | undefined): string | null {
   const v = typeof s === "string" ? s.trim() : "";
@@ -34,7 +34,11 @@ export function parseGsReadText(text: string): GsRead {
   const kind = GS_KINDS.includes(o["種別の見込み"] as GsKind) ? (o["種別の見込み"] as GsKind) : "不明";
   const basis = GS_BASES.includes(o["根拠"] as GsBasis) ? (o["根拠"] as GsBasis) : "その他";
   const str = (x: unknown) => (typeof x === "string" ? x : null);
-  return { address: scrubNames(str(o["所在"])), propertyName: scrubNames(str(o["物件名"])), kind, basis, confidence: c };
+  const address = scrubNames(str(o["所在"]));
+  const propertyName = scrubNames(str(o["物件名"]));
+  // 所在も物件名も取れず種別も不明なら、読めなかったのと同じ（呼び出し側の「読めなかった」の道へ）
+  if (!address && !propertyName && kind === "不明") throw new Error("unreadable");
+  return { address, propertyName, kind, basis, confidence: c };
 }
 
 export interface GsCreateReq {
@@ -51,14 +55,14 @@ export async function readGsMaterials(
   today: string,
   create: GsCreate,
 ): Promise<GsRead> {
-  const content: Array<Record<string, unknown>> = attachments.map((a) =>
+  const content: Array<Record<string, unknown>> = attachments.slice(0, GS_MATERIALS_MAX).map((a) =>
     a.kind === "image"
       ? { type: "image", source: { type: "base64", media_type: a.mediaType, data: a.base64 } }
       : { type: "document", source: { type: "base64", media_type: "application/pdf", data: a.base64 } },
   );
   content.push({
     type: "text",
-    text: `今日（日本時間）: ${today}\n添付: ${attachments.length}件\n\nLINE の依頼の本文:\n${text || "（本文なし）"}`,
+    text: `今日（日本時間）: ${today}\n添付: ${Math.min(attachments.length, GS_MATERIALS_MAX)}件\n\nLINE の依頼の本文:\n${text || "（本文なし）"}`,
   });
   const res = await create({
     model: GS_READ_MODEL,

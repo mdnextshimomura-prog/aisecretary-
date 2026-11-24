@@ -63,4 +63,16 @@ t("束ねる資料：発言が引用した画像・発言を引用した資料�
   ];
   assert.deepEqual(pickMaterials(media, { requesterId: BOSS, at: NOW, triggerMsgIds: ["m1"], quotedMessageId: "q" }), ["q", "r"]);
 });
+t("束ねる資料：引用した資料は8件の上限でも残る", () => {
+  const media: GsMedia[] = [
+    { messageId: "q", kind: "image", senderId: YAMA, at: NOW - 120 * MIN },
+    ...Array.from({ length: 9 }, (_, i): GsMedia => ({ messageId: `i${i}`, kind: "image", senderId: BOSS, at: NOW - (9 - i) * MIN })),
+  ];
+  const r = pickMaterials(media, { requesterId: BOSS, at: NOW, triggerMsgIds: ["m1"], quotedMessageId: "q" });
+  assert.equal(r.length, 8);
+  assert.deepEqual(r, ["q", "i2", "i3", "i4", "i5", "i6", "i7", "i8"]);
+});
+t("入口 B：下村さんの宛先が無ければ no-target", () => {
+  assert.deepEqual(gsEntryBGate({ groupId: G, senderId: BOSS, text: "査定お願い" }, { GROUP_SATEI: "1", GROUP_SATEI_GROUP_IDS: G }), { ok: false, reason: "no-target" });
+});
 console.log(`group-satei-gate: ${n} ok`);
