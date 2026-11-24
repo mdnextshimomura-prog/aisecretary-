@@ -11,7 +11,7 @@ import { kv } from "@vercel/kv";
 import { updateTaskProps } from "./notion";
 import { MENU_OFFSET_MAX } from "./task-buttons";
 import { loadActiveDeals, recordAfterCreate } from "./task-record-wire";
-import { onlyDeals } from "./deal-card-only";
+import { dealCardOnlyIds, onlyDeals } from "./deal-card-only";
 import { toMenuTask } from "./task-menu-wire";
 import type { MenuTask } from "./task-menu";
 import {
@@ -83,7 +83,7 @@ export function defaultDealKv(): DealKv | null {
 export function dealDeps(): DealDeps {
   return {
     // 一時的な絞り込み（deal-card-only.ts）。空なら今までどおり
-    loadDeals: async () => onlyDeals(await loadActiveDeals()),
+    loadDeals: async () => onlyDeals(await loadActiveDeals(), dealCardOnlyIds()),
     listDealTasks: (groupId) =>
       queryAll({
         and: [

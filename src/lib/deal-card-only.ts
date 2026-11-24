@@ -3,6 +3,7 @@
  * B2 査定書を本物の案件（DEAL-238 サウスオールシティ レフトウィング1414号室）で試すあいだだけ使う。
  * 空の配列に戻せば今までどおり（進行中の案件をすべて出す）。CRM_案件 には何も書かない。
  * 試し終わったら、このファイルごと消すか ONLY_DEAL_IDS を [] に戻して出し直す。
+ * 2026-11-24 から env `DEAL_CARD_ONLY_IDS` で変えられる（未設定なら下の2件、`all` で全件）。
  */
 import type { DealRef } from "./task-record";
 
@@ -19,4 +20,14 @@ export function onlyDeals(deals: DealRef[], ids: readonly string[] = ONLY_DEAL_I
   if (ids.length === 0) return deals;
   const keep = new Set(ids.map(norm));
   return deals.filter((d) => keep.has(norm(d.id)));
+}
+
+const PAGE_ID_LOOSE_RE = /^[0-9a-f]{32}$/;
+
+/** env DEAL_CARD_ONLY_IDS。未設定・空・形の合う ID が1つも無い → 今の2件。"all" → 絞らない（[]） */
+export function dealCardOnlyIds(env: Record<string, string | undefined> = process.env): readonly string[] {
+  const raw = (env.DEAL_CARD_ONLY_IDS ?? "").trim();
+  if (raw === "all") return [];
+  const ids = raw.split(",").map((s) => norm(s.trim())).filter((s) => PAGE_ID_LOOSE_RE.test(s));
+  return ids.length > 0 ? ids : ONLY_DEAL_IDS;
 }
