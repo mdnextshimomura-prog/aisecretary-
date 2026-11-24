@@ -28,6 +28,24 @@ export const GS_PAGE = 10;
 /** 本人の資料を束ねる幅（入口の発言の30分前〜1分後。後から来る分は段2） */
 export const GS_BEFORE_MS = 30 * 60 * 1000;
 export const GS_AFTER_MS = 60 * 1000;
+/** あとから届いた資料（11/25）：本人の画像は依頼から30分まで、ほかの人は開いている票が1件だけのとき2時間まで足す */
+export const GS_LATE_OWN_MS = 30 * 60 * 1000;
+export const GS_LATE_ANY_MS = 2 * 60 * 60 * 1000;
+/** 最後の資料から静かになって読み直すまで（画像を続けて貼る間は待つ） */
+export const GS_QUIET_MS = 60 * 1000;
+/** 文字だけで読めず資料も無いとき、知らせを待つ長さ（その間に画像が来なければ「まだ届いていません」で知らせる） */
+export const GS_DEFER_MS = 90 * 1000;
+/** 知らせたあとの読み直し（版を上げて出し直す）の上限 */
+export const GS_REREAD_MAX = 2;
+/** 1回の見回りで読み直す票の数（見回りの時間の上限 60 秒に収める） */
+export const GS_REREAD_PER_TICK = 1;
+export const GS_REREAD_SET = "gsatei:reread";
+/** あとから届いた資料の控え（受付票ごとの集合。要素は "image:<id>" か "pdf:<id>"。足すのは原子的な sadd だけ） */
+export const gsLateKey = (tid: string) => `gsatei:late:${tid}`;
+/** 読み直す時刻（受付票とは別に置く＝資料が届くたびに受付票を書き戻さない） */
+export const gsRereadAtKey = (tid: string) => `gsatei:rat:${tid}`;
+/** 読み直しの見回りの重なりを防ぐ印 */
+export const gsRereadLockKey = (tid: string) => `gsatei:rlock:${tid}`;
 // X-Line-Retry-Key の uuidv5 の名前空間（固定。変えると二重防止が効かなくなる）
 export const GS_RETRY_NAMESPACE = "3f6a1c9e-8b2d-4e7f-a5c1-9d0e2b4f6a8c";
 
@@ -87,6 +105,14 @@ export interface GsTicket {
   unknown?: boolean;
   /** 下村さんへの知らせの push が通った（false のまま＝届いていないかもしれない。再送は段2） */
   pushed?: boolean;
+  /** 束ねた資料の数（知らせの「資料：」の行。読み直しのとき控えが消えていても数えられるように） */
+  materials?: { images: number; pdfs: number };
+  /** 最初の知らせを、資料を待つために遅らせている */
+  deferred?: boolean;
+  /** この時刻を過ぎたら見回りで読み直す（ミリ秒） */
+  rereadAt?: number;
+  /** 知らせたあとに読み直した回数 */
+  rereads?: number;
 }
 
 const STATES: readonly GsState[] = ["asking", "started", "manual", "dismissed"];

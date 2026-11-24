@@ -3,7 +3,10 @@
  * 束ねる資料（設計 7）：①依頼者本人の画像・PDF で入口の30分前〜1分後 ②入口の発言が引用した資料・入口の発言を引用した資料。
  * 引用の無い他人の資料（③）と、60分後までの後から来る資料は段2。
  */
-import { GS_AFTER_MS, GS_BEFORE_MS, GS_MATERIALS_MAX, GS_MIN, groupSateiOn, type GsEnv, type GsMedia } from "./group-satei-data";
+import {
+  GS_AFTER_MS, GS_BEFORE_MS, GS_LATE_ANY_MS, GS_LATE_OWN_MS, GS_MATERIALS_MAX, GS_MIN, groupSateiOn,
+  type GsEnv, type GsMedia,
+} from "./group-satei-data";
 import { sateiNotifyTarget } from "./satei-data";
 
 export const GS_WORDS: readonly string[] = ["査定", "価格を出して", "いくらで売れ", "売却価格", "相場"];
@@ -69,4 +72,22 @@ export function pickMaterials(
   const fill = room > 0 ? own.slice(-room) : [];
   const all = [...refs, ...fill].filter((m, i, a) => a.findIndex((x) => x.messageId === m.messageId) === i);
   return all.sort(byTime).map((m) => m.messageId);
+}
+
+/**
+ * 依頼のあとに届いた画像・PDF を、その受付票に足すか（11/25）。
+ * ①受付票の発言・資料を引用したもの ②依頼者本人が30分以内に貼ったもの
+ * ③そのグループで開いている票が1件だけのとき、下村さん以外が2時間以内に貼ったもの。
+ */
+export function lateMediaMatches(
+  t: { requesterId: string; at: number; triggerMsgIds: string[]; mediaIds: string[] },
+  m: GsMedia,
+  openAsking: number,
+  adminId: string | null | undefined,
+): boolean {
+  if (m.kind !== "image" && m.kind !== "pdf") return false;
+  if (t.mediaIds.includes(m.messageId) || m.at < t.at) return false;
+  if (m.quoted !== undefined && (t.triggerMsgIds.includes(m.quoted) || t.mediaIds.includes(m.quoted))) return true;
+  if (m.senderId === t.requesterId && m.at - t.at <= GS_LATE_OWN_MS) return true;
+  return openAsking === 1 && m.senderId !== adminId && m.at - t.at <= GS_LATE_ANY_MS;
 }

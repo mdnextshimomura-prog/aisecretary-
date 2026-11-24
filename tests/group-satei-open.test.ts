@@ -86,10 +86,12 @@ const ev = (over = {}) => ({ messageId: "m1", groupId: G, requesterId: BOSS, at:
     assert.equal(await openGroupSatei(ev(), x.deps), "duplicate");
     assert.equal(x.pushes.length, 1);
   });
-  await t("読めなくても黙らない（カードは一覧・案件なし・査定ではない）", async () => {
+  await t("画像があって読めなくても黙らない（カードは一覧・案件なし・査定ではない）", async () => {
     const x = mk({ read: "throw" });
+    await recordGroupSateiMedia({ messageId: "img1", kind: "image", senderId: BOSS, at: NOW - 60_000 }, G, x.kv, () => undefined);
     await openGroupSatei(ev(), x.deps);
-    assert.match((x.pushes[0].messages[0] as any).text, /資料を読めませんでした/);
+    assert.match((x.pushes[0].messages[0] as any).text, /物件を読み取れませんでした/);
+    assert.match((x.pushes[0].messages[0] as any).text, /読み直して/);
     assert.equal((x.pushes[0].messages[1] as any).contents.footer.contents.length, 3);
   });
   await t("1日20回の上限を超えたら読まない", async () => {

@@ -12,9 +12,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { kv } from "@vercel/kv";
 import { parseTaskFromMessage, type TaskAttachment } from "./claude";
-import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiOn } from "./group-satei-data";
+import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiActive, groupSateiOn } from "./group-satei-data";
 import { gsEntryAOk, gsEntryBGate, gsMediaRow, looksLikeSateiWords } from "./group-satei-gate";
-import { openGroupSatei, recordGroupSateiMedia, type GsKv, type GsOpenDeps } from "./group-satei-open";
+import {
+  attachLateMedia, openGroupSatei, recordGroupSateiMedia, runGroupSateiRereads,
+  type GsKv, type GsOpenDeps, type GsRereadKv,
+} from "./group-satei-open";
 import type { GsActionDeps } from "./group-satei-actions";
 import { capByTotalBytes, readGsMaterials, type GsCreate } from "./group-satei-read";
 import { pushMessagesWithRetryKey } from "./line";
@@ -35,7 +38,7 @@ const MAX_BYTES = 3.5 * 1024 * 1024;
 let crmClient: ReturnType<typeof makeSateiNotion> | null = null;
 const crm = () => (crmClient ??= makeSateiNotion());
 
-export type GroupSateiKv = GsKv & { del(k: string): Promise<void>; srem(k: string, m: string): Promise<void> };
+export type GroupSateiKv = GsRereadKv;
 
 export function groupSateiKv(): GroupSateiKv | null {
   if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return null;
@@ -55,6 +58,7 @@ export function groupSateiKv(): GroupSateiKv | null {
     srem: async (k, m) => {
       await kv.srem(k, m);
     },
+    smembers: async (k) => (await kv.smembers<unknown[]>(k)) ?? [],
     del: async (k) => {
       await kv.del(k);
     },
@@ -93,20 +97,28 @@ function imageMediaType(ct: string): TaskAttachment["mediaType"] {
   return "image/jpeg";
 }
 
-/** 1件でも取れない・大きすぎる・時間切れなら例外（一部だけで読まない）。ログは出さない */
+/**
+ * 取れたものだけで読む（11/25 から。1件取れない・大きすぎる・時間切れの資料は飛ばす）。
+ * 資料があるのに1件も取れなければ例外。ログは出さない
+ */
 export async function loadGroupSateiMaterials(ids: string[], fetchImpl: typeof fetch = fetch): Promise<TaskAttachment[]> {
   const bufs: Array<{ buf: Buffer; ct: string }> = [];
   for (const id of ids) {
-    const res = await fetchImpl(`https://api-data.line.me/v2/bot/message/${encodeURIComponent(id)}/content`, {
-      headers: { Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN ?? ""}` },
-      signal: AbortSignal.timeout(CONTENT_TIMEOUT_MS),
-      cache: "no-store",
-    });
-    if (!res.ok) throw new Error("content");
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length === 0 || buf.length > MAX_BYTES) throw new Error("size");
-    bufs.push({ buf, ct: res.headers.get("content-type") ?? "" });
+    try {
+      const res = await fetchImpl(`https://api-data.line.me/v2/bot/message/${encodeURIComponent(id)}/content`, {
+        headers: { Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN ?? ""}` },
+        signal: AbortSignal.timeout(CONTENT_TIMEOUT_MS),
+        cache: "no-store",
+      });
+      if (!res.ok) continue;
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length === 0 || buf.length > MAX_BYTES) continue;
+      bufs.push({ buf, ct: res.headers.get("content-type") ?? "" });
+    } catch {
+      continue;
+    }
   }
+  if (ids.length > 0 && bufs.length === 0) throw new Error("content");
   // 合計が上限を超えるときは古いものから外し、新しいものを残す
   const out: TaskAttachment[] = [];
   for (const { buf, ct } of capByTotalBytes(bufs, (b) => b.buf.length)) {
@@ -186,7 +198,10 @@ export async function recordGroupSateiMediaEvent(m: {
     if (!groupSateiOn(m.groupId)) return;
     const row = gsMediaRow(m);
     if (!row) return;
-    await within(recordGroupSateiMedia(row, m.groupId as string, groupSateiKv(), log), MEDIA_KV_TIMEOUT_MS);
+    const store = groupSateiKv();
+    await within(recordGroupSateiMedia(row, m.groupId as string, store, log), MEDIA_KV_TIMEOUT_MS);
+    // 依頼のあとに届いた資料なら、開いている受付票に足す（読み直すのは毎分の見回り）
+    await within(attachLateMedia(row, m.groupId as string, { kv: store, now: () => Date.now(), log }), MEDIA_KV_TIMEOUT_MS);
   } catch {
     log("[group-satei] skip:media-exception");
   }
@@ -257,5 +272,16 @@ export async function maybeOpenGroupSateiB(
     );
   } catch {
     log("[group-satei] skip:exception B");
+  }
+}
+
+/** 毎分の見回り（/api/obi/cloud-tick に相乗り）：あとから届いた資料で読み直す。off なら KV も読まない。例外は投げない */
+export async function runGroupSateiRereadsOnTick(): Promise<void> {
+  try {
+    if (!groupSateiActive()) return;
+    const today = ymdJst(Date.now());
+    await runGroupSateiRereads({ ...groupSateiOpenDeps(today), kv: groupSateiKv() });
+  } catch {
+    log("[group-satei] reread skip:tick-exception");
   }
 }

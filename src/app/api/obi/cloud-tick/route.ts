@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleCloudTick } from "@/lib/obi/cloud-entry";
 import { runDueRemindersOnTick } from "@/lib/remind-due";
+import { runGroupSateiRereadsOnTick } from "@/lib/group-satei-wire";
 
 // 帯替えの完成リンク・差し戻し・失敗の知らせを、クラウドから出す毎分の見回り（設計 2026-10-11 の C1）。
 // 起こすのは portal（Railway の worker が毎分、portal の web を経由して、ここを POST でたたく）。
@@ -22,6 +23,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const name = (err as { name?: unknown } | null)?.name;
       console.error(`[remind-due] tick error ${typeof name === "string" ? name : "Error"}`);
     });
+    // 普通のグループの査定依頼：あとから届いた資料で読み直す（GROUP_SATEI=1 のときだけ。例外は投げない）
+    await runGroupSateiRereadsOnTick();
   }
   return NextResponse.json(r.body, { status: r.status, headers: NO_STORE });
 }

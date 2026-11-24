@@ -19,7 +19,10 @@ function jst(at: number): string {
 
 const FAILED_TEXT: Record<string, string> = {
   cap: "資料を読めませんでした（本日の上限）。LINE のグループで確かめてください。",
+  "no-material": "本文から物件が分からず、画像・PDF もまだ届いていません。",
+  "read-failed": "画像・PDF はありましたが、物件を読み取れませんでした。LINE のグループで確かめてください。",
 };
+const REREAD_HINT = "あとから画像・PDF が貼られたら、読み直してもう一度お知らせします。";
 
 export function gsNoticeText(o: {
   no: number;
@@ -27,11 +30,16 @@ export function gsNoticeText(o: {
   requesterName: string | null;
   read: GsRead | null;
   readFailed?: string;
-  materials: { images: number; pdfs: number; others: number };
+  materials: { images: number; pdfs: number; others?: number };
+  /** あとから届いた資料で読み直した知らせ */
+  reread?: boolean;
+  /** 読めなかったとき、あとから資料が来れば読み直せる（上限の手前） */
+  canReread?: boolean;
 }): string {
   const sure = o.read ? o.read.confidence >= GS_SURE : true;
   const lines = [`🏠 LINE のグループで査定の依頼${sure ? "がありました" : "かもしれません"}`];
   lines.push(`${jst(o.at)}${o.requesterName ? `・${cut(o.requesterName, 20)}さん` : ""}（受付 ${receiptOf(o.no)}）`);
+  if (o.reread) lines.push("（あとから届いた資料で読み直しました。前のカードは使えません）");
   if (o.read) {
     const what = o.read.propertyName ?? o.read.address;
     lines.push(`読み取った物件：${what ? cut(what, NAME_MAX) : "分かりませんでした"}`);
@@ -39,6 +47,7 @@ export function gsNoticeText(o: {
     lines.push(`種別の見込み：${o.read.kind}（${o.read.basis}から）`);
   } else {
     lines.push(FAILED_TEXT[o.readFailed ?? ""] ?? "資料を読めませんでした。LINE のグループで確かめてください。");
+    if (o.canReread && o.readFailed !== "cap") lines.push(REREAD_HINT);
   }
   const m = o.materials;
   const parts = [m.images ? `画像${m.images}枚` : "", m.pdfs ? `PDF${m.pdfs}件` : ""].filter(Boolean);
