@@ -73,3 +73,14 @@ export async function readGsMaterials(
   const out = res.content.filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
   return parseGsReadText(out);
 }
+
+/** Claude へ渡す添付の生バイト合計の上限（20 MB） */
+export const GS_MATERIALS_TOTAL_MAX_BYTES = 20 * 1024 * 1024;
+
+/** 古い順に並んだ項目のうち、合計が上限に収まるまで古いほうから外す（新しいものを残す） */
+export function capByTotalBytes<T>(items: T[], sizeOf: (x: T) => number, max: number = GS_MATERIALS_TOTAL_MAX_BYTES): T[] {
+  let total = items.reduce((a, x) => a + sizeOf(x), 0);
+  let drop = 0;
+  while (drop < items.length && total > max) total -= sizeOf(items[drop++]);
+  return items.slice(drop);
+}

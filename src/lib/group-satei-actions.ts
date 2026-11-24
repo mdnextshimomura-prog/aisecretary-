@@ -41,6 +41,15 @@ interface Outcome {
 
 type Kv = NonNullable<GsActionDeps["kv"]>;
 
+/** 決めたあとの KV の失敗は返事を変えない。ログは符号だけ */
+async function quietKv(f: () => Promise<void>, deps: GsActionDeps): Promise<void> {
+  try {
+    await f();
+  } catch {
+    deps.log("[group-satei] gs save-failed");
+  }
+}
+
 async function save(kv: Kv, tid: string, tk: GsTicket): Promise<void> {
   await kv.set(gsTicketKey(tid), tk, GS_TICKET_TTL);
   if (tk.state !== "asking" && !tk.provisional) await kv.srem(gsOpenKey(tk.groupId), tid);
@@ -95,13 +104,7 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
       r = { kind: "unknown", reason: "exception" };
     }
     // ここから先の KV の失敗は返事を変えない（portal の結果のとおりに返す）。ログだけ
-    const quiet = async (f: () => Promise<void>) => {
-      try {
-        await f();
-      } catch {
-        deps.log("[group-satei] gs save-failed");
-      }
-    };
+    const quiet = (f: () => Promise<void>) => quietKv(f, deps);
     if (r.kind === "ok") {
       const jobNo = r.value.no;
       await quiet(() => save(kv, a.tid, { ...tk, state: "started", provisional: false, dealId: a.dealId, jobNo }));
@@ -120,7 +123,7 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
       : { text: MSG_SATEI_FAILED, code: "rejected", settled: true };
   }
   if (!(await kv.setNx(gsDecKey(a.tid), `gs:${a.dealId}`, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
-  await save(kv, a.tid, { ...tk, state: "manual", provisional: false, dealId: a.dealId });
+  await quietKv(() => save(kv, a.tid, { ...tk, state: "manual", provisional: false, dealId: a.dealId }), deps);
   return { text: msgGsManual(no, kind) + warn, code: `manual ${kind === "戸建" ? "house" : kind === "土地" ? "land" : "unknown-kind"}`, settled: true };
 }
 
@@ -141,7 +144,7 @@ async function decide(a: Exclude<GsAction, { op: "gl" }>, tk: GsTicket, userId: 
     return { text: msgGsNoDeal(tk.no), code: "no-deal", settled: true };
   }
   if (!(await kv.setNx(gsDecKey(a.tid), "gn", GS_TICKET_TTL))) return { text: msgGsAlready(tk.no), code: "already", settled: true };
-  await save(kv, a.tid, { ...tk, state: "dismissed", provisional: false });
+  await quietKv(() => save(kv, a.tid, { ...tk, state: "dismissed", provisional: false }), deps);
   return { text: msgGsDismissed(tk.no), code: "dismissed", settled: true };
 }
 

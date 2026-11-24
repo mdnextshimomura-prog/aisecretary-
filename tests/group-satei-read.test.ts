@@ -1,6 +1,6 @@
 /** group-satei-read.ts（AI は差し替え） */
 import assert from "node:assert/strict";
-import { GS_READ_PROMPT, parseGsReadText, readGsMaterials, scrubNames } from "../src/lib/group-satei-read";
+import { GS_MATERIALS_TOTAL_MAX_BYTES, capByTotalBytes, GS_READ_PROMPT, parseGsReadText, readGsMaterials, scrubNames } from "../src/lib/group-satei-read";
 
 let n = 0;
 const t = async (name: string, f: () => void | Promise<void>) => { await f(); n++; console.log("ok", name); };
@@ -59,6 +59,14 @@ const t = async (name: string, f: () => void | Promise<void>) => { await f(); n+
       return { content: [{ type: "text", text: '{"所在":"大阪市北区1-2","物件名":null,"種別の見込み":"土地","根拠":"地図","確信度":0.9}' }] };
     });
     assert.equal(seen.messages[0].content.length, 9);
+  });
+  await t("合計サイズの上限：古いものから外し、新しいものを残す", () => {
+    const MB = 1024 * 1024;
+    const items = [{ id: "a", b: 8 * MB }, { id: "b", b: 8 * MB }, { id: "c", b: 8 * MB }];
+    assert.deepEqual(capByTotalBytes(items, (x) => x.b, 20 * MB).map((x) => x.id), ["b", "c"]);
+    assert.deepEqual(capByTotalBytes(items.slice(0, 2), (x) => x.b, 20 * MB).map((x) => x.id), ["a", "b"]);
+    assert.deepEqual(capByTotalBytes([{ id: "z", b: 30 * MB }], (x) => x.b, 20 * MB), []);
+    assert.equal(GS_MATERIALS_TOTAL_MAX_BYTES, 20 * MB);
   });
   console.log(`group-satei-read: ${n} ok`);
 })().catch((e) => { console.error(e); process.exit(1); });

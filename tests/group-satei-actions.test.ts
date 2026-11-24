@@ -75,6 +75,12 @@ const gs: GsAction = { op: "gs", tid, ver: 1, dealId: DEAL };
     assert.equal(x.intakes.length, 0);
     assert.match(x.replies[0].text, /新しいカード/);
   });
+  await t("手作業の枝で save が落ちても返事は手作業の文（BUSY にしない）", async () => {
+    const x = mk({ kind: "戸建", kv: { set: async (k) => { if (k === gsTicketKey(tid)) throw new Error("x"); } } });
+    await press(x, gs);
+    assert.match(x.replies[0].text, /戸建のため自動作成はできません/);
+    assert.ok(x.logs.some((l) => /save-failed/.test(l)));
+  });
   await t("戸建 → 手作業・受付は呼ばない", async () => {
     const x = mk({ kind: "戸建" });
     await press(x, gs);

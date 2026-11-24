@@ -16,7 +16,7 @@ import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiOn } from "./group-satei-data";
 import { gsEntryAOk, gsEntryBGate, gsMediaRow, looksLikeSateiWords } from "./group-satei-gate";
 import { openGroupSatei, recordGroupSateiMedia, type GsKv, type GsOpenDeps } from "./group-satei-open";
 import type { GsActionDeps } from "./group-satei-actions";
-import { readGsMaterials, type GsCreate } from "./group-satei-read";
+import { capByTotalBytes, readGsMaterials, type GsCreate } from "./group-satei-read";
 import { pushMessagesWithRetryKey } from "./line";
 import { loadMembers } from "./members";
 import { normNotionId } from "./satei-deal";
@@ -95,7 +95,7 @@ function imageMediaType(ct: string): TaskAttachment["mediaType"] {
 
 /** 1件でも取れない・大きすぎる・時間切れなら例外（一部だけで読まない）。ログは出さない */
 export async function loadGroupSateiMaterials(ids: string[], fetchImpl: typeof fetch = fetch): Promise<TaskAttachment[]> {
-  const out: TaskAttachment[] = [];
+  const bufs: Array<{ buf: Buffer; ct: string }> = [];
   for (const id of ids) {
     const res = await fetchImpl(`https://api-data.line.me/v2/bot/message/${encodeURIComponent(id)}/content`, {
       headers: { Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN ?? ""}` },
@@ -105,7 +105,11 @@ export async function loadGroupSateiMaterials(ids: string[], fetchImpl: typeof f
     if (!res.ok) throw new Error("content");
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length === 0 || buf.length > MAX_BYTES) throw new Error("size");
-    const ct = res.headers.get("content-type") ?? "";
+    bufs.push({ buf, ct: res.headers.get("content-type") ?? "" });
+  }
+  // 合計が上限を超えるときは古いものから外し、新しいものを残す
+  const out: TaskAttachment[] = [];
+  for (const { buf, ct } of capByTotalBytes(bufs, (b) => b.buf.length)) {
     // ファイルの content-type が application/octet-stream のこともあるので、頭の %PDF でも見分ける
     const isPdf = /pdf/i.test(ct) || buf.subarray(0, 4).toString("latin1") === "%PDF";
     out.push(

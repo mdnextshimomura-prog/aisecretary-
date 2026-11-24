@@ -163,6 +163,11 @@ export async function openGroupSatei(ev: GsOpenEvent, deps: GsOpenDeps): Promise
   } catch {
     deps.log(`[group-satei] ticket ${receipt} save-failed`);
   }
+  try {
+    await kv.expire(gsOpenKey(ev.groupId), GS_TICKET_TTL);
+  } catch {
+    deps.log(`[group-satei] ticket ${receipt} expire-failed`);
+  }
 
   let name: string | null = null;
   try {

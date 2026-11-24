@@ -1,7 +1,7 @@
 /** group-satei-open.ts（KV・AI・CRM・LINE は差し替え） */
 import assert from "node:assert/strict";
 import { openGroupSatei, recordGroupSateiMedia, type GsKv, type GsOpenDeps } from "../src/lib/group-satei-open";
-import { asTicket, gsMediaKey, gsTicketKey, parseGsData, ticketIdOf, type GsRead } from "../src/lib/group-satei-data";
+import { asTicket, gsMediaKey, gsOpenKey, gsTicketKey, parseGsData, ticketIdOf, type GsRead } from "../src/lib/group-satei-data";
 
 let n = 0;
 const t = async (name: string, f: () => Promise<void>) => { await f(); n++; console.log("ok", name); };
@@ -155,6 +155,19 @@ const ev = (over = {}) => ({ messageId: "m1", groupId: G, requesterId: BOSS, at:
     assert.doesNotMatch((x.pushes[0].messages[0] as any).text, /本日の上限/);
     assert.equal(x.readCalls.length, 0);
     assert.ok(x.logs.some((l) => /read cap-kv/.test(l)));
+  });
+  await t("開いた票の一覧に期限を付ける（expire が開票キーに呼ばれる）", async () => {
+    const x = mk();
+    const exp: string[] = [];
+    const kv: GsKv = { ...x.kv, expire: async (k) => { exp.push(k); } };
+    await openGroupSatei(ev(), { ...x.deps, kv });
+    assert.ok(exp.includes(gsOpenKey(G)));
+  });
+  await t("期限の付与が失敗しても開く（ログは符号だけ）", async () => {
+    const x = mk();
+    const kv: GsKv = { ...x.kv, expire: async () => { throw new Error("x"); } };
+    assert.equal(await openGroupSatei(ev(), { ...x.deps, kv }), "opened");
+    assert.ok(x.logs.some((l) => /expire-failed/.test(l)));
   });
   console.log(`group-satei-open: ${n} ok`);
 })().catch((e) => { console.error(e); process.exit(1); });
