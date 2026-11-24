@@ -202,3 +202,11 @@ on のとき、対象グループの画像・ファイルを `gsatei:media:<grou
 - 段1のあいだは、同じグループで `PHOTO_MENTION_ASK` と `GROUP_SATEI` を両方 on にしない（画像のあとの「@下村」が両方に拾われ、1件の依頼で下村さんへ push が2通になりうる）。
 - 対象グループは送り主の制限（`SECRETARY_ALLOWED_GROUP_IDS` か `LINE_GROUP_ID`）も通ること。下村さんの1対1のボタンも送り主の制限を通るので、`SECRETARY_ALLOWED_USER_IDS`（空なら `TASK_BUTTONS_ADMIN_IDS`）に入っていること。
 - ファイル：`src/lib/group-satei-data.ts`（スイッチ・鍵・data）／`-gate.ts`（入口の判定・束ね方）／`-read.ts`（読み取りの指示文）／`-card.ts`（文・カード）／`-open.ts`（受付票を開く）／`-actions.ts`（ボタン）／`-wire.ts`（本物の KV・LINE・Claude・Notion。webhook の3か所＝画像・ファイルの前の控え、入口 B は `maybeAskPhotoMention` の前、入口 A は返事のあと）。postback の振り分けは `task-buttons-wire.ts`（`v1|qa|` の振り分けの後）。
+- あとから届いた資料で読み直す（2026-11-25。社長の「文字 → 画像」の依頼が「資料を読めませんでした」になった件）：新しい環境変数は無い（`GROUP_SATEI=1` のときだけ）。
+  - 文字だけで読めず資料も無いときは、その場で知らせず90秒待つ。開いた票は読む前に `gsatei:open:<groupId>` と `gsatei:pending` に入れ、読むあいだに貼られた本人の資料も拾う。
+  - あとから貼られた画像・PDF（本人の30分以内・受付票を引用したもの・開いている票が1件だけなら下村さん以外の2時間以内）は `gsatei:late:<tid>` に sadd するだけで、受付票は書き換えない。読み直す時刻は `gsatei:rat:<tid>`（最後の資料から1分）。
+  - 読み直すのは webhook の中の係（`runRereadWorker`。`gsJobs` で POST の返す前に待つ）。受付票ごとに1つ（`gsatei:rlock:<tid>`、280秒）。残り時間は webhook の開始時刻から数えて250秒で打ち切り、1周に75秒残らなければ始めない。印が取れない画像の係は20秒で諦める。最初の知らせは版1のまま、知らせたあとの読み直しは版を上げて出し直す（2回まで。前のカードは古い版になる）。資料は取れた分だけで読む（全部取れなければ読めなかった扱い）。
+  - 読む前後で状態・版・`gsatei:dec:<tid>` を確かめ、押されたあとの票は書かない・知らせない。pushed の印も押されていないときだけ書く。
+  - 掃除：毎分の見回り（`/api/obi/cloud-tick`）の最後に `sweepGroupSatei`。前段が30秒未満のときだけ、`gsatei:pending` から「asking・未決定・pushed でない・係の印なし・読み直す時刻か依頼から3分」の票を1件、AI を呼ばずに知らせる（同じ版の retry key）。
+  - ログは `[group-satei] ticket G7 opened B deferred`・`late-media`・`reread read ok first|v2`・`reread stale`・`reread out-of-time`・`swept` の形（符号だけ）。テスト `tests/group-satei-reread.test.ts`。
+  - 画像が続くと、その webhook の応答は係の待ち（最後の資料から1分＋読み取り）のあいだ止まる。LINE の再送は無効なので二重にはならない。
