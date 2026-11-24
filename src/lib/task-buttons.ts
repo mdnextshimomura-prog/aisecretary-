@@ -47,6 +47,7 @@ import { addDaysStr, resolveDateToken } from "./task-status-command";
 import {
   buildTaskCard,
   cardButton,
+  pressedText,
   dueFromParsed,
   type CardButton,
   type CardInfo,
@@ -170,37 +171,37 @@ export function parseMenuData(data: string): MenuAction | null {
   return { op, offset };
 }
 
-/** タスクの 5 つのボタン（data・displayText は今までと同じ）。 */
-function taskButtons(pageId: string): CardButton[] {
+/** タスクの 5 つのボタン（data は今までと同じ。displayText は件名入り＝pressedText）。 */
+function taskButtons(pageId: string, title?: string): CardButton[] {
   return [
     cardButton(
       "済",
       encodeButtonData("done", pageId),
-      "（ボタン）済にする",
+      pressedText("済にする", title),
       true,
     ),
     cardButton(
       "待ち（3日後に確認）",
       encodeButtonData("wait", pageId),
-      "（ボタン）待ちにする",
+      pressedText("待ちにする", title),
     ),
-    cardButton("延期", encodeButtonData("pmenu", pageId), "（ボタン）延期する"),
+    cardButton("延期", encodeButtonData("pmenu", pageId), pressedText("延期する", title)),
     cardButton(
       "不要",
       encodeButtonData("drop", pageId),
-      "（ボタン）不要にする",
+      pressedText("不要にする", title),
     ),
     cardButton(
       "担当を変える",
       encodeButtonData("amenu", pageId),
-      "（ボタン）担当を変える",
+      pressedText("担当を変える", title),
     ),
   ];
 }
 
 /** タスクのカード（5 つのボタンつき）。 */
 export function taskCard(info: CardInfo): FlexMessage {
-  return buildTaskCard(info, taskButtons(info.pageId));
+  return buildTaskCard(info, taskButtons(info.pageId, info.title));
 }
 
 /**
@@ -257,7 +258,7 @@ export function postponeCard(info: CardInfo, todayJst: string): FlexMessage {
         cardButton(
           POSTPONE_LABEL[k],
           encodeButtonData("pp", info.pageId, k),
-          `（ボタン）延期：${POSTPONE_LABEL[k]}`,
+          pressedText(`延期：${POSTPONE_LABEL[k]}`, info.title),
         ),
     ),
     "いつに延期しますか？",
@@ -277,7 +278,7 @@ export function assignableMembers(members: Member[]): Member[] {
     .slice(0, MAX_ITEMS);
 }
 
-function assigneeButtons(pageId: string, members: Member[]): CardButton[] {
+function assigneeButtons(pageId: string, members: Member[], title?: string): CardButton[] {
   return assignableMembers(members).map((m) =>
     cardButton(
       m.name,
@@ -286,7 +287,7 @@ function assigneeButtons(pageId: string, members: Member[]): CardButton[] {
         pageId,
         m.userIds.find((id) => LINE_USER_ID_RE.test(id)),
       ),
-      `（ボタン）担当を変える：${m.name}`,
+      pressedText(`担当を変える：${m.name}`, title),
     ),
   );
 }
@@ -294,7 +295,7 @@ function assigneeButtons(pageId: string, members: Member[]): CardButton[] {
 export function assigneeCard(info: CardInfo, members: Member[]): FlexMessage {
   return buildTaskCard(
     info,
-    assigneeButtons(info.pageId, members),
+    assigneeButtons(info.pageId, members, info.title),
     "誰に替えますか？",
   );
 }

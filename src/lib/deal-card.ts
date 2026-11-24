@@ -31,6 +31,7 @@ import {
   formatDue,
   POSTBACK_TEXT_MAX,
   type FlexMessage,
+  pressedText,
 } from "./task-card";
 import type { DealRef } from "./task-record";
 import { encodeSateiStart, sateiActive } from "./satei-data";
@@ -218,17 +219,17 @@ export function dealBubble(d: DealSummary) {
         button(
           "タスクを見る",
           encodeDealData("dt", d.id),
-          "（ボタン）この案件のタスクを見る",
+          pressedText("タスクを見る", d.name),
           true,
         ),
         button(
           "タスクを足す",
           encodeDealData("da", d.id),
-          "（ボタン）この案件にタスクを足す",
+          pressedText("タスクを足す", d.name),
         ),
         // B2 査定書（TASK_SATEI=1 のときだけ。off なら配列は今と同じ2つ）
         ...(sateiActive()
-          ? [button("査定書を作る", encodeSateiStart(d.id), "（ボタン）査定書を作る")]
+          ? [button("査定書を作る", encodeSateiStart(d.id), pressedText("査定書を作る", d.name))]
           : []),
       ],
     },

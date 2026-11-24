@@ -48,6 +48,7 @@ import {
   FLEX_LABEL_MAX,
   POSTBACK_TEXT_MAX,
   type FlexMessage,
+  pressedText,
 } from "./task-card";
 
 /** 候補のカードを出す・押されたら扱うか */
@@ -241,18 +242,18 @@ export function candidateBubble(
         button(
           "登録する",
           encodeCandidateData("cr", c.id),
-          "（ボタン）候補を登録する",
+          pressedText("候補を登録する", c.title),
           true,
         ),
         button(
           "保留",
           encodeCandidateData("ch", c.id),
-          "（ボタン）候補を保留にする",
+          pressedText("候補を保留にする", c.title),
         ),
         button(
           "いらない",
           encodeCandidateData("cx", c.id),
-          "（ボタン）候補を外す",
+          pressedText("候補を外す", c.title),
         ),
       ],
     },

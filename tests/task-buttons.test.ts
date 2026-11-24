@@ -157,14 +157,14 @@ async function main() {
     ),
   );
   ok(
-    "displayText・data は今の形のまま",
+    "data は今の形のまま・displayText は【件名】入り（2026-11-24）",
     JSON.stringify(acts(qr).map((a) => [a.data, a.displayText])) ===
       JSON.stringify([
-        [`v1|done|${PAGE}`, "（ボタン）済にする"],
-        [`v1|wait|${PAGE}`, "（ボタン）待ちにする"],
-        [`v1|pmenu|${PAGE}`, "（ボタン）延期する"],
-        [`v1|drop|${PAGE}`, "（ボタン）不要にする"],
-        [`v1|amenu|${PAGE}`, "（ボタン）担当を変える"],
+        [`v1|done|${PAGE}`, "（ボタン）【重説の作成】済にする"],
+        [`v1|wait|${PAGE}`, "（ボタン）【重説の作成】待ちにする"],
+        [`v1|pmenu|${PAGE}`, "（ボタン）【重説の作成】延期する"],
+        [`v1|drop|${PAGE}`, "（ボタン）【重説の作成】不要にする"],
+        [`v1|amenu|${PAGE}`, "（ボタン）【重説の作成】担当を変える"],
       ]),
   );
   ok(

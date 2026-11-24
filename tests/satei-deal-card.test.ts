@@ -30,10 +30,10 @@ const MANY: DealSummary[] = Array.from({ length: 12 }, (_, i) => ({
   id: `${String(i + 1).padStart(8, "0")}-aaaa-bbbb-cccc-1234567890ab`,
   name: `案件${i + 1}`,
 }));
-// 変更前のコードの出力（5d34914 で取得）
+// 変更前のコードの出力（5d34914 で取得。2026-11-24 に displayText を【件名】入りへ更新）
 const OFF_JSON =
-  '{"type":"bubble","body":{"type":"box","layout":"vertical","spacing":"sm","contents":[{"type":"text","text":"テスト案件","weight":"bold","size":"md","wrap":true},{"type":"box","layout":"baseline","spacing":"sm","contents":[{"type":"text","text":"フェーズ","size":"sm","color":"#888888","flex":3},{"type":"text","text":"査定","size":"sm","wrap":true,"flex":5}]},{"type":"box","layout":"baseline","spacing":"sm","contents":[{"type":"text","text":"近い期日","size":"sm","color":"#888888","flex":3},{"type":"text","text":"11月20日(金)","size":"sm","wrap":true,"flex":5}]},{"type":"box","layout":"baseline","spacing":"sm","contents":[{"type":"text","text":"残りタスク","size":"sm","color":"#888888","flex":3},{"type":"text","text":"2件","size":"sm","wrap":true,"flex":5}]}]},"footer":{"type":"box","layout":"vertical","spacing":"sm","contents":[{"type":"button","style":"primary","height":"sm","action":{"type":"postback","label":"タスクを見る","data":"v1|dt|00000001-aaaa-bbbb-cccc-1234567890ab","displayText":"（ボタン）この案件のタスクを見る"}},{"type":"button","style":"secondary","height":"sm","action":{"type":"postback","label":"タスクを足す","data":"v1|da|00000001-aaaa-bbbb-cccc-1234567890ab","displayText":"（ボタン）この案件にタスクを足す"}}]}}';
-const OFF_PAGE_SHA = "f864f94a8cf41df751cb226c126dd198998483d9f9968194ce911fe0bb5d5b5e";
+  '{"type":"bubble","body":{"type":"box","layout":"vertical","spacing":"sm","contents":[{"type":"text","text":"テスト案件","weight":"bold","size":"md","wrap":true},{"type":"box","layout":"baseline","spacing":"sm","contents":[{"type":"text","text":"フェーズ","size":"sm","color":"#888888","flex":3},{"type":"text","text":"査定","size":"sm","wrap":true,"flex":5}]},{"type":"box","layout":"baseline","spacing":"sm","contents":[{"type":"text","text":"近い期日","size":"sm","color":"#888888","flex":3},{"type":"text","text":"11月20日(金)","size":"sm","wrap":true,"flex":5}]},{"type":"box","layout":"baseline","spacing":"sm","contents":[{"type":"text","text":"残りタスク","size":"sm","color":"#888888","flex":3},{"type":"text","text":"2件","size":"sm","wrap":true,"flex":5}]}]},"footer":{"type":"box","layout":"vertical","spacing":"sm","contents":[{"type":"button","style":"primary","height":"sm","action":{"type":"postback","label":"タスクを見る","data":"v1|dt|00000001-aaaa-bbbb-cccc-1234567890ab","displayText":"（ボタン）【テスト案件】タスクを見る"}},{"type":"button","style":"secondary","height":"sm","action":{"type":"postback","label":"タスクを足す","data":"v1|da|00000001-aaaa-bbbb-cccc-1234567890ab","displayText":"（ボタン）【テスト案件】タスクを足す"}}]}}';
+const OFF_PAGE_SHA = "69230f666256de3f840e38702720879b410d1f02b758d32d9bd0a6517c8210f8";
 const sha = (s: string) => createHash("sha256").update(s).digest("hex");
 
 type Btn = { type: string; style: string; action: { type: string; label: string; data: string; displayText: string } };
@@ -55,7 +55,7 @@ const off = footerOf(JSON.parse(OFF_JSON));
 ok("on：ボタンは3つ", on.length === 3);
 ok("on：前の2つは今と同じ", JSON.stringify(on.slice(0, 2)) === JSON.stringify(off));
 ok("on：3つ目のラベル", on[2]?.action.label === "査定書を作る");
-ok("on：3つ目の displayText", on[2]?.action.displayText === "（ボタン）査定書を作る");
+ok("on：3つ目の displayText", on[2]?.action.displayText === "（ボタン）【テスト案件】査定書を作る");
 ok("on：3つ目は postback・secondary", on[2]?.action.type === "postback" && on[2]?.style === "secondary");
 ok("on：data は v1|sa|案件ID", on[2]?.action.data === `v1|sa|${D.id}`);
 ok(

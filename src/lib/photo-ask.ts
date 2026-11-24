@@ -17,7 +17,7 @@
 import { encodeSateiStart, sateiActive, sateiNotifyTarget } from "./satei-data";
 import { parseAllowedUserIds } from "./webhook-source";
 import { matchDeals, type DealRef } from "./task-record";
-import type { FlexMessage } from "./task-card";
+import { POSTBACK_TEXT_MAX, pressedText, type FlexMessage } from "./task-card";
 
 export type PhotoAskEnv = Record<string, string | undefined>;
 
@@ -189,7 +189,7 @@ export function photoAskCard(deal: DealRef, propertyName: string | null): FlexMe
             type: "button",
             style: "primary",
             height: "sm",
-            action: { type: "postback", label: "査定書を作る", data: encodeSateiStart(deal.id), displayText: "（ボタン）査定書を作る" },
+            action: { type: "postback", label: "査定書を作る", data: encodeSateiStart(deal.id), displayText: cut(pressedText("査定書を作る", deal.name), POSTBACK_TEXT_MAX) },
           },
         ],
       },

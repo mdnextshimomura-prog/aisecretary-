@@ -8,6 +8,7 @@ import {
   FLEX_LABEL_MAX,
   POSTBACK_TEXT_MAX,
   type FlexMessage,
+  pressedText,
 } from "./task-card";
 
 const cut = (s: string, n: number) => Array.from(s).slice(0, n).join("");
@@ -178,11 +179,11 @@ export function sateiDraftCard(n: SateiNotice): FlexMessage | null {
             height: "sm",
             action: { type: "uri", label: "下書きを見る", uri: driveViewUrl(n.driveFileId) },
           },
-          postback("OK", encodeSateiDecision("so", n.no, n.generation, n.artifactSha256), "（ボタン）査定書OK", true),
+          postback("OK", encodeSateiDecision("so", n.no, n.generation, n.artifactSha256), pressedText("査定書OK", `${jobTag(n.no)} ${nameOf(n)}`), true),
           postback(
             "差し戻し",
             encodeSateiDecision("sr", n.no, n.generation, n.artifactSha256),
-            "（ボタン）査定書を差し戻す",
+            pressedText("査定書を差し戻す", `${jobTag(n.no)} ${nameOf(n)}`),
             false,
           ),
         ],
@@ -221,7 +222,7 @@ export function sateiResumeCard(no: number, dealId: string): FlexMessage {
         type: "box",
         layout: "vertical",
         spacing: "sm",
-        contents: [postback("もう一度作る", encodeSateiResume(dealId, no), "（ボタン）査定書をもう一度作る", true)],
+        contents: [postback("もう一度作る", encodeSateiResume(dealId, no), pressedText("査定書をもう一度作る", jobTag(no)), true)],
       },
     },
   };

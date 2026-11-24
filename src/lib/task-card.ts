@@ -63,6 +63,18 @@ const cut = (s: string, n: number) => Array.from(s).slice(0, n).join("");
 const cutEllipsis = (s: string, n: number) =>
   Array.from(s).length > n ? `${cut(s, n - 1)}…` : s;
 
+/** 押したときにトークに出る文（displayText）に入れる件名の長さ。トークで1〜2行に収めるため */
+export const PRESSED_SUBJECT_MAX = 40;
+
+/**
+ * 押したときにトークに出る文：「（ボタン）【件名】操作」（2026-11-24 下村さん指示：何の件のどれを押したか分かるように）。
+ * 件名はそのカードの見出しに出ている名前と同じもの（カードに無い名前を新しく出さない）。空なら今までの「（ボタン）操作」。
+ */
+export function pressedText(op: string, subject?: string | null): string {
+  const s = (subject ?? "").replace(/\s+/g, " ").trim();
+  return s ? `（ボタン）【${cutEllipsis(s, PRESSED_SUBJECT_MAX)}】${op}` : `（ボタン）${op}`;
+}
+
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 
 /** "2026-11-20" → "11月20日(金)"、"2026-11-20T17:00:00+09:00" → "11月20日(金) 17:00"。読めなければ null。 */
