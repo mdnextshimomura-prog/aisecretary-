@@ -198,6 +198,7 @@ on のとき、対象グループの画像・ファイルを `gsatei:media:<grou
 ログは `[group-satei] ticket G7 opened A read ok asked 3`・`[group-satei] gs started G7 #J12`・`gs manual house` の形（符号だけ）。設計 `docs/superpowers/specs/2026-11-24-group-satei-intake-design.md`、計画 `docs/superpowers/plans/2026-11-24-group-satei-intake-stage1.md`。
 案件カードの絞り込みは `DEAL_CARD_ONLY_IDS`（未設定なら今の2件、`all` で全件、カンマ区切りの ID）。on にする・env を足すのは下村さんの承認後（値を画面に出さない方法で入れる）。
 - 実装の補足（段1の作りどおり）：マンションで portal の受付へ進むのは `TASK_SATEI=1` のときだけ（off なら印を取らず「手作業の査定に回します」。on に戻せば同じカードで押し直せる）。知らせの push が通ったかは受付票の `pushed` に残す（送り直しは段2）。
-- 時間：資料の取得（1件8秒）から Claude の答えまで合わせて40秒、入口 B の判定も40秒、控えの KV は3秒。webhook の `maxDuration` は変えていない。入口は3つとも例外を投げず、off・対象外なら KV・AI・Notion を1回も呼ばない（`tests/group-satei-webhook.test.ts`）。
+- 時間：資料の取得（1件8秒）から Claude の答えまで合わせて40秒、入口 B の判定も40秒、控えの KV は3秒。webhook の `maxDuration` は変えていない。入口は3つとも例外を投げず、off・対象外なら KV・AI・Notion を1回も呼ばない（`tests/group-satei-webhook.test.ts`）。入口 A・B はその場では始めるだけで待たず（今の返事・同じ束の後ろのイベントを遅らせない）、POST が返す直前にまとめて待つ（`gsJobs`。`tests/group-satei-webhook-route.test.ts`）。控えだけは画像・ファイルの処理の前に待つ（3秒まで）。
+- 段1のあいだは、同じグループで `PHOTO_MENTION_ASK` と `GROUP_SATEI` を両方 on にしない（画像のあとの「@下村」が両方に拾われ、1件の依頼で下村さんへ push が2通になりうる）。
 - 対象グループは送り主の制限（`SECRETARY_ALLOWED_GROUP_IDS` か `LINE_GROUP_ID`）も通ること。下村さんの1対1のボタンも送り主の制限を通るので、`SECRETARY_ALLOWED_USER_IDS`（空なら `TASK_BUTTONS_ADMIN_IDS`）に入っていること。
 - ファイル：`src/lib/group-satei-data.ts`（スイッチ・鍵・data）／`-gate.ts`（入口の判定・束ね方）／`-read.ts`（読み取りの指示文）／`-card.ts`（文・カード）／`-open.ts`（受付票を開く）／`-actions.ts`（ボタン）／`-wire.ts`（本物の KV・LINE・Claude・Notion。webhook の3か所＝画像・ファイルの前の控え、入口 B は `maybeAskPhotoMention` の前、入口 A は返事のあと）。postback の振り分けは `task-buttons-wire.ts`（`v1|qa|` の振り分けの後）。

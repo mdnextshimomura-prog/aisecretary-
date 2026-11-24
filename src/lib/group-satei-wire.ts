@@ -69,6 +69,7 @@ export function groupSateiKv(): GroupSateiKv | null {
   };
 }
 
+/** 待つのを ms で打ち切るだけ。元の処理（fetch・Claude・KV）は取り消さない（裏で続き、結果は捨てる） */
 function within<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const t = setTimeout(() => reject(new Error("timeout")), ms);

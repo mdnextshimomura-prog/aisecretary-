@@ -725,6 +725,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // 誰も引き継がず依頼が永久に消える。
   // 帯替えの結果不明・一覧の不一致・控えの失敗も、ここから 503 になる。
   let needsRetry: boolean = obi.needsRetry;
+  // 普通のグループの査定依頼（入口 A・B）は、その場では始めるだけで待たない（今の返事・後ろのイベントを遅らせない）。
+  // 返す直前にまとめて待つ。off のあいだは空のまま（何も変わらない）。どれも例外を投げない
+  const gsJobs: Promise<void>[] = [];
 
   for (const event of obi.rest) {
     // 送り主の制限（2026-11-08）。会社グループ（LINE_GROUP_ID）と、許可した人との 1対1
@@ -1597,7 +1600,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
       // 普通のグループの査定依頼・入口 B（GROUP_SATEI=1 かつ対象グループのときだけ。off なら何も呼ばない）。
       // グループには返さない（replyToken は使わない）。例外は投げない
-      await maybeOpenGroupSateiB(
+      gsJobs.push(maybeOpenGroupSateiB(
         {
           messageId: event.message.id,
           groupId: source.groupId,
@@ -1607,7 +1610,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           quotedMessageId: event.message.quotedMessageId,
         },
         todayLabel(jstNow()),
-      );
+      ).catch(() => undefined));
       // 画像のあとの「@下村」だけの名指し（PHOTO_MENTION_ASK=1 のときだけ）：画像を読み、査定の依頼らしければ
       // 下村さんの1対1へ push で聞く。グループには返さない（replyToken は使わない）。失敗してもほかの流れは今のまま
       await maybeAskPhotoMention(
@@ -1832,7 +1835,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       });
       // 普通のグループの査定依頼・入口 A（返事のあと。GROUP_SATEI=1 かつ対象グループ・査定書の判定のときだけ）。
       // グループには返さない（replyToken は使わない）。例外は投げない
-      await maybeOpenGroupSateiA(
+      gsJobs.push(maybeOpenGroupSateiA(
         {
           messageId: event.message.id,
           groupId: source.groupId,
@@ -1845,7 +1848,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           confidence: parsed.confidence,
         },
         todayLabel(now),
-      );
+      ).catch(() => undefined));
       continue;
     }
 
@@ -2031,7 +2034,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     // 普通のグループの査定依頼・入口 A（返事のあと。GROUP_SATEI=1 かつ対象グループ・査定書の判定のときだけ）。
     // グループには返さない（replyToken は使わない）。例外は投げない
-    await maybeOpenGroupSateiA(
+    // 登録が失敗した（上の catch）ときもわざと呼ぶ：受付票は LINEタスク とは別のもの（査定の依頼そのものを拾う）
+    gsJobs.push(maybeOpenGroupSateiA(
       {
         messageId: event.message.id,
         groupId: source.groupId,
@@ -2044,7 +2048,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         confidence: parsed.confidence,
       },
       todayLabel(now),
-    );
+    ).catch(() => undefined));
     } catch (err) {
       // 例外で抜けた＝処理し切れていない。完了印を付けてはいけない。
       // 付けると再送時にスキップされ、そのイベントが永久に失われる。
@@ -2078,6 +2082,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
     }
   }
+
+  // 始めておいた査定依頼の受付票の処理を待ち切ってから返す（返したあとは関数が止められうるため）
+  await Promise.allSettled(gsJobs);
 
   if (needsRetry) {
     // LINEは非2xxで再送する。既に登録できたイベントは予約で二重登録を防いである。
