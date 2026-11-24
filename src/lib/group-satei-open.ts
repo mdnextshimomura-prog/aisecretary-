@@ -98,16 +98,15 @@ export async function openGroupSatei(ev: GsOpenEvent, deps: GsOpenDeps): Promise
   const tid = ticketIdOf(ev.messageId);
   let ticket: GsTicket;
   try {
-    if (await kv.get(gsTicketKey(tid))) {
-      deps.log("[group-satei] skip:duplicate");
-      return "duplicate";
-    }
-    const no = await kv.incr(GS_SEQ_KEY);
-    ticket = { no, ver: 1, groupId: ev.groupId, requesterId: ev.requesterId, at: ev.at, triggerMsgIds: [ev.messageId], mediaIds: [], read: null, state: "asking" };
+    // 先に受付票の場所を取り（同じ発言は1回だけ）、取れた側だけが番号を取る＝番号を無駄にしない
+    ticket = { no: 0, ver: 1, groupId: ev.groupId, requesterId: ev.requesterId, at: ev.at, triggerMsgIds: [ev.messageId], mediaIds: [], read: null, state: "dismissed", pushed: false };
     if (!(await kv.setNx(gsTicketKey(tid), ticket, GS_TICKET_TTL))) {
       deps.log("[group-satei] skip:duplicate");
       return "duplicate";
     }
+    ticket.no = await kv.incr(GS_SEQ_KEY);
+    ticket.state = "asking";
+    await kv.set(gsTicketKey(tid), ticket, GS_TICKET_TTL);
   } catch {
     deps.log("[group-satei] skip:kv");
     return "skip";
@@ -125,14 +124,16 @@ export async function openGroupSatei(ev: GsOpenEvent, deps: GsOpenDeps): Promise
 
   // 1日の上限（数えるのは読む前）
   let capped = false;
+  let kvFailed = false;
   try {
     const n = await kv.incr(gsReadsKey(deps.ymd()));
     await kv.expire(gsReadsKey(deps.ymd()), 2 * 24 * 60 * 60);
     capped = n > GS_READS_PER_DAY;
   } catch {
-    capped = true;
+    kvFailed = true;
   }
-  if (capped) ticket.readFailed = "cap";
+  if (kvFailed) ticket.readFailed = "cap-kv";
+  else if (capped) ticket.readFailed = "cap";
   else {
     try {
       ticket.read = await deps.read(ticket.mediaIds, ev.text);
@@ -176,6 +177,14 @@ export async function openGroupSatei(ev: GsOpenEvent, deps: GsOpenDeps): Promise
     sent = await deps.push(target, [{ type: "text", text }, card], `${tid}:${ticket.ver}`);
   } catch {
     sent = false;
+  }
+  if (sent) {
+    ticket.pushed = true;
+    try {
+      await kv.set(gsTicketKey(tid), ticket, GS_TICKET_TTL);
+    } catch {
+      deps.log(`[group-satei] ticket ${receipt} pushed-mark-failed`);
+    }
   }
   deps.log(
     `[group-satei] ticket ${receipt} opened ${ev.entry} ${ticket.read ? "read ok" : `read ${ticket.readFailed}`} asked ${cands.length}${sent ? "" : " push-failed"}`,

@@ -85,6 +85,8 @@ export interface GsTicket {
   jobNo?: number;
   /** portal の受付の結果が分からない */
   unknown?: boolean;
+  /** 下村さんへの知らせの push が通った（false のまま＝届いていないかもしれない。再送は段2） */
+  pushed?: boolean;
 }
 
 const STATES: readonly GsState[] = ["asking", "started", "manual", "dismissed"];
@@ -104,6 +106,7 @@ export function asTicket(raw: unknown): GsTicket | null {
   if (typeof r.no !== "number" || typeof r.ver !== "number" || typeof r.groupId !== "string") return null;
   if (typeof r.requesterId !== "string" || typeof r.at !== "number") return null;
   if (!strs(r.triggerMsgIds) || !strs(r.mediaIds) || !STATES.includes(r.state as GsState)) return null;
+  if (r.pushed !== undefined && typeof r.pushed !== "boolean") return null;
   return r as unknown as GsTicket;
 }
 

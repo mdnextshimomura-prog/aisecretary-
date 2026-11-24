@@ -55,7 +55,7 @@ function mk(o: { read?: GsRead | "throw"; deals?: "throw"; push?: boolean; reads
 const ev = (over = {}) => ({ messageId: "m1", groupId: G, requesterId: BOSS, at: NOW, text: "査定お願いできますか", entry: "B" as const, ...over });
 
 (async () => {
-  await t("控え：対象グループだけ・30件まで", async () => {
+  await t("控え：30件で切る（グループの絞り込みは呼ぶ側の仕事）", async () => {
     const { kv, m } = mk();
     for (let i = 0; i < 35; i++) await recordGroupSateiMedia({ messageId: `i${i}`, kind: "image", senderId: BOSS, at: NOW }, G, kv, () => undefined);
     assert.equal((m.get(gsMediaKey(G)) as unknown[]).length, 30);
@@ -120,6 +120,41 @@ const ev = (over = {}) => ({ messageId: "m1", groupId: G, requesterId: BOSS, at:
     await openGroupSatei(ev({ text: "坂本様の家の査定" }), x.deps);
     const all = JSON.stringify(Array.from(x.m.values()).map((v) => (v instanceof Set ? Array.from(v) : v))) + x.logs.join() + JSON.stringify(x.pushes);
     assert.ok(!all.includes("坂本"));
+  });
+  await t("同じ発言を同時に2回：受付票1枚・番号は詰める・知らせ1回", async () => {
+    const x = mk();
+    const r = await Promise.all([openGroupSatei(ev(), x.deps), openGroupSatei(ev(), x.deps)]);
+    assert.deepEqual([...r].sort(), ["duplicate", "opened"]);
+    assert.equal(x.pushes.length, 1);
+    assert.equal(x.m.get("gsatei:seq"), 1);
+    assert.equal(asTicket(x.m.get(gsTicketKey(ticketIdOf("m1"))))!.no, 1);
+    await openGroupSatei(ev({ messageId: "m2" }), x.deps);
+    assert.equal(asTicket(x.m.get(gsTicketKey(ticketIdOf("m2"))))!.no, 2);
+  });
+  await t("push が失敗：opened のまま・push-failed をログ・pushed は false", async () => {
+    const x = mk({ push: false });
+    assert.equal(await openGroupSatei(ev(), x.deps), "opened");
+    assert.ok(x.logs.some((l) => /push-failed/.test(l)));
+    assert.equal(asTicket(x.m.get(gsTicketKey(ticketIdOf("m1"))))!.pushed, false);
+  });
+  await t("push が通れば pushed は true", async () => {
+    const x = mk();
+    await openGroupSatei(ev(), x.deps);
+    assert.equal(asTicket(x.m.get(gsTicketKey(ticketIdOf("m1"))))!.pushed, true);
+  });
+  await t("ログに tid・groupId・userId が出ない", async () => {
+    const x = mk({ push: false });
+    await openGroupSatei(ev(), x.deps);
+    const all = x.logs.join("\n");
+    for (const v of [ticketIdOf("m1"), G, BOSS, SHIMO, "m1"]) assert.ok(!all.includes(v), v);
+  });
+  await t("上限の数え方が KV で失敗したら上限の文にしない", async () => {
+    const x = mk();
+    const kv: GsKv = { ...x.kv, incr: async (k) => { if (k.startsWith("gsatei:reads:")) throw new Error("x"); return x.kv.incr(k); } };
+    await openGroupSatei(ev(), { ...x.deps, kv });
+    assert.doesNotMatch((x.pushes[0].messages[0] as any).text, /本日の上限/);
+    assert.equal(x.readCalls.length, 0);
+    assert.ok(x.logs.some((l) => /read cap-kv/.test(l)));
   });
   console.log(`group-satei-open: ${n} ok`);
 })().catch((e) => { console.error(e); process.exit(1); });
