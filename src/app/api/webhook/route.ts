@@ -132,6 +132,11 @@ import { bareMentionMenu, menuWordEntry } from "@/lib/task-menu";
 import { dealWordEntry } from "@/lib/deal-card";
 import { maybeAskPhotoMention } from "@/lib/photo-ask";
 import { photoAskDeps } from "@/lib/photo-ask-wire";
+import {
+  maybeOpenGroupSateiA,
+  maybeOpenGroupSateiB,
+  recordGroupSateiMediaEvent,
+} from "@/lib/group-satei-wire";
 import { recordAfterCreateWithPick } from "@/lib/deal-card-wire";
 import { handleSateiReasonText } from "@/lib/satei-actions";
 import { sateiReasonDeps } from "@/lib/satei-wire";
@@ -801,6 +806,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // 画像 → 通常は黙って「直近メディア」として控えるだけ（返信しない）。
     // ただし下書きの宛先待ち中は、その場で名刺として読み宛先に設定して返信する。
     if (event.message.type === "image") {
+      // 普通のグループの査定依頼の控え（GROUP_SATEI=1 かつ対象グループのときだけ。off なら KV にも触れない。例外は投げない）
+      await recordGroupSateiMediaEvent({
+        messageId: event.message.id,
+        groupId: source.groupId,
+        senderId: source.userId,
+        type: "image",
+        at: event.timestamp ?? Date.now(),
+      });
       await handleIncomingImage(event.message.id, source, replyToken);
       continue;
     }
@@ -808,6 +821,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // ファイル（PDF等）→ 通常は黙って「直近メディア＋添付候補」として控えるだけ。
     // 下書き作成中は、名刺PDFなら宛先に、そうでなければ添付候補として案内する。
     if (event.message.type === "file") {
+      // 普通のグループの査定依頼の控え（同上。ファイル名は PDF かどうかを見るだけで控えない）
+      await recordGroupSateiMediaEvent({
+        messageId: event.message.id,
+        groupId: source.groupId,
+        senderId: source.userId,
+        type: "file",
+        fileName: event.message.fileName,
+        at: event.timestamp ?? Date.now(),
+      });
       await handleIncomingFile(
         event.message.id,
         event.message.fileName ?? "file",
@@ -1573,6 +1595,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           console.error("候補の控えに失敗（何もしない）:", err);
         }
       }
+      // 普通のグループの査定依頼・入口 B（GROUP_SATEI=1 かつ対象グループのときだけ。off なら何も呼ばない）。
+      // グループには返さない（replyToken は使わない）。例外は投げない
+      await maybeOpenGroupSateiB(
+        {
+          messageId: event.message.id,
+          groupId: source.groupId,
+          senderId: source.userId,
+          at: event.timestamp ?? Date.now(),
+          text,
+          quotedMessageId: event.message.quotedMessageId,
+        },
+        todayLabel(jstNow()),
+      );
       // 画像のあとの「@下村」だけの名指し（PHOTO_MENTION_ASK=1 のときだけ）：画像を読み、査定の依頼らしければ
       // 下村さんの1対1へ push で聞く。グループには返さない（replyToken は使わない）。失敗してもほかの流れは今のまま
       await maybeAskPhotoMention(
@@ -1795,6 +1830,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         replyToken,
         send: sendLineMessage,
       });
+      // 普通のグループの査定依頼・入口 A（返事のあと。GROUP_SATEI=1 かつ対象グループ・査定書の判定のときだけ）。
+      // グループには返さない（replyToken は使わない）。例外は投げない
+      await maybeOpenGroupSateiA(
+        {
+          messageId: event.message.id,
+          groupId: source.groupId,
+          senderId: source.userId,
+          at: event.timestamp ?? Date.now(),
+          text,
+          quotedMessageId: event.message.quotedMessageId,
+          isTask: parsed.isTask,
+          requestType: parsed.requestType,
+          confidence: parsed.confidence,
+        },
+        todayLabel(now),
+      );
       continue;
     }
 
@@ -1978,6 +2029,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         "⚠️ タスクの登録中にエラーが発生しました。もう一度お試しください。"
       );
     }
+    // 普通のグループの査定依頼・入口 A（返事のあと。GROUP_SATEI=1 かつ対象グループ・査定書の判定のときだけ）。
+    // グループには返さない（replyToken は使わない）。例外は投げない
+    await maybeOpenGroupSateiA(
+      {
+        messageId: event.message.id,
+        groupId: source.groupId,
+        senderId: source.userId,
+        at: event.timestamp ?? Date.now(),
+        text,
+        quotedMessageId: event.message.quotedMessageId,
+        isTask: parsed.isTask,
+        requestType: parsed.requestType,
+        confidence: parsed.confidence,
+      },
+      todayLabel(now),
+    );
     } catch (err) {
       // 例外で抜けた＝処理し切れていない。完了印を付けてはいけない。
       // 付けると再送時にスキップされ、そのイベントが永久に失われる。

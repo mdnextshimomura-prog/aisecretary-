@@ -43,6 +43,9 @@ import { handleSateiPostback, type SateiActionDeps } from "./satei-actions";
 import { handleSateiAskPostback, parseSateiAskData, type SateiAskActionDeps } from "./satei-ask";
 import { sateiAskActionDeps } from "./satei-ask-wire";
 import { sateiActionDeps } from "./satei-wire";
+import { parseGsData } from "./group-satei-data";
+import { handleGroupSateiPostback, type GsActionDeps } from "./group-satei-actions";
+import { groupSateiActionDeps } from "./group-satei-wire";
 import type { ListPage } from "./task-menu";
 import {
   candidateCardsActive,
@@ -301,6 +304,8 @@ export interface PostbackIo {
   satei?: Partial<SateiActionDeps>;
   /** 「案件はどれですか」のカードのボタン（v1|qa|・v1|ql|・v1|qn|）。省いた部品は本物（satei-ask-wire.ts） */
   sateiAsk?: Partial<SateiAskActionDeps>;
+  /** 普通のグループの査定依頼のカードのボタン（v1|gs|・gl|・gm|・gn|）。省いた部品は本物（group-satei-wire.ts） */
+  groupSatei?: Partial<GsActionDeps>;
 }
 
 /**
@@ -328,6 +333,7 @@ export async function handleTaskPostbackEvent(
     candidates: over.candidates,
     satei: over.satei,
     sateiAsk: over.sateiAsk,
+    groupSatei: over.groupSatei,
   };
   // B2 査定書のボタン（v1|sa|・v1|so|・v1|sr|・v1|sx|）。TASK_BUTTONS・TASK_MENU とは別のスイッチ（TASK_SATEI）なので、
   // 「止めています」の判定より前に振り分ける。off・押せる人・二度押しの扱いは satei-actions.ts。
@@ -361,6 +367,24 @@ export async function handleTaskPostbackEvent(
         reply: (token, text, card) => io.reply(token, text, card),
         log: io.log,
         ...io.sateiAsk,
+      },
+    );
+    return;
+  }
+  // 普通のグループの査定依頼のカード（v1|gs|・gl|・gm|・gn|）。スイッチは GROUP_SATEI（off・押せる人・二度押しは
+  // group-satei-actions.ts）。この4つの data は今まで出していないので、ほかのボタンの扱いは変わらない
+  const gsa = parseGsData(data);
+  if (gsa) {
+    await handleGroupSateiPostback(
+      gsa,
+      { replyToken, webhookEventId: event.webhookEventId, source: event.source },
+      {
+        ...groupSateiActionDeps(),
+        reserve: io.reserve,
+        complete: io.complete,
+        reply: (token, text, card) => io.reply(token, text, card),
+        log: io.log,
+        ...io.groupSatei,
       },
     );
     return;

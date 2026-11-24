@@ -188,3 +188,16 @@ npm run db:studio    # DB確認
 - 新しいグループで Bot を使い始めるときは `SECRETARY_ALLOWED_GROUP_IDS` に足す（Vercel ログの「送り主の制限で読み飛ばし: group group-mismatch」が手がかり）。
 
 （「案件はどれですか」のカード・2026-11-22）`POST /api/satei/ask`（Mac が頼むと、下村さん＝`TASK_SATEI_USER_IDS` の先頭との1対1に案件の候補のカードを push）と `POST /api/satei/ask/answers`（Mac が答えを取りに来る）。合言葉はヘッダ `x-satei-token` = HMAC-SHA256(`JOB_API_TOKEN`, `"satei-ask"`)。新しい環境変数は無い（`TASK_SATEI=1` のときだけ動く）。ボタンは `v1|qa|<askId>|<案件ID>`・`v1|ql|<askId>|<オフセット>`・`v1|qn|<askId>`（押せるのは `TASK_SATEI_USER_IDS` の人だけ。答えは最初の1回だけ有効）。答えは KV（`sateiask:*`）に7日、目次は Lua で振る通し番号の順。秘書は査定を始めない（Mac が hub に出し直す）。設計 `docs/superpowers/specs/2026-11-22-satei-ask-card-design.md`。`src/middleware.ts` の matcher には入れない。
+
+（普通のグループの査定依頼・段1・2026-11-24）`GROUP_SATEI`（`1` のときだけ動く。既定 off）／`GROUP_SATEI_GROUP_IDS`（対象のグループ。カンマ区切り。空なら何もしない。まず業務指示だけ）。
+on のとき、対象グループの画像・ファイルを `gsatei:media:<groupId>`（ID・種類・送り主・時刻だけ。ファイル名は持たない。30件・3時間）に控え、
+@AI秘書 あてで査定書と判定された依頼（入口 A。返事のあと）と、メンションの無い「査定」「価格を出して」「いくらで売れ」「売却価格」「相場」を含む依頼（入口 B。AI で査定書・0.5以上のときだけ）で受付票 `gsatei:t:<id>`（7日）を作り、
+本人の30分前〜1分後の画像・PDF と引用の資料を Claude で読み（1日20回まで）、下村さん（`TASK_SATEI_USER_IDS` の先頭）の1対1へ文字＋候補のカードを push する（月の送信枠を1通）。グループには何も返さない。入口 B から LINEタスク は作らない。
+ボタン `v1|gs|`（案件を選ぶ）・`v1|gl|`（一覧）・`v1|gm|`（案件がまだ無い＝仮の決定。7日以内に1回だけ選び直せる）・`v1|gn|`（査定ではない）。押せるのは `TASK_SATEI_USER_IDS` の人だけ。決めるのは受付票ごとに最初の1回（`gsatei:dec:<id>`）。
+種別は CRM_物件 の `種別` が正：マンション＋フォルダあり → portal の受付（依頼 ID は `gs<受付票の ID>`）、戸建・土地・不明 → 「手作業の査定に回します」。
+ログは `[group-satei] ticket G7 opened A read ok asked 3`・`[group-satei] gs started G7 #J12`・`gs manual house` の形（符号だけ）。設計 `docs/superpowers/specs/2026-11-24-group-satei-intake-design.md`、計画 `docs/superpowers/plans/2026-11-24-group-satei-intake-stage1.md`。
+案件カードの絞り込みは `DEAL_CARD_ONLY_IDS`（未設定なら今の2件、`all` で全件、カンマ区切りの ID）。on にする・env を足すのは下村さんの承認後（値を画面に出さない方法で入れる）。
+- 実装の補足（段1の作りどおり）：マンションで portal の受付へ進むのは `TASK_SATEI=1` のときだけ（off なら印を取らず「手作業の査定に回します」。on に戻せば同じカードで押し直せる）。知らせの push が通ったかは受付票の `pushed` に残す（送り直しは段2）。
+- 時間：資料の取得（1件8秒）から Claude の答えまで合わせて40秒、入口 B の判定も40秒、控えの KV は3秒。webhook の `maxDuration` は変えていない。入口は3つとも例外を投げず、off・対象外なら KV・AI・Notion を1回も呼ばない（`tests/group-satei-webhook.test.ts`）。
+- 対象グループは送り主の制限（`SECRETARY_ALLOWED_GROUP_IDS` か `LINE_GROUP_ID`）も通ること。下村さんの1対1のボタンも送り主の制限を通るので、`SECRETARY_ALLOWED_USER_IDS`（空なら `TASK_BUTTONS_ADMIN_IDS`）に入っていること。
+- ファイル：`src/lib/group-satei-data.ts`（スイッチ・鍵・data）／`-gate.ts`（入口の判定・束ね方）／`-read.ts`（読み取りの指示文）／`-card.ts`（文・カード）／`-open.ts`（受付票を開く）／`-actions.ts`（ボタン）／`-wire.ts`（本物の KV・LINE・Claude・Notion。webhook の3か所＝画像・ファイルの前の控え、入口 B は `maybeAskPhotoMention` の前、入口 A は返事のあと）。postback の振り分けは `task-buttons-wire.ts`（`v1|qa|` の振り分けの後）。
