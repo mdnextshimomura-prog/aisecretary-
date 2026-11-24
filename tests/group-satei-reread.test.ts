@@ -1,12 +1,12 @@
 /** 普通のグループの査定依頼：あとから届いた資料で読み直す（11/25。社長の依頼が「資料を読めませんでした」になった件） */
 import assert from "node:assert/strict";
 import {
-  attachLateMedia, openGroupSatei, recordGroupSateiMedia, runRereadWorker,
+  attachLateMedia, openGroupSatei, recordGroupSateiMedia, runRereadWorker, sweepGroupSatei,
   type GsRereadKv, type GsWorkerDeps,
 } from "../src/lib/group-satei-open";
 import { lateMediaMatches } from "../src/lib/group-satei-gate";
 import {
-  asTicket, gsDecKey, gsLateKey, gsRereadAtKey, gsRereadLockKey, gsTicketKey, ticketIdOf, type GsMedia, type GsRead,
+  GS_PENDING_SET, asTicket, gsDecKey, gsLateKey, gsRereadAtKey, gsRereadLockKey, gsTicketKey, ticketIdOf, type GsMedia, type GsRead,
 } from "../src/lib/group-satei-data";
 import { loadGroupSateiMaterials } from "../src/lib/group-satei-wire";
 
@@ -50,6 +50,7 @@ function mk(reads: Array<GsRead | "throw"> = [READ]) {
   let onRead: (call: number) => unknown = () => undefined;
   let onPush: () => void = () => undefined;
   let onSleep: () => unknown = () => undefined;
+  let pushFails = 0;
   const deps: GsWorkerDeps & { kv: GsRereadKv } = {
     env: ENV,
     kv,
@@ -67,7 +68,7 @@ function mk(reads: Array<GsRead | "throw"> = [READ]) {
     loadDeals: async () => [],
     kindOf: async () => null,
     requesterName: async () => "前田",
-    push: async (_to, messages, key) => { pushes.push({ messages, key }); onPush(); return true; },
+    push: async (_to, messages, key) => { pushes.push({ messages, key }); onPush(); if (pushFails > 0) { pushFails--; return false; } return true; },
     log: (l) => logs.push(l),
     sleep: async (ms) => { clock += ms; await onSleep(); },
   };
@@ -77,6 +78,8 @@ function mk(reads: Array<GsRead | "throw"> = [READ]) {
     onRead: (f: (call: number) => unknown) => { onRead = f; },
     onPush: (f: () => void) => { onPush = f; },
     onSleep: (f: () => unknown) => { onSleep = f; },
+    advance: (ms: number) => { clock += ms; },
+    failPush: (k: number) => { pushFails = k; },
   };
 }
 const TID = ticketIdOf("m1");
@@ -282,6 +285,69 @@ const text0 = (p: { messages: unknown[] }) => (p.messages[0] as { text: string }
     await runRereadWorker(TID, x.deps);
     assert.ok(x.logs.some((l) => /^\[group-satei\] ticket G1 reread read ok first/.test(l)));
     assert.ok(!x.logs.join().includes("テスト"));
+  });
+
+  // ── 再レビュー（11/25）──
+  await t("残り時間は関数の開始から数える：開始から200秒たっていたら1周を始めない（再レビュー1）", async () => {
+    const x = mk(["throw"]);
+    await openGroupSatei(ev(), x.deps);
+    await runRereadWorker(TID, { ...x.deps, startedAt: NOW - 200_000 });
+    assert.equal(x.pushes.length, 0);
+    assert.ok(x.logs.some((l) => /reread out-of-time/.test(l)));
+  });
+  await t("ほかの係の印が空かなければ、20秒で諦める（応答を長く止めない・再レビュー3）", async () => {
+    const x = mk(["throw"]);
+    await openGroupSatei(ev(), x.deps);
+    x.m.set(gsRereadLockKey(TID), 1);
+    await runRereadWorker(TID, x.deps);
+    assert.ok(x.clock() - NOW <= 20_000, `${x.clock() - NOW}`);
+  });
+  await t("掃除：係が止まって知らせの出ていない票を、3分後に読み直さずに知らせる（再レビュー2）", async () => {
+    const x = mk(["throw"]);
+    await openGroupSatei(ev(), x.deps);
+    await attachLateMedia(img("i1"), G, x.deps);
+    await sweepGroupSatei(x.deps);
+    assert.equal(x.pushes.length, 0, "3分たつまでは触らない");
+    x.advance(4 * 60_000);
+    await sweepGroupSatei(x.deps);
+    assert.equal(x.pushes.length, 1);
+    assert.equal(x.readCalls.length, 1, "掃除は AI を呼ばない");
+    assert.match(text0(x.pushes[0]), /途中で止まりました/);
+    assert.match(text0(x.pushes[0]), /画像1枚/);
+    assert.equal(tk(x.m).pushed, true);
+    assert.ok(!(x.m.get(GS_PENDING_SET) as Set<string>).has(TID));
+    await sweepGroupSatei(x.deps);
+    assert.equal(x.pushes.length, 1, "二度は送らない");
+  });
+  await t("掃除：push が失敗した票は、同じ版の retry key で送り直す", async () => {
+    const x = mk([READ]);
+    x.failPush(1);
+    await openGroupSatei(ev(), x.deps);
+    assert.equal(tk(x.m).pushed, false);
+    x.advance(4 * 60_000);
+    await sweepGroupSatei(x.deps);
+    assert.equal(x.pushes.length, 2);
+    assert.equal(x.pushes[1].key, `${TID}:1`);
+    assert.match(text0(x.pushes[1]), /大阪市北区テスト1丁目2/);
+  });
+  await t("掃除：押された票・係が印を持つ票には触らない", async () => {
+    const x = mk(["throw"]);
+    await openGroupSatei(ev(), x.deps);
+    x.advance(4 * 60_000);
+    x.m.set(gsRereadLockKey(TID), 1);
+    await sweepGroupSatei(x.deps);
+    assert.equal(x.pushes.length, 0);
+    x.m.delete(gsRereadLockKey(TID));
+    x.m.set(gsDecKey(TID), "x");
+    await sweepGroupSatei(x.deps);
+    assert.equal(x.pushes.length, 0);
+  });
+  await t("掃除：off なら KV も読まない", async () => {
+    const x = mk([READ]);
+    let touched = false;
+    const kv = new Proxy(x.kv, { get: (o, p) => { touched = true; return (o as never)[p]; } });
+    await sweepGroupSatei({ ...x.deps, env: {}, kv });
+    assert.equal(touched, false);
   });
 
   // ── 1枚取れなくても、取れた分で読む ──

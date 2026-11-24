@@ -8,7 +8,7 @@ import { normalizeProperty } from "./property";
 import { sateiNotifyTarget } from "./satei-data";
 import {
   GS_CANDIDATES_MAX, GS_DEFER_MS, GS_MATERIALS_MAX, GS_MEDIA_MAX, GS_MEDIA_TTL, GS_QUIET_MS, GS_READS_PER_DAY,
-  GS_LOCK_TTL_S, GS_POLL_MS, GS_REREAD_MAX, GS_ROUND_MS, GS_SEQ_KEY, GS_TICKET_TTL, GS_WORKER_DEADLINE_MS,
+  GS_LOCK_TTL_S, GS_LOCK_WAIT_MS, GS_PENDING_SET, GS_POLL_MS, GS_SWEEP_AFTER_MS, GS_REREAD_MAX, GS_ROUND_MS, GS_SEQ_KEY, GS_TICKET_TTL, GS_WORKER_DEADLINE_MS,
   asTicket, groupSateiActive, groupSateiOn, gsDecKey, gsLateKey, gsMediaKey, gsMsgKey, gsOpenKey, gsReadsKey, gsRereadAtKey,
   gsRereadLockKey, gsTicketKey, receiptOf, ticketIdOf,
   type GsEnv, type GsMedia, type GsRead, type GsTicket,
@@ -23,6 +23,8 @@ export interface GsKv {
   incr(key: string): Promise<number>;
   expire(key: string, ex: number): Promise<void>;
   sadd(key: string, member: string): Promise<void>;
+  /** 集合から外す（無い作りでは、未送の控えを外さない＝掃除が状態を見て外す） */
+  srem?(key: string, member: string): Promise<void>;
   /** 末尾に足し、max 件に切り、期限を付け直す */
   lpushTrim(key: string, value: unknown, max: number, ex: number): Promise<void>;
   lrange(key: string): Promise<unknown[]>;
@@ -111,6 +113,8 @@ export async function openGroupSatei(ev: GsOpenEvent, deps: GsOpenDeps): Promise
     await kv.set(gsTicketKey(tid), ticket, GS_TICKET_TTL);
     // 読んでいるあいだに貼られた資料も足せるよう、開いている票の目次には先に入れる（11/25 レビュー 1）
     await kv.sadd(gsOpenKey(ev.groupId), tid);
+    // 知らせが届くまでの控え（毎分の見回りの掃除が、知らせの出ていない票を拾う）
+    await kv.sadd(GS_PENDING_SET, tid);
   } catch {
     deps.log("[group-satei] skip:kv");
     return "skip";
@@ -265,6 +269,8 @@ async function notifyTicket(
       if (now && now.state === "asking" && now.ver === ticket.ver && !decided) {
         await kv.set(gsTicketKey(tid), { ...now, pushed: true }, GS_TICKET_TTL);
       }
+      // 届いたので掃除の対象から外す（押されたあとでも、知らせは届いている）
+      if (kv.srem) await kv.srem(GS_PENDING_SET, tid);
     } catch {
       deps.log(`[group-satei] ticket ${receiptOf(ticket.no)} pushed-mark-failed`);
     }
@@ -275,6 +281,7 @@ async function notifyTicket(
 export type GsRereadKv = GsKv & {
   smembers(key: string): Promise<unknown[]>;
   srem(key: string, member: string): Promise<void>;
+  exists?(key: string): Promise<boolean>;
   del(key: string): Promise<void>;
 };
 
@@ -335,13 +342,15 @@ export async function attachLateMedia(
 export interface GsWorkerDeps extends GsOpenDeps {
   kv: GsRereadKv | null;
   sleep(ms: number): Promise<void>;
+  /** webhook の関数が始まった時刻。残り時間はここから数える（無ければ係の開始から） */
+  startedAt?: number;
 }
 
 /**
- * 読み直しの係（11/25）。webhook の中（gsJobs。maxDuration 300 秒）で動き、毎分の見回りには頼らない。
- * - 受付票ごとに1つだけ（印 gsatei:rlock:<tid>）。印を取れなければ、取れるまで待ってから、自分の資料が残っていれば引き継ぐ。
+ * 読み直しの係（11/25）。webhook の中（gsJobs。maxDuration 300 秒）で動く。毎分の見回りは掃除（sweepGroupSatei）だけ。
+ * - 受付票ごとに1つだけ（印 gsatei:rlock:<tid>）。印を取れなければ20秒まで待ち、取れれば自分の資料が残っていれば引き継ぐ。
  * - 読み直す時刻（最後の資料から1分・資料なしは90秒）まで待ち、読み直して知らせる。読むあいだに資料が増えたら、もう1周。
- * - 開始から 250 秒で打ち切る（関数の上限 300 秒の内側）。1周に要る時間（読み取り40秒＋候補＋送信）が残らなければ始めない。
+ * - 関数の開始から 250 秒で打ち切る（関数の上限 300 秒の内側）。1周に要る時間（読み取り40秒＋候補＋送信）が残らなければ始めない。
  * 例外は投げない。
  */
 export async function runRereadWorker(tid: string, deps: GsWorkerDeps): Promise<void> {
@@ -349,14 +358,15 @@ export async function runRereadWorker(tid: string, deps: GsWorkerDeps): Promise<
   if (!groupSateiActive(env)) return;
   const kv = deps.kv;
   if (!kv) return;
-  const start = deps.now();
+  const start = deps.startedAt ?? deps.now();
   const left = () => GS_WORKER_DEADLINE_MS - (deps.now() - start);
+  const lockWaitUntil = deps.now() + GS_LOCK_WAIT_MS;
   try {
     for (;;) {
       if (await hasNothingToDo(tid, kv)) return;
       if (await kv.setNx(gsRereadLockKey(tid), 1, GS_LOCK_TTL_S)) break;
-      // ほかの呼び出しが読んでいる：終わるのを待つ（その係が残りも拾うので、多くはここで仕事が無くなる）
-      if (left() < GS_ROUND_MS) return;
+      // ほかの呼び出しが係をしている：少しだけ待つ（その係が残りも拾う。拾い損ねは毎分の見回りの掃除が知らせる）
+      if (left() < GS_ROUND_MS || deps.now() >= lockWaitUntil) return;
       await deps.sleep(GS_POLL_MS);
     }
     try {
@@ -454,4 +464,54 @@ async function rereadOne(tid: string, deps: GsOpenDeps, kv: GsRereadKv): Promise
   // 読むあいだに届いた資料が残っていれば、もう1周（11/25 レビュー 3）
   const rest = (await kv.smembers(gsLateKey(tid))).map(parseLate).filter((x) => x && !mediaIds.includes(x.id));
   return rest.length > 0 && (next.rereads ?? 0) < GS_REREAD_MAX && mediaIds.length < GS_MATERIALS_MAX;
+}
+
+/**
+ * 毎分の見回りの掃除（11/25 再レビュー 2）：知らせが出ていない受付票を、読み直さずに知らせる。
+ * 対象は「asking・決定の印なし・pushed でない・係の印なし・読み直す時刻（無ければ依頼の時刻）から3分」。
+ * AI は呼ばない（見回りの時間の上限があるため）。1回に1件。例外は投げない。
+ */
+export async function sweepGroupSatei(deps: GsOpenDeps & { kv: GsRereadKv | null }): Promise<void> {
+  const env = deps.env ?? process.env;
+  if (!groupSateiActive(env)) return;
+  const kv = deps.kv;
+  if (!kv) return;
+  try {
+    const tids = (await kv.smembers(GS_PENDING_SET)).filter((x): x is string => typeof x === "string");
+    for (const tid of tids) {
+      const t = asTicket(await kv.get(gsTicketKey(tid)));
+      if (!t || t.state !== "asking" || t.pushed === true || (await kv.get(gsDecKey(tid)))) {
+        await kv.srem(GS_PENDING_SET, tid);
+        continue;
+      }
+      const rat = Number(await kv.get(gsRereadAtKey(tid)));
+      const since = Math.max(t.at, Number.isFinite(rat) ? rat : 0);
+      if (deps.now() - since < GS_SWEEP_AFTER_MS) continue;
+      if (!(await kv.setNx(gsRereadLockKey(tid), 1, 60))) continue;
+      try {
+        const late = (await kv.smembers(gsLateKey(tid))).map(parseLate).filter((x): x is { kind: "image" | "pdf"; id: string } => x !== null && !t.mediaIds.includes(x.id));
+        const base = t.materials ?? { images: 0, pdfs: 0 };
+        const next: GsTicket = {
+          ...t,
+          deferred: false,
+          materials: {
+            images: base.images + late.filter((l) => l.kind === "image").length,
+            pdfs: base.pdfs + late.filter((l) => l.kind === "pdf").length,
+          },
+        };
+        // 読めていなければ、待ちが途中で止まったことを書く（読めていれば、その読み取りのまま出す）
+        if (!next.read && (t.deferred || late.length > 0)) next.readFailed = late.length > 0 || t.mediaIds.length > 0 ? "stalled" : "no-material";
+        const fresh = asTicket(await kv.get(gsTicketKey(tid)));
+        if (!fresh || fresh.state !== "asking" || fresh.ver !== t.ver || (await kv.get(gsDecKey(tid)))) continue;
+        await kv.set(gsTicketKey(tid), next, GS_TICKET_TTL);
+        const { sent } = await notifyTicket(tid, next, deps, kv, false);
+        deps.log(`[group-satei] ticket ${receiptOf(t.no)} swept${sent ? "" : " push-failed"}`);
+      } finally {
+        await kv.del(gsRereadLockKey(tid)).catch(() => undefined);
+      }
+      return;
+    }
+  } catch {
+    deps.log("[group-satei] sweep skip:exception");
+  }
 }

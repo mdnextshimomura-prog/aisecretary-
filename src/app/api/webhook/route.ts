@@ -816,7 +816,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         senderId: source.userId,
         type: "image",
         at: event.timestamp ?? Date.now(),
-      });
+      }, startedAt);
       // あとから貼られた資料の読み直しは待たずに始め、返す直前にまとめて待つ
       if (gsLateImage) gsJobs.push(gsLateImage.job);
       await handleIncomingImage(event.message.id, source, replyToken);
@@ -834,7 +834,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         type: "file",
         fileName: event.message.fileName,
         at: event.timestamp ?? Date.now(),
-      });
+      }, startedAt);
       if (gsLateFile) gsJobs.push(gsLateFile.job);
       await handleIncomingFile(
         event.message.id,
@@ -1613,6 +1613,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           quotedMessageId: event.message.quotedMessageId,
         },
         todayLabel(jstNow()),
+        startedAt,
       ).catch(() => undefined));
       // 画像のあとの「@下村」だけの名指し（PHOTO_MENTION_ASK=1 のときだけ）：画像を読み、査定の依頼らしければ
       // 下村さんの1対1へ push で聞く。グループには返さない（replyToken は使わない）。失敗してもほかの流れは今のまま
@@ -1851,6 +1852,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           confidence: parsed.confidence,
         },
         todayLabel(now),
+        startedAt,
       ).catch(() => undefined));
       continue;
     }
@@ -2051,6 +2053,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         confidence: parsed.confidence,
       },
       todayLabel(now),
+      startedAt,
     ).catch(() => undefined));
     } catch (err) {
       // 例外で抜けた＝処理し切れていない。完了印を付けてはいけない。

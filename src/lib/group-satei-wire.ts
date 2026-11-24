@@ -12,10 +12,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { kv } from "@vercel/kv";
 import { parseTaskFromMessage, type TaskAttachment } from "./claude";
-import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiOn, ticketIdOf } from "./group-satei-data";
+import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiActive, groupSateiOn, ticketIdOf } from "./group-satei-data";
 import { gsEntryAOk, gsEntryBGate, gsMediaRow, looksLikeSateiWords } from "./group-satei-gate";
 import {
-  attachLateMedia, openGroupSatei, recordGroupSateiMedia, runRereadWorker,
+  attachLateMedia, openGroupSatei, recordGroupSateiMedia, runRereadWorker, sweepGroupSatei,
   type GsKv, type GsOpenDeps, type GsRereadKv, type GsWorkerDeps,
 } from "./group-satei-open";
 import type { GsActionDeps } from "./group-satei-actions";
@@ -199,7 +199,7 @@ export async function recordGroupSateiMediaEvent(m: {
   type: "image" | "file";
   fileName?: string;
   at: number;
-}): Promise<{ job: Promise<void> } | null> {
+}, startedAt?: number): Promise<{ job: Promise<void> } | null> {
   try {
     if (!groupSateiOn(m.groupId)) return null;
     const row = gsMediaRow(m);
@@ -207,19 +207,30 @@ export async function recordGroupSateiMediaEvent(m: {
     const store = groupSateiKv();
     await within(recordGroupSateiMedia(row, m.groupId as string, store, log), MEDIA_KV_TIMEOUT_MS);
     const tid = await within(attachLateMedia(row, m.groupId as string, { kv: store, now: () => Date.now(), log }), LATE_KV_TIMEOUT_MS);
-    return tid ? { job: runRereadWorker(tid, workerDeps()) } : null;
+    return tid ? { job: runRereadWorker(tid, workerDeps(startedAt)) } : null;
   } catch {
     log("[group-satei] skip:media-exception");
     return null;
   }
 }
 
-function workerDeps(): GsWorkerDeps {
+function workerDeps(startedAt?: number): GsWorkerDeps {
   return {
     ...groupSateiOpenDeps(ymdJst(Date.now())),
     kv: groupSateiKv(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    startedAt,
   };
+}
+
+/** 毎分の見回り（/api/obi/cloud-tick）の掃除：知らせの出ていない受付票を、読み直さずに知らせる。例外は投げない */
+export async function sweepGroupSateiOnTick(): Promise<void> {
+  try {
+    if (!groupSateiActive()) return;
+    await sweepGroupSatei({ ...groupSateiOpenDeps(ymdJst(Date.now())), kv: groupSateiKv() });
+  } catch {
+    log("[group-satei] sweep skip:tick-exception");
+  }
 }
 
 /** 入口 A（@AI秘書 あてで査定書と判定された依頼。返事を送ったあとに呼ぶ）。例外は投げない */
@@ -236,6 +247,7 @@ export async function maybeOpenGroupSateiA(
     confidence: number;
   },
   today: string,
+  startedAt?: number,
 ): Promise<void> {
   try {
     if (!gsEntryAOk(p)) return;
@@ -252,7 +264,7 @@ export async function maybeOpenGroupSateiA(
       groupSateiOpenDeps(today),
     );
     // 文字だけで読めなかった・読むあいだに資料が増えた票は、ここで待って読み直す（ほかは何もせず戻る）
-    await runRereadWorker(ticketIdOf(p.messageId), workerDeps());
+    await runRereadWorker(ticketIdOf(p.messageId), workerDeps(startedAt));
   } catch {
     log("[group-satei] skip:exception A");
   }
@@ -262,6 +274,7 @@ export async function maybeOpenGroupSateiA(
 export async function maybeOpenGroupSateiB(
   p: { messageId: string; groupId?: string; senderId?: string; at: number; text: string; quotedMessageId?: string },
   today: string,
+  startedAt?: number,
 ): Promise<void> {
   try {
     const g = gsEntryBGate(p);
@@ -287,7 +300,7 @@ export async function maybeOpenGroupSateiB(
       },
       groupSateiOpenDeps(today),
     );
-    await runRereadWorker(ticketIdOf(p.messageId), workerDeps());
+    await runRereadWorker(ticketIdOf(p.messageId), workerDeps(startedAt));
   } catch {
     log("[group-satei] skip:exception B");
   }

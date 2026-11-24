@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleCloudTick } from "@/lib/obi/cloud-entry";
 import { runDueRemindersOnTick } from "@/lib/remind-due";
+import { sweepGroupSateiOnTick } from "@/lib/group-satei-wire";
 
 // 帯替えの完成リンク・差し戻し・失敗の知らせを、クラウドから出す毎分の見回り（設計 2026-10-11 の C1）。
 // 起こすのは portal（Railway の worker が毎分、portal の web を経由して、ここを POST でたたく）。
@@ -14,6 +15,7 @@ export const maxDuration = 60;
 const NO_STORE = { "cache-control": "no-store" };
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const t0 = Date.now();
   const r = await handleCloudTick(req.headers.get("x-obi-tick-token"));
   // 期限前の通知（「まもなく期限です」）の相乗り。合言葉が通った見回りのときだけ、10 分に 1 回動く
   // （DUE_REMIND_TICK=1 のとき。帯替えのスイッチとは別）。失敗しても、見回りの応答は変えない
@@ -22,6 +24,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const name = (err as { name?: unknown } | null)?.name;
       console.error(`[remind-due] tick error ${typeof name === "string" ? name : "Error"}`);
     });
+    // 普通のグループの査定依頼の掃除：知らせの出ていない受付票を、読み直さずに知らせる（AI は呼ばない。
+    // CRM 8秒＋名前3秒＋送信の程度）。上の処理で 30 秒を使っていたら、この回は飛ばす（次の回に回す）
+    if (Date.now() - t0 < 30_000) await sweepGroupSateiOnTick();
   }
   return NextResponse.json(r.body, { status: r.status, headers: NO_STORE });
 }

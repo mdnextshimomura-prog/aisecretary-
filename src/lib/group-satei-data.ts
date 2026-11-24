@@ -45,6 +45,11 @@ export const GS_ROUND_MS = 75 * 1000;
 export const GS_POLL_MS = 5 * 1000;
 /** 係の印の期限（関数の上限 300 秒より短く、係の打ち切り 250 秒より長く） */
 export const GS_LOCK_TTL_S = 280;
+/** 画像の webhook が、ほかの係の印が空くのを待つ長さ（応答を長く止めない） */
+export const GS_LOCK_WAIT_MS = 20 * 1000;
+/** 知らせが出ていない受付票の控え（見回りの掃除が拾う）と、掃除するまでの猶予 */
+export const GS_PENDING_SET = "gsatei:pending";
+export const GS_SWEEP_AFTER_MS = 3 * 60 * 1000;
 /** あとから届いた資料の控え（受付票ごとの集合。要素は "image:<id>" か "pdf:<id>"。足すのは原子的な sadd だけ） */
 export const gsLateKey = (tid: string) => `gsatei:late:${tid}`;
 /** 読み直す時刻（受付票とは別に置く＝資料が届くたびに受付票を書き戻さない） */

@@ -21,6 +21,7 @@ const FAILED_TEXT: Record<string, string> = {
   cap: "資料を読めませんでした（本日の上限）。LINE のグループで確かめてください。",
   "no-material": "本文から物件が分からず、画像・PDF もまだ届いていません。",
   "read-failed": "画像・PDF はありましたが、物件を読み取れませんでした。LINE のグループで確かめてください。",
+  stalled: "資料の読み取りが途中で止まりました。LINE のグループで確かめてください。",
 };
 const REREAD_HINT = "あとから画像・PDF が貼られたら、読み直してもう一度お知らせします。";
 
