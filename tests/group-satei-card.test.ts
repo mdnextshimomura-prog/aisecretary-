@@ -65,5 +65,6 @@ t("手作業の返事", () => {
   assert.match(msgGsManual(7, "戸建"), /戸建のため自動作成はできません。手作業の査定に回します/);
   assert.match(msgGsManual(7, "土地"), /土地のため/);
   assert.match(msgGsManual(7, null), /物件の種別が分からないため/);
+  assert.match(msgGsManual(7, "マンション"), /自動作成を止めています。手作業の査定に回します（受付 G7）/);
 });
 console.log(`group-satei-card: ${n} ok`);

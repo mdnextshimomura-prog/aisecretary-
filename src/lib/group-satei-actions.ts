@@ -5,15 +5,15 @@
  * 例外は投げない。ログは符号・受付番号・J番号だけ。
  */
 import {
-  GS_TICKET_TTL, groupSateiActive, gsDecKey, gsEventId, gsOpenKey, gsTicketKey, receiptOf, asTicket,
+  GS_TICKET_TTL, groupSateiActive, groupSateiOn, gsDecKey, gsEventId, gsOpenKey, gsTicketKey, receiptOf, asTicket,
   type GsAction, type GsEnv, type GsTicket,
 } from "./group-satei-data";
 import type { GsKv } from "./group-satei-open";
 import {
-  gsListCard, MSG_GS_BUSY, MSG_GS_DEALS_FAILED, MSG_GS_EXPIRED, MSG_GS_FORBIDDEN, MSG_GS_NO_FOLDER, MSG_GS_NOT_ACTIVE,
+  gsListCard, MSG_GS_BUSY, MSG_GS_LIST_END, MSG_GS_DEALS_FAILED, MSG_GS_EXPIRED, MSG_GS_FORBIDDEN, MSG_GS_NO_FOLDER, MSG_GS_NOT_ACTIVE,
   MSG_GS_PAUSED, MSG_GS_STALE, MSG_GS_UNKNOWN, msgGsAlready, msgGsDismissed, msgGsKindMismatch, msgGsManual, msgGsNoDeal,
 } from "./group-satei-card";
-import { isSateiUser } from "./satei-data";
+import { isSateiUser, sateiActive } from "./satei-data";
 import { judgeSateiDeal, normNotionId, SATEI_KIND, type SateiDeal } from "./satei-deal";
 import { SATEI_CODE_AWAITING_REASON, type SateiCall, type SateiIntakeOk, type SateiIntakeReq } from "./satei-portal";
 import { MSG_SATEI_AWAITING_REASON, MSG_SATEI_DEAL_NOT_FOUND, MSG_SATEI_FAILED, msgSateiAccepted, msgSateiInProgress } from "./satei-text";
@@ -47,6 +47,8 @@ async function save(kv: Kv, tid: string, tk: GsTicket): Promise<void> {
 }
 
 const MISMATCH_KINDS = ["マンション", "戸建", "土地"];
+/** 印（gsatei:dec）の値の頭。portal の受付の結果が分からないとき */
+const UNKNOWN_DEC = "unknown:";
 
 async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: string, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
   // PAGE_ID_RE はハイフン入り・大文字も通すので、比べる前・保存する前にそろえる
@@ -73,6 +75,11 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
     tk.read && MISMATCH_KINDS.includes(tk.read.kind) && kind && MISMATCH_KINDS.includes(kind) && tk.read.kind !== kind
       ? `\n${msgGsKindMismatch(tk.read.kind)}`
       : "";
+  const env = deps.env ?? process.env;
+  if (kind === SATEI_KIND && !sateiActive(env)) {
+    // TASK_SATEI off：portal へは進まない。印を取らず受付票も asking のまま（on に戻せば同じカードで押し直せる）
+    return { text: msgGsManual(no, kind) + warn, code: "manual satei-off", settled: true };
+  }
   if (kind === SATEI_KIND) {
     const j = judgeSateiDeal(got.deal, kind, deps.dealsDbId);
     if (!j.ok) {
@@ -87,16 +94,27 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
     } catch {
       r = { kind: "unknown", reason: "exception" };
     }
+    // ここから先の KV の失敗は返事を変えない（portal の結果のとおりに返す）。ログだけ
+    const quiet = async (f: () => Promise<void>) => {
+      try {
+        await f();
+      } catch {
+        deps.log("[group-satei] gs save-failed");
+      }
+    };
     if (r.kind === "ok") {
-      await save(kv, a.tid, { ...tk, state: "started", provisional: false, dealId: a.dealId, jobNo: r.value.no });
-      const text = r.value.created ? msgSateiAccepted(r.value.no) : msgSateiInProgress(r.value.no);
-      return { text: text + warn, code: `started ${receiptOf(no)} #J${r.value.no}`, settled: true };
+      const jobNo = r.value.no;
+      await quiet(() => save(kv, a.tid, { ...tk, state: "started", provisional: false, dealId: a.dealId, jobNo }));
+      const text = r.value.created ? msgSateiAccepted(jobNo) : msgSateiInProgress(jobNo);
+      return { text: text + warn, code: `started ${receiptOf(no)} #J${jobNo}`, settled: true };
     }
     if (r.kind === "unknown") {
-      await save(kv, a.tid, { ...tk, state: "started", provisional: false, dealId: a.dealId, unknown: true });
+      // 結果不明は印の値で覚える（押し直しは portal を呼ばずに「確かめられませんでした」）
+      await quiet(() => kv.set(gsDecKey(a.tid), `${UNKNOWN_DEC}${a.dealId}`, GS_TICKET_TTL));
+      await quiet(() => save(kv, a.tid, { ...tk, state: "started", provisional: false, dealId: a.dealId, unknown: true }));
       return { text: MSG_GS_UNKNOWN, code: "unknown", settled: true };
     }
-    await kv.del(gsDecKey(a.tid));
+    await quiet(() => kv.del(gsDecKey(a.tid)));
     return r.code === SATEI_CODE_AWAITING_REASON
       ? { text: MSG_SATEI_AWAITING_REASON, code: "awaiting-reason", settled: true }
       : { text: MSG_SATEI_FAILED, code: "rejected", settled: true };
@@ -108,9 +126,17 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
 
 async function decide(a: Exclude<GsAction, { op: "gl" }>, tk: GsTicket, userId: string, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
   const dec = await kv.get(gsDecKey(a.tid));
-  if (dec) return tk.unknown ? { text: MSG_GS_UNKNOWN, code: "unknown-again", settled: true } : { text: msgGsAlready(tk.no), code: "already", settled: true };
+  if (dec) {
+    return typeof dec === "string" && dec.startsWith(UNKNOWN_DEC)
+      ? { text: MSG_GS_UNKNOWN, code: "unknown-again", settled: true }
+      : { text: msgGsAlready(tk.no), code: "already", settled: true };
+  }
   if (a.op === "gs") return pick(a, tk, userId, deps, kv);
   if (a.op === "gm") {
+    // 連打で7日を延ばさない
+    if (tk.provisional) return { text: msgGsNoDeal(tk.no), code: "no-deal-again", settled: true };
+    // 同時に押された gs が印を取っていたら上書きしない
+    if (await kv.get(gsDecKey(a.tid))) return { text: msgGsAlready(tk.no), code: "already", settled: true };
     await save(kv, a.tid, { ...tk, state: "manual", provisional: true });
     return { text: msgGsNoDeal(tk.no), code: "no-deal", settled: true };
   }
@@ -157,6 +183,10 @@ export async function handleGroupSateiPostback(
     deps.log(`[group-satei] ${action.op} expired`);
     return say(MSG_GS_EXPIRED, "expired");
   }
+  if (!groupSateiOn(tk.groupId, env)) {
+    deps.log(`[group-satei] ${action.op} paused group`);
+    return say(MSG_GS_PAUSED, "paused");
+  }
   if (tk.ver !== action.ver) {
     deps.log(`[group-satei] ${action.op} stale ${receiptOf(tk.no)}`);
     return say(MSG_GS_STALE, "stale");
@@ -171,7 +201,7 @@ export async function handleGroupSateiPostback(
     }
     const card = gsListCard(action.tid, tk.ver, tk.no, deals, action.offset);
     deps.log(`[group-satei] gl shown ${receiptOf(tk.no)}`);
-    return card ? say(`どの案件ですか（${receiptOf(tk.no)}）`, "shown", card) : say("これより後の案件はありません", "empty");
+    return card ? say(`どの案件ですか（${receiptOf(tk.no)}）`, "shown", card) : say(MSG_GS_LIST_END, "empty");
   }
   const eventId = ev.webhookEventId;
   if (!eventId) {

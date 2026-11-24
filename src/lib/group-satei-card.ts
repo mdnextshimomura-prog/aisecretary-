@@ -137,9 +137,12 @@ export const msgGsAlready = (no: number) => `選択済みです（受付 ${recei
 export const msgGsManual = (no: number, kind: string | null) =>
   kind === "戸建" || kind === "土地"
     ? `${kind}のため自動作成はできません。手作業の査定に回します（受付 ${receiptOf(no)}）`
+    : kind === "マンション"
+    ? `いまは査定書の自動作成を止めています。手作業の査定に回します（受付 ${receiptOf(no)}）`
     : `物件の種別が分からないため自動では作れません。手作業の査定に回します（受付 ${receiptOf(no)}）。CRM_物件 の種別を入れると、次からは自動で判断します`;
 export const msgGsNoDeal = (no: number) =>
   `手作業の査定に回します（受付 ${receiptOf(no)}）。CRM_案件 を作ったあとなら、このカードの［一覧から選ぶ］で選び直せます（7日間）`;
 export const msgGsDismissed = (no: number) => `査定の依頼ではないとして閉じました（受付 ${receiptOf(no)}）`;
 export const msgGsKindMismatch = (readKind: string) => `資料からは${readKind}に見えます。CRM_物件 の種別を確かめてください`;
+export const MSG_GS_LIST_END = "これより後の案件はありません";
 export const MSG_GS_NO_FOLDER = "案件の Driveフォルダが未設定です。設定してから、もう一度押してください";
