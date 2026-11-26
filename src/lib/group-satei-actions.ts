@@ -139,10 +139,18 @@ async function chooseKind(a: Extract<GsAction, { op: "gk" }>, tk: GsTicket, deps
   const no = tk.no;
   if (a.code === "satei") {
     if (tk.state === "asking" && tk.requestKind !== "satei") {
-      await quietKv(() => save(kv, a.tid, { ...tk, requestKind: "satei" }), deps);
+      // 押した時点の控えで丸ごと書かない：書く直前に読み直し、まだ同じ版・asking・印なしのときだけ（読み直しの係の保存を消さない）
+      await quietKv(async () => {
+        const fresh = asTicket(await kv.get(gsTicketKey(a.tid)));
+        if (!fresh || fresh.state !== "asking" || fresh.ver !== tk.ver || fresh.requestKind === "satei") return;
+        if (await kv.get(gsDecKey(a.tid))) return;
+        await save(kv, a.tid, { ...fresh, requestKind: "satei" });
+      }, deps);
     }
     return { text: msgGsKindSatei(no), code: `kind satei ${receiptOf(no)}`, settled: true, card: gsSateiNextCard(a.tid, tk.ver, no) };
   }
+  // ［案件がまだ無い］の仮の決定（manual・provisional）のあとは、7つで上書きしない（7日以内の選び直しを残す）
+  if (tk.state !== "asking") return { text: msgGsAlready(no), code: "already", settled: true };
   if (!(await kv.setNx(gsDecKey(a.tid), `gk:${a.code}`, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
   await quietKv(() => save(kv, a.tid, { ...tk, state: "manual", provisional: false, requestKind: a.code }), deps);
   return { text: msgGsKindRecorded(no, gsReqLabel(a.code)), code: `kind ${a.code} ${receiptOf(no)}`, settled: true };

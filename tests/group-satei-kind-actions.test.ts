@@ -129,5 +129,30 @@ const ticket = (x: ReturnType<typeof mk>) => asTicket(x.m.get(gsTicketKey(tid)))
     assert.equal(ticket(off).state, "started");
     assert.equal(ticket(off).requestKind, undefined);
   });
+  await t("［査定］：押した直後に読み直しの係が版を上げていたら、古い控えで書き戻さない", async () => {
+    const x = mk();
+    const kv = x.deps.kv!;
+    const get0 = kv.get;
+    let first = true;
+    kv.get = async (k) => {
+      const v = await get0(k);
+      // 最初に受付票を読んだあと、係が版2・資料つきで保存した
+      if (k === gsTicketKey(tid) && first) { first = false; x.m.set(gsTicketKey(tid), { ...base, ver: 2, mediaIds: ["img1"] }); }
+      return v;
+    };
+    await press(x, gk("satei"));
+    const tk = ticket(x);
+    assert.equal(tk.ver, 2);
+    assert.deepEqual(tk.mediaIds, ["img1"]);
+    assert.equal(tk.requestKind, undefined);
+  });
+  await t("［案件がまだ無い］のあとの7つは選択済み（仮の決定を消さない）", async () => {
+    const x = mk();
+    await press(x, { op: "gm", tid, ver: 1 }, "e1");
+    await press(x, gk("doc"), "e2");
+    assert.match(x.replies[1].text, /選択済みです/);
+    assert.equal(ticket(x).provisional, true);
+    assert.equal(x.m.has(gsDecKey(tid)), false);
+  });
   console.log(`group-satei-kind-actions: ${n} ok`);
 })().catch((e) => { console.error(e); process.exit(1); });
