@@ -57,6 +57,48 @@ export const gsRemindKey = (tid: string) => `gsatei:rem:${tid}`;
 /** ［直す］のあとの次の1通（30分） */
 export const gsFixKey = (userId: string) => `gsatei:fix:${userId}`;
 
+/** 段2e（計画 2026-11-26-group-satei-2e）：受付票に結びついた事例の PDF（JSON の配列 [{m: messageId, at}]。結びついた順。14日・10件まで） */
+export const gsCaseItemsKey = (tid: string) => `gsatei:caseitems:${tid}`;
+/** どの受付のものか決められない PDF の知らせは1回だけ（1日） */
+export const gsAmbigKey = (messageId: string) => `gsatei:ambig:${messageId}`;
+export const GS_AMBIG_TTL = 24 * 60 * 60;
+/** 1受付票の事例 PDF の上限 */
+export const GS_CASE_ITEMS_MAX = 10;
+/** 控えの置き場の生の行の上限（同じ messageId の重なりの分の余り。読むときに重ねを除いて GS_CASE_ITEMS_MAX 件） */
+export const GS_CASE_ITEMS_RAW_MAX = 20;
+/** 1件の PDF の上限（Vercel の応答の上限 4.5MB のため） */
+export const GS_CASE_PDF_MAX = 4 * 1024 * 1024;
+/** 最後の PDF からこれだけ静かになったら portal へ渡す */
+export const GS_CASES_QUIET_MS = 2 * 60 * 1000;
+/** 事例の結果の知らせの push（retry key cases:<tid>）を試す回数 */
+export const GS_CASES_PUSH_TRIES = 2;
+export interface GsCaseItem {
+  m: string;
+  at: number;
+}
+/** 控えの行を読む（文字列の JSON でも、読み出しで戻った形でもよい）。重ねを除き、結びついた順に max 件（既定 GS_CASE_ITEMS_MAX）まで */
+export function asCaseItems(raw: unknown, max: number = GS_CASE_ITEMS_MAX): GsCaseItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: GsCaseItem[] = [];
+  for (const r of raw) {
+    let v: unknown = r;
+    if (typeof v === "string") {
+      try {
+        v = JSON.parse(v);
+      } catch {
+        continue;
+      }
+    }
+    if (!v || typeof v !== "object") continue;
+    const o = v as Record<string, unknown>;
+    if (typeof o.m !== "string" || !o.m || typeof o.at !== "number") continue;
+    if (out.some((x) => x.m === o.m)) continue;
+    out.push({ m: o.m, at: o.at });
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 export type GsPrepKind = "マンション" | "戸建" | "土地";
 export const GS_PREP_KINDS: readonly GsPrepKind[] = ["マンション", "戸建", "土地"];
 export interface GsPrep {
@@ -81,6 +123,15 @@ export interface GsPrep {
   remindFails?: number;
   /** 30分の遅れの知らせを出した */
   lateNotified?: boolean;
+  /** 段2e：グループへの依頼カードの messageId（PDF の引用で受付票を決める。push の応答から取れたときだけ） */
+  cardMsgId?: string;
+  /** 段2e：portal に「事例あり」で渡した件数と時刻 */
+  casesHanded?: number;
+  casesHandedAt?: number;
+  /** 段2e：結果を下村さんへ知らせ終えた */
+  casesDone?: boolean;
+  /** 段2e：結果の知らせを試した回数（GS_CASES_PUSH_TRIES まで） */
+  casesPushTries?: number;
 }
 
 /** 段2：「何の依頼？」の8つ（設計 3。並びはこの順。AI の見立ては先頭に出す） */
@@ -246,7 +297,12 @@ function isGsPrep(v: unknown): v is GsPrep {
     Array.isArray(p.lines) && p.lines.every((s) => typeof s === "string") &&
     (p.deadline === undefined || typeof p.deadline === "number") &&
     (p.requestedAt === undefined || typeof p.requestedAt === "number") &&
-    (p.remindFails === undefined || isCount(p.remindFails))
+    (p.remindFails === undefined || isCount(p.remindFails)) &&
+    (p.cardMsgId === undefined || (typeof p.cardMsgId === "string" && p.cardMsgId.length > 0)) &&
+    (p.casesHanded === undefined || isCount(p.casesHanded)) &&
+    (p.casesHandedAt === undefined || typeof p.casesHandedAt === "number") &&
+    (p.casesDone === undefined || typeof p.casesDone === "boolean") &&
+    (p.casesPushTries === undefined || isCount(p.casesPushTries))
   );
 }
 

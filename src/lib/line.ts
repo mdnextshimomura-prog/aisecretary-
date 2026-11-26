@@ -424,3 +424,42 @@ export async function pushMessagesWithRetryKey(
     return null;
   }
 }
+
+/**
+ * pushMessagesWithRetryKey と同じ送り方で、送れたメッセージの ID（応答の sentMessages[].id）も返す（段2e：依頼カードの ID を控える）。
+ * 応答が読めなければ ids は空。状態番号の扱い・ログは pushMessagesWithRetryKey と同じ
+ */
+export async function pushMessagesWithRetryKeyIds(
+  to: string,
+  messages: unknown[],
+  retryKey: string,
+  timeoutMs: number = PUSH_TIMEOUT_MS,
+  fetchImpl: typeof fetch = fetch
+): Promise<{ status: number | null; ids: string[] }> {
+  let res: Response;
+  try {
+    res = await fetchImpl("https://api.line.me/v2/bot/message/push", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${ACCESS_TOKEN}`,
+        "X-Line-Retry-Key": retryKey,
+      },
+      body: JSON.stringify({ to, messages }),
+      signal: AbortSignal.timeout(timeoutMs),
+      cache: "no-store",
+    });
+  } catch (err) {
+    console.error("LINE push（retry key つき）の結果が分からない:", (err as { name?: string })?.name ?? "Error");
+    return { status: null, ids: [] };
+  }
+  if (!res.ok && res.status !== 409) console.error("LINE push（retry key つき）を断られた:", res.status);
+  let ids: string[] = [];
+  try {
+    const b = (await res.json()) as { sentMessages?: Array<{ id?: unknown }> };
+    if (Array.isArray(b?.sentMessages)) ids = b.sentMessages.map((m) => m?.id).filter((x): x is string => typeof x === "string" && x.length > 0);
+  } catch {
+    // 中身が読めない（ids は空のまま）
+  }
+  return { status: res.status, ids };
+}

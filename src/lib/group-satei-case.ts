@@ -231,3 +231,16 @@ export const msgGsRemindFailed = (no: number) =>
   `${R(no)} の事例がまだ届いていないので、グループで山口さんに声をかけようとしましたが、送れませんでした。手で声をかけてください`;
 export const msgGsAlreadyRequested = (no: number) => `山口さんへはもう頼んであります（${R(no)}）`;
 export const MSG_GS_PROPOSAL_STALE = "新しい案が届いています。そちらから選んでください";
+
+// ─── 段2e（計画 2026-11-26-group-satei-2e）：事例の PDF の保存の知らせ（下村さんへ。グループには出さない） ───
+const gsCasesCount = (c: { contract: number; listing: number }) => `成約 ${c.contract}件・売出 ${c.listing}件`;
+export const MSG_GS_CASES_AMBIG = "どの受付のものか決められません。02 に入れてください";
+export const msgGsCasesStarted = (no: number, c: { contract: number; listing: number }, jobNo: number) =>
+  `事例を保存しました（${gsCasesCount(c)}）。下書きを作ります（受付 ${receiptOf(no)}・#J${jobNo}）`;
+export const msgGsCasesNoStart = (no: number, c: { contract: number; listing: number }) =>
+  `事例を保存しました（${gsCasesCount(c)}）。下書きを始められませんでした。案件カードの［査定書を作る］を押してください（受付 ${receiptOf(no)}）`;
+export const msgGsCasesNoAuto = (no: number, c: { contract: number; listing: number }, kind: "戸建" | "土地") =>
+  `事例を保存しました（${gsCasesCount(c)}）。${kind}の下書きは自動で作れません。資料は 01・02 にそろえました（受付 ${receiptOf(no)}）`;
+export const msgGsCasesFailed = (no: number) => `事例の PDF を取り出せませんでした。案件フォルダの 02 に入れてください（受付 ${receiptOf(no)}）`;
+export const msgGsCasesSomeFailed = (n: number) => `取り出せなかった PDF が ${n}件あります。02 に入れてください`;
+export const msgGsCasesLate = (n: number) => `あとから貼られた ${n}件は保存していません。02 に入れてください`;

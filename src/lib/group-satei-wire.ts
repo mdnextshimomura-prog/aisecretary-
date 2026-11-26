@@ -20,11 +20,12 @@ import {
 } from "./group-satei-open";
 import type { GsActionDeps } from "./group-satei-actions";
 import { capByTotalBytes, readGsMaterials, type GsCreate } from "./group-satei-read";
-import { sateiPrepDecide, sateiPrepIntake, sateiPrepNotices, type GsPrepPortal } from "./group-satei-prep-portal";
+import { sateiPrepCases, sateiPrepCasesAck, sateiPrepDecide, sateiPrepIntake, sateiPrepNotices, type GsPrepPortal } from "./group-satei-prep-portal";
+import type { GsMediaDeps } from "./group-satei-media";
 import { gsFixRequest, gsParseFixResult } from "./group-satei-case";
 import { handleGsFixText, markGsCasePdf, sweepGsStage2, type GsFixDeps } from "./group-satei-propose";
 import { SATEI_PORTAL_TIMEOUT_MS, sateiPortalConfig } from "./satei-portal";
-import { pushMessagesWithRetryKey, replyTextAndCard, sendLineMessage } from "./line";
+import { pushMessagesWithRetryKey, pushMessagesWithRetryKeyIds, replyTextAndCard, sendLineMessage } from "./line";
 import { loadMembers } from "./members";
 import { normNotionId } from "./satei-deal";
 import { uuidv5 } from "./satei-notify";
@@ -44,7 +45,7 @@ const MAX_BYTES = 3.5 * 1024 * 1024;
 let crmClient: ReturnType<typeof makeSateiNotion> | null = null;
 const crm = () => (crmClient ??= makeSateiNotion());
 
-export type GroupSateiKv = GsRereadKv;
+export type GroupSateiKv = GsRereadKv & { rpushCap(key: string, value: unknown, max: number, ex: number): Promise<void> };
 
 export function groupSateiKv(): GroupSateiKv | null {
   if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return null;
@@ -76,6 +77,12 @@ export function groupSateiKv(): GroupSateiKv | null {
     },
     // JSON の文字列のまま返ることがあるが、group-satei-open.ts の asMedia が文字列も読む
     lrange: (k) => kv.lrange(k, 0, -1),
+    // 段2e：末尾に足し、先頭から max 件を残し、期限を付け直す（事例の PDF の控え。結びついた順を保つ）
+    rpushCap: async (k, v, max, ex) => {
+      await kv.rpush(k, JSON.stringify(v));
+      await kv.ltrim(k, 0, max - 1);
+      await kv.expire(k, ex);
+    },
   };
 }
 
@@ -191,6 +198,7 @@ export function groupSateiActionDeps(): Omit<GsActionDeps, "reserve" | "complete
       (await within(loadActiveDeals(crm()), CRM_TIMEOUT_MS)).map((d) => ({ ...d, id: normNotionId(d.id) })),
     prep: gsPrepPortalReal(),
     push: (to, messages, key) => pushMessagesWithRetryKey(to, messages, uuidv5(key, GS_RETRY_NAMESPACE)),
+    pushIds: (to, messages, key) => pushMessagesWithRetryKeyIds(to, messages, uuidv5(key, GS_RETRY_NAMESPACE)),
     now: () => Date.now(),
   };
 }
@@ -204,6 +212,8 @@ export function gsPrepPortalReal(): GsPrepPortal | null {
     intake: (req) => sateiPrepIntake(req, opts),
     notices: () => sateiPrepNotices(opts),
     decide: (tid, req) => sateiPrepDecide(tid, req, opts),
+    cases: (tid, req) => sateiPrepCases(tid, req, opts),
+    casesAck: (tid) => sateiPrepCasesAck(tid, opts),
   };
 }
 
@@ -228,7 +238,9 @@ export async function recordGroupSateiMediaEvent(m: {
     await within(recordGroupSateiMedia(row, m.groupId as string, store, log), MEDIA_KV_TIMEOUT_MS);
     // 段2d：事例待ちの票があれば、依頼のあとの PDF を控える（リマインドの判定だけ。2d が off なら何もしない）
     if (row.kind === "pdf" && groupSateiPrepOn()) {
-      await within(markGsCasePdf(row, m.groupId as string, { kv: store, log }), MEDIA_KV_TIMEOUT_MS).catch(() => log("[group-satei] cases skip:timeout"));
+      // 段2e：1件の票に決まらない PDF は下村さんへ1回 push するので、待つ上限は控えの3秒より長くする
+      const push = (to: string, messages: unknown[], key: string) => pushMessagesWithRetryKey(to, messages, uuidv5(key, GS_RETRY_NAMESPACE));
+      await within(markGsCasePdf(row, m.groupId as string, { kv: store, push, log }), LATE_KV_TIMEOUT_MS).catch(() => log("[group-satei] cases skip:timeout"));
     }
     const tid = await within(attachLateMedia(row, m.groupId as string, { kv: store, now: () => Date.now(), log }), LATE_KV_TIMEOUT_MS);
     return tid ? { job: runRereadWorker(tid, workerDeps(startedAt)) } : null;
@@ -261,12 +273,15 @@ export async function sweepGroupSateiOnTick(): Promise<void> {
 export async function sweepGroupSateiStage2OnTick(startedAt?: number): Promise<void> {
   try {
     if (!groupSateiPrepOn()) return;
+    const s = sateiActionDeps();
     await sweepGsStage2({
       kv: groupSateiKv(),
       prep: gsPrepPortalReal(),
       push: (to, messages, key) => pushMessagesWithRetryKey(to, messages, uuidv5(key, GS_RETRY_NAMESPACE)),
       now: () => Date.now(),
       startedAt,
+      // 段2e：事例を保存したマンションの下書きの受付（段1の［案件を選ぶ］と同じ口）
+      satei: { dealsDbId: s.dealsDbId, readDeal: (dealId) => within(s.readDeal(dealId), CRM_TIMEOUT_MS), intake: s.intake },
       log,
     });
   } catch {
@@ -362,3 +377,20 @@ export function groupSateiFixDeps(): GsFixDeps {
   };
 }
 export { handleGsFixText };
+
+const MEDIA_CONTENT_TIMEOUT_MS = 20_000;
+
+/** 段2e：事例の PDF の口（/api/satei/media）。LINE の content API を直接呼ぶ（ログを出さない） */
+export function groupSateiMediaDeps(): GsMediaDeps {
+  return {
+    kv: groupSateiKv(),
+    fetchContent: (messageId, signal) =>
+      fetch(`https://api-data.line.me/v2/bot/message/${encodeURIComponent(messageId)}/content`, {
+        headers: { Authorization: `Bearer ${process.env.LINE_CHANNEL_ACCESS_TOKEN ?? ""}` },
+        signal,
+        cache: "no-store",
+      }),
+    timeoutMs: MEDIA_CONTENT_TIMEOUT_MS,
+    log,
+  };
+}

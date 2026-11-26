@@ -5,11 +5,12 @@
  * 例外は投げない。ログは符号・受付番号・J番号だけ。
  */
 import {
-  GS_TICKET_TTL, groupSateiActive, groupSateiOn, groupSateiPrepOn, groupSateiStage2On, gsDecKey, gsEventId, gsOpenKey, gsReqLabel, gsTicketKey,
+  GS_TICKET_TTL, groupSateiActive, groupSateiOn, groupSateiPrepOn, groupSateiStage2On, gsDecKey, gsOpenKey, gsReqLabel, gsTicketKey,
   receiptOf, asTicket,
   type GsAction, type GsEnv, type GsPrepKind, type GsTicket,
 } from "./group-satei-data";
 import type { GsPrepPortal } from "./group-satei-prep-portal";
+import { gsSateiIntake } from "./group-satei-intake";
 import { answerGsProposal, startGsPrep } from "./group-satei-propose";
 import type { GsKv } from "./group-satei-open";
 import {
@@ -38,6 +39,8 @@ export interface GsActionDeps {
   prep?: GsPrepPortal | null;
   /** 段2d：retry key つきの push（HTTP の状態番号。結果不明は null）。key は uuidv5 にする前の名前 */
   push?(to: string, messages: unknown[], key: string): Promise<number | null>;
+  /** 段2e：push と同じで、送れた messageId も返す（依頼カードの ID を受付票に残す）。無ければ push を使う */
+  pushIds?(to: string, messages: unknown[], key: string): Promise<{ status: number | null; ids: string[] }>;
   now?(): number;
 }
 
@@ -114,12 +117,7 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
         : { text: MSG_SATEI_DEAL_NOT_FOUND, code: j.reason, settled: true };
     }
     if (!(await kv.setNx(gsDecKey(a.tid), `gs:${a.dealId}`, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
-    let r: SateiCall<SateiIntakeOk>;
-    try {
-      r = await deps.intake({ eventId: gsEventId(a.tid), dealId: j.deal.id, dealNo: j.deal.dealNo, folderId: j.deal.folderId, dealName: j.deal.name, requestedBy: userId });
-    } catch {
-      r = { kind: "unknown", reason: "exception" };
-    }
+    const r: SateiCall<SateiIntakeOk> = await gsSateiIntake(a.tid, j.deal, userId, deps.intake);
     // ここから先の KV の失敗は返事を変えない（portal の結果のとおりに返す）。ログだけ
     const quiet = (f: () => Promise<void>) => quietKv(f, deps);
     if (r.kind === "ok") {
