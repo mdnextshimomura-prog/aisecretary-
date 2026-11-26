@@ -36,11 +36,11 @@ export function sateiPortalConfig(
   return { baseUrl, token };
 }
 
-type Raw =
+export type Raw =
   | { kind: "http"; status: number; body: Record<string, unknown> }
   | { kind: "unknown"; reason: string };
 
-async function postJson(
+export async function postJson(
   path: string,
   payload: unknown,
   opts: SateiPortalOpts,
@@ -75,7 +75,31 @@ async function postJson(
   return { kind: "http", status: res.status, body };
 }
 
-function classify<T>(
+/** GET（本文なし）。結果の分け方は postJson と同じ */
+export async function getJson(path: string, opts: SateiPortalOpts): Promise<Raw> {
+  let res: Response;
+  try {
+    res = await opts.fetchImpl(`${opts.baseUrl}${path}`, {
+      method: "GET",
+      headers: { "x-job-token": opts.token },
+      signal: AbortSignal.timeout(opts.timeoutMs),
+      cache: "no-store",
+    });
+  } catch (err) {
+    const name = (err as { name?: unknown } | null)?.name;
+    return { kind: "unknown", reason: name === "TimeoutError" ? "timeout" : "network" };
+  }
+  let body: Record<string, unknown> = {};
+  try {
+    const parsed = (await res.json()) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) body = parsed as Record<string, unknown>;
+  } catch {
+    // 中身が読めない（body は {} のまま）
+  }
+  return { kind: "http", status: res.status, body };
+}
+
+export function classify<T>(
   raw: Raw,
   read: (body: Record<string, unknown>) => T | null,
 ): SateiCall<T> {
