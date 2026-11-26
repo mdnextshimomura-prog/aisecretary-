@@ -45,6 +45,8 @@ export interface GsActionDeps {
   push?(to: string, messages: unknown[], key: string): Promise<number | null>;
   /** 段2e：push と同じで、送れた messageId も返す（依頼カードの ID を受付票に残す）。無ければ push を使う */
   pushIds?(to: string, messages: unknown[], key: string): Promise<{ status: number | null; ids: string[] }>;
+  /** 山口さんの候補が2つ以上のとき、依頼のグループにいるか（1件3秒。in/out/unknown）。無ければ確かめられない扱い */
+  groupMember?(groupId: string, userId: string): Promise<"in" | "out" | "unknown">;
   now?(): number;
 }
 

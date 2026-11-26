@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import {
   GS_AMBIG_TTL, GS_CASE_ITEMS_RAW_MAX, GS_CASES_DRAFT_TRIES, GS_CASES_FINISH_MIN_MS, GS_CASES_LATE_MS, GS_CASES_PUSH_TRIES, GS_CASES_QUIET_MS, GS_CASES_TTL, GS_FIX_MAX, GS_FIX_TTL, GS_GROUP_PUSH_MAX, GS_LATE_MS, GS_OK_STALE_MS, GS_PROPOSE_TRIES, GS_REMIND_TRIES, GS_STAGE2_SET, GS_SWEEP_BUDGET_MS, GS_SWEEP_MARGIN_MS, GS_TICKET_TTL, asTicket,
-  asCaseItems, groupSateiPrepOn, gsAmbigKey, gsInfoPrepKey, gsCaseItemsKey, gsCaseStaffId, gsCasesKey, gsDecKey, gsFixKey, gsOkKey, gsOkRetryKey, gsOpenKey, gsRemindKey, gsTicketKey, gsWaitKey, receiptOf,
+  asCaseItems, groupSateiPrepOn, gsAmbigKey, gsInfoPrepKey, gsCaseItemsKey, gsCaseStaffId, gsCaseStaffIds, gsCasesKey, gsDecKey, gsFixKey, gsOkKey, gsOkRetryKey, gsOpenKey, gsRemindKey, gsTicketKey, gsWaitKey, receiptOf,
   type GsAction, type GsCaseItem, type GsMedia, type GsPrepKind, type GsState, type GsTicket,
 } from "./group-satei-data";
 import type { GsActionDeps, GsOutcome, GsPickDeps } from "./group-satei-actions";
@@ -13,7 +13,7 @@ import type { GsKv } from "./group-satei-open";
 import { MSG_GS_BUSY, MSG_GS_NO_FOLDER, msgGsAlready } from "./group-satei-card";
 import {
   gsBuildingOf, gsCaseRequestMessages, gsCleanLines, gsReminderMessages, msgGsPrepFailed, msgGsPrepLate, msgGsRemindFailed, msgGsRemindMe, msgGsRemindUnknown, gsCaseRequestPlain, gsProposalCard, gsPublicPlace, msgGsAlreadyRequested, msgGsCaseRequested,
-  msgGsCaseSendFailed, msgGsFixAsk, msgGsFixDone, msgGsFixFailed, msgGsFixLimit, msgGsFixUnsafe, msgGsPrepRejected, msgGsPrepStarted, msgGsPrepStopped,
+  msgGsCaseSendFailed, msgGsCaseStaffNone, msgGsCaseStaffUnknown, msgGsFixAsk, msgGsFixDone, msgGsFixFailed, msgGsFixLimit, msgGsFixUnsafe, msgGsPrepRejected, msgGsPrepStarted, msgGsPrepStopped,
   msgGsPrepUnknown, MSG_GS_PROPOSAL_STALE,
   msgGsCasesAmbig, msgGsCasesDraftUnknown, msgGsCasesFailed, msgGsCasesNoAuto, msgGsCasesSlow, msgGsCasesUnsaved, msgGsCasesNoStart, msgGsCasesSomeFailed, msgGsCasesStarted,
 } from "./group-satei-case";
@@ -122,6 +122,30 @@ async function mayRetryOk(tid: string, p: NonNullable<GsTicket["prep"]>, now: nu
   return kv.setNx(gsOkRetryKey(tid), 1, GS_TICKET_TTL).catch(() => false);
 }
 
+type StaffPick = { kind: "ok"; id: string; index: number; checked: boolean } | { kind: "none" } | { kind: "unknown" };
+
+/**
+ * 山口さんの候補から、依頼のグループにいる最初の ID を選ぶ。1つだけなら確かめずに使う（今と同じ・API を呼ばない）。
+ * 2つ以上：順に確かめ、in の最初を使う。全部 out → none、in が無く1つでも確かめられなかった → unknown
+ */
+async function pickCaseStaff(ids: string[], groupId: string, deps: GsActionDeps): Promise<StaffPick> {
+  if (ids.length === 1) return { kind: "ok", id: ids[0], index: 0, checked: false };
+  let unknown = false;
+  for (let i = 0; i < ids.length; i++) {
+    let st: "in" | "out" | "unknown" = "unknown";
+    if (deps.groupMember) {
+      try {
+        st = await deps.groupMember(groupId, ids[i]);
+      } catch {
+        st = "unknown";
+      }
+    }
+    if (st === "in") return { kind: "ok", id: ids[i], index: i, checked: true };
+    if (st !== "out") unknown = true;
+  }
+  return unknown ? { kind: "unknown" } : { kind: "none" };
+}
+
 /** ［いいよ］（gy）と［直す］（gf）。版（rev）が今の案と同じときだけ */
 export async function answerGsProposal(
   a: Extract<GsAction, { op: "gy" | "gf" }>,
@@ -146,16 +170,26 @@ export async function answerGsProposal(
     return { text: msgGsFixAsk(no, GS_FIX_MAX - p.fixes), code: `asked ${receiptOf(no)}`, settled: true };
   }
 
-  const staff = gsCaseStaffId(env);
-  if (!staff || !deps.push) return { text: MSG_GS_BUSY, code: "config-missing", settled: false };
+  const staffIds = gsCaseStaffIds(env);
+  if (staffIds.length === 0 || !deps.push) return { text: MSG_GS_BUSY, code: "config-missing", settled: false };
   const now = (deps.now ?? Date.now)();
   const deadline = gsCaseDeadline(now);
   const place = gsPublicPlace(tk.read, p.kind);
   const plain = gsCaseRequestPlain({ no, place, lines: p.lines, deadline });
-  const messages = gsCaseRequestMessages({ staffId: staff, no, place, lines: p.lines, deadline });
   if (!(await kv.setNx(gsOkKey(a.tid), { rev: p.rev, at: now }, GS_TICKET_TTL)) && !(await mayRetryOk(a.tid, p, now, kv))) {
     return { text: msgGsAlreadyRequested(no), code: "already", settled: true };
   }
+  // 送る直前に、候補のうち依頼のグループにいる ID を選ぶ（1つだけなら確かめない）
+  const picked = await pickCaseStaff(staffIds, tk.groupId, deps);
+  if (picked.kind !== "ok") {
+    await closeManual(a.tid, tk, p.rev, deps, kv);
+    return picked.kind === "none"
+      ? { text: msgGsCaseStaffNone(no, plain), code: `staff none ${receiptOf(no)}`, settled: true }
+      : { text: msgGsCaseStaffUnknown(no, plain), code: `staff unknown ${receiptOf(no)}`, settled: true };
+  }
+  const staff = picked.id;
+  if (picked.checked) deps.log(`[group-satei] gy staff picked ${receiptOf(no)} ${picked.index + 1}/${staffIds.length}`);
+  const messages = gsCaseRequestMessages({ staffId: staff, no, place, lines: p.lines, deadline });
   if (!messages) {
     await closeManual(a.tid, tk, p.rev, deps, kv);
     return { text: msgGsCaseSendFailed(no, false, plain), code: `case-request unsafe ${receiptOf(no)}`, settled: true };
@@ -181,7 +215,7 @@ export async function answerGsProposal(
   }
   const next: GsTicket = {
     ...tk, state: "waiting-cases",
-    prep: { ...p, deadline, requestedAt: now, groupPushes: p.groupPushes + 1, ...(cardMsgId ? { cardMsgId } : {}) },
+    prep: { ...p, deadline, requestedAt: now, groupPushes: p.groupPushes + 1, caseStaffId: staff, ...(cardMsgId ? { cardMsgId } : {}) },
   };
   // 受付票の期限は waiting-cases からさらに7日（設計 10。書き直しで7日に付け直す）
   await quiet(() => saveGsTicket(kv, a.tid, next), deps, "prep save-failed");
@@ -470,7 +504,7 @@ async function sweepS2Tickets(deps: GsSweepDeps, kv: SweepKv, env: Record<string
       }
       if (p.deadline && deps.now() >= p.deadline) {
         if (!go()) break;
-        await remind(tid, tk, to, staff, deps, kv);
+        await remind(tid, tk, to, tk.prep!.caseStaffId ?? staff, deps, kv);
       }
     }
     if (handed.length > 0 && !to) deps.log("[group-satei] cases skip:no-target");

@@ -228,6 +228,10 @@ export const msgGsCaseRequested = (no: number, label: string) =>
   `山口さんに頼みました（${R(no)}・期日 ${label}）。PDF が貼られたら、案件フォルダの 02 に入れて［査定書を作る］を押してください（自動の保存は次の段）`;
 export const msgGsCaseSendFailed = (no: number, unknown: boolean, plain: string) =>
   `${unknown ? "山口さんへの依頼を送れたか確かめられませんでした。グループを見て、届いていなければ" : "山口さんへの依頼を送れませんでした。"}手で頼んでください（${R(no)}）\n\n${plain}`;
+export const msgGsCaseStaffNone = (no: number, plain: string) =>
+  `山口さんがこの依頼のグループにいないようです。手で頼んでください（${R(no)}）\n\n${plain}`;
+export const msgGsCaseStaffUnknown = (no: number, plain: string) =>
+  `山口さんがグループにいるか確かめられませんでした。手で頼んでください（${R(no)}）\n\n${plain}`;
 export const msgGsFixAsk = (no: number, left: number) =>
   `直すところを1通で送ってください（喋ったままで大丈夫です）。30分以内・あと${left}回まで（${R(no)}）`;
 export const msgGsFixLimit = (no: number) => `直すのは2回までです。山口さんへは手で頼んでください（${R(no)}）`;

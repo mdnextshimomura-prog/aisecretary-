@@ -22,6 +22,7 @@ import type { GsActionDeps } from "./group-satei-actions";
 import { capByTotalBytes, readGsMaterials, type GsCreate } from "./group-satei-read";
 import { sateiPrepCases, sateiPrepCasesAck, sateiPrepDecide, sateiPrepIntake, sateiPrepNotices, type GsPrepPortal } from "./group-satei-prep-portal";
 import type { GsMediaDeps } from "./group-satei-media";
+import { gsGroupMemberStatus } from "./group-satei-member";
 import { gsFixRequest, gsParseFixResult } from "./group-satei-case";
 import { handleGsFixText, markGsCasePdf, sweepGsStage2, type GsFixDeps } from "./group-satei-propose";
 import { SATEI_PORTAL_TIMEOUT_MS, sateiPortalConfig } from "./satei-portal";
@@ -207,6 +208,7 @@ export function groupSateiActionDeps(): Omit<GsActionDeps, "reserve" | "complete
     prep: gsPrepPortalReal(),
     push: (to, messages, key) => pushMessagesWithRetryKey(to, messages, uuidv5(key, GS_RETRY_NAMESPACE)),
     pushIds: (to, messages, key) => pushMessagesWithRetryKeyIds(to, messages, uuidv5(key, GS_RETRY_NAMESPACE)),
+    groupMember: (groupId, userId) => gsGroupMemberStatus(groupId, userId),
     now: () => Date.now(),
   };
 }

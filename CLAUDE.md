@@ -220,10 +220,11 @@ on のとき、対象グループの画像・ファイルを `gsatei:media:<grou
 - 事例の期日の関数 `src/lib/group-satei-deadline.ts`（17時より前は当日18時、17時以降・火水は次の営業日の18時。土日は営業日。祝日は扱わない）は 2d で使う。まだどこからも呼ばない。
 - （段2b の前半・2026-11-26）`GROUP_SATEI_STAGE2=1` のとき、資料の読み取り（1日20回・1回の呼び出しは同じ）が別の指示文 `GS_READ_PROMPT_V2` で、号室・専有面積・土地面積・建物面積・築年月・間取り・階・総戸数・構造も読み、受付票の `read.facts` に入れる（物件名は段1と同じ「マンション名と号室」）。名前らしい値は捨てる。off なら段1の指示文と形のまま。足りない項目の決まり `src/lib/group-satei-facts.ts`（マンション＝所在・物件名・号室・専有面積・築年月／戸建＝所在・土地面積・建物面積・築年月／土地＝所在・土地面積）は段2b-2 が使う（号室は聞かない）。
 
-（普通のグループの査定依頼・段2d・2026-11-26）`GROUP_SATEI_STAGE2=1` かつ `GROUP_SATEI_CASE_STAFF_ID`（山口さんの LINE userId。`U`＋32桁）のときだけ動く（`groupSateiPrepOn`）。どちらか無ければ 2a のまま。計画 `docs/superpowers/plans/2026-11-26-group-satei-2d.md`。
+（普通のグループの査定依頼・段2d・2026-11-26）`GROUP_SATEI_STAGE2=1` かつ `GROUP_SATEI_CASE_STAFF_ID`（山口さんの LINE userId。`U`＋32桁。会社用・個人用など、カンマ区切りで3つまで。形の違うもの・重なりは捨てる）に正しい ID が1つ以上あるときだけ動く（`groupSateiPrepOn`）。どちらか無ければ 2a のまま。計画 `docs/superpowers/plans/2026-11-26-group-satei-2d.md`。
 - 案件を選ぶ（gs）と、マンション・戸建・土地とも portal の準備（`POST /api/jobs/satei/prep`。portal の `SATEI_PREP`）へ。受付票は `gathering`。portal が `PREP_DISABLED` なら 2a の道（マンションは今の受付）。案件名は portal に渡さない。
 - Mac の査定係（`SATEI_PREP=1`）が案の行を作って portal へ。毎分の見回り（cloud-tick の最後。`sweepGroupSateiStage2OnTick`）が portal の一覧から取り、下村さんへカード（［いいよ］`v1|gy|tid|ver|rev`・［直す］`v1|gf|…`）を push（retry key `prop:<tid>:1`。2回まで）。30分たっても案が無ければ1回だけ知らせる。
 - ［直す］：印 `gsatei:fix:<userId>`（30分）→ 次の1対1の1通を Claude 1回で作り直し、返事でカードを出し直す（push しない）。2回まで。3回目は手で頼む案内。
+- 山口さんの選び方（2026-11-26）：［いいよ］でグループへ送る直前に、候補を順に LINE の `GET /v2/bot/group/{groupId}/member/{userId}`（1件3秒。`src/lib/group-satei-member.ts`。名前は読まない・残さない）で確かめ、200 の最初の ID でメンションする。候補が1つだけなら確かめずに使う（API を呼ばない）。全部 404 → グループへ送らず手作業にし「山口さんがこの依頼のグループにいないようです。手で頼んでください（受付 G7）」＋案の文面、200 が無く1つでも確かめられなかった（5xx・時間切れ・例外）→「山口さんがグループにいるか確かめられませんでした。手で頼んでください（受付 G7）」＋案の文面。選んだ ID は受付票の `prep.caseStaffId` に残し、催促も同じ ID でメンションする（無い古い票は env の最初の ID）。ログは `gy staff picked G7 2/2`（何番目／候補数。確かめたときだけ）・`gy staff none G7`・`gy staff unknown G7`（userId は出さない）。テスト `tests/group-satei-staff-pick.test.ts`。
 - ［いいよ］：押した時刻で期日（`gsCaseDeadline`）→ 依頼が来たグループへ push 1回（textV2 のメンション＋ボタンなしのカード。retry key `case:<tid>`）→ `waiting-cases`（期限はそこから7日）。portal に `decide ok`。送れなければ手作業にして文面を下村さんへ。
 - グループの文は町名（丁目まで）と建物名だけ。号室・番地・名前・REINS の番号は `gsSafeText` で止める。
 - リマインド：期日を過ぎて、依頼のあとに貼られた PDF の控え（`gsatei:cases:<tid>`）が無ければ、グループに1回だけ「@山口さん 受付 G7 の事例はいかがでしょうか」と下村さんに1行。グループへは1件最大2回。

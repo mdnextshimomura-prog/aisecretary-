@@ -19,11 +19,21 @@ export function groupSateiOn(groupId: string | undefined, env: GsEnv = process.e
 /** 段2（設計 2026-11-25 の 12）。GROUP_SATEI も on のときだけ。off なら段1のまま */
 export const groupSateiStage2On = (env: GsEnv = process.env) => groupSateiActive(env) && env.GROUP_SATEI_STAGE2 === "1";
 
-/** 段2d：山口さん（事例を取る係）の LINE userId（env GROUP_SATEI_CASE_STAFF_ID。1人）。形が違えば null（＝2d は動かない） */
-const LINE_USER_RE = /^U[0-9a-f]{32}$/;
+/** 段2d：山口さん（事例を取る係）の LINE userId の候補（env GROUP_SATEI_CASE_STAFF_ID。カンマ区切りで3つまで。形の違うもの・重なりは捨てる） */
+export const LINE_USER_RE = /^U[0-9a-f]{32}$/;
+export const GS_CASE_STAFF_MAX = 3;
+export function gsCaseStaffIds(env: GsEnv = process.env): string[] {
+  const out: string[] = [];
+  for (const raw of (env.GROUP_SATEI_CASE_STAFF_ID ?? "").split(",")) {
+    const v = raw.trim();
+    if (LINE_USER_RE.test(v) && !out.includes(v)) out.push(v);
+    if (out.length >= GS_CASE_STAFF_MAX) break;
+  }
+  return out;
+}
+/** 候補の最初の1つ（無ければ null＝2d は動かない） */
 export function gsCaseStaffId(env: GsEnv = process.env): string | null {
-  const v = (env.GROUP_SATEI_CASE_STAFF_ID ?? "").trim();
-  return LINE_USER_RE.test(v) ? v : null;
+  return gsCaseStaffIds(env)[0] ?? null;
 }
 /** 段2d が動くか（計画 2026-11-26-group-satei-2d の D6）。off なら 2a のまま */
 export const groupSateiPrepOn = (env: GsEnv = process.env) => groupSateiStage2On(env) && gsCaseStaffId(env) !== null;
@@ -150,6 +160,8 @@ export interface GsPrep {
   remindFails?: number;
   /** 30分の遅れの知らせを出した */
   lateNotified?: boolean;
+  /** ［いいよ］で依頼のグループへメンションした山口さんの userId（候補のうちグループにいたもの。催促も同じ ID で） */
+  caseStaffId?: string;
   /** 段2e：グループへの依頼カードの messageId（PDF の引用で受付票を決める。push の応答から取れたときだけ） */
   cardMsgId?: string;
   /** 段2e：portal に「事例あり」で渡した件数と時刻 */
@@ -380,6 +392,7 @@ function isGsPrep(v: unknown): v is GsPrep {
     (p.deadline === undefined || typeof p.deadline === "number") &&
     (p.requestedAt === undefined || typeof p.requestedAt === "number") &&
     (p.remindFails === undefined || isCount(p.remindFails)) &&
+    (p.caseStaffId === undefined || (typeof p.caseStaffId === "string" && LINE_USER_RE.test(p.caseStaffId))) &&
     (p.cardMsgId === undefined || (typeof p.cardMsgId === "string" && p.cardMsgId.length > 0)) &&
     (p.casesHanded === undefined || isCount(p.casesHanded)) &&
     (p.casesHandedAt === undefined || typeof p.casesHandedAt === "number") &&
