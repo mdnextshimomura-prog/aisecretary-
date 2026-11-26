@@ -12,7 +12,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { kv } from "@vercel/kv";
 import { parseTaskFromMessage, type TaskAttachment } from "./claude";
-import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiActive, groupSateiOn, ticketIdOf } from "./group-satei-data";
+import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiActive, groupSateiOn, groupSateiStage2On, ticketIdOf } from "./group-satei-data";
 import { gsEntryAOk, gsEntryBGate, gsMediaRow, looksLikeSateiWords } from "./group-satei-gate";
 import {
   attachLateMedia, openGroupSatei, recordGroupSateiMedia, runRereadWorker, sweepGroupSatei,
@@ -161,7 +161,8 @@ export function groupSateiOpenDeps(today: string): GsOpenDeps {
     ymd: () => ymdJst(Date.now()),
     read: (ids, text) =>
       within(
-        (async () => readGsMaterials(await loadGroupSateiMaterials(ids), text, today, create))(),
+        (async () =>
+          readGsMaterials(await loadGroupSateiMaterials(ids), text, today, create, { stage2: groupSateiStage2On() }))(),
         READ_TIMEOUT_MS,
       ),
     loadDeals: () => loadActiveDeals(crm()),

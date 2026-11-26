@@ -95,12 +95,32 @@ export const GS_KINDS: readonly GsKind[] = ["マンション", "戸建", "土地
 export type GsBasis = "本文" | "登記" | "地図" | "チラシ" | "その他";
 export const GS_BASES: readonly GsBasis[] = ["本文", "登記", "地図", "チラシ", "その他"];
 
+/** 段2b：査定書の表紙・概要に要る項目（同じ1回の読み取りで読む。分からなければ null） */
+export interface GsFacts {
+  /** 号室（物件名とは別に。例 "1203"） */
+  roomNo: string | null;
+  /** 専有面積（㎡） */
+  exclusiveArea: number | null;
+  /** 土地面積（㎡） */
+  landArea: number | null;
+  /** 建物面積（延床・㎡） */
+  buildingArea: number | null;
+  /** 築年月 "YYYY-MM" */
+  builtYm: string | null;
+  layout: string | null;
+  floor: number | null;
+  totalUnits: number | null;
+  structure: string | null;
+}
+
 export interface GsRead {
   address: string | null;
   propertyName: string | null;
   kind: GsKind;
   basis: GsBasis;
   confidence: number;
+  /** 段2b（GROUP_SATEI_STAGE2 on のときだけ読む）。段1の票には無い */
+  facts?: GsFacts;
 }
 
 /** グループ単位の控えの1行（ファイル名は持たない） */
