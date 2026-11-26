@@ -210,3 +210,11 @@ on のとき、対象グループの画像・ファイルを `gsatei:media:<grou
   - 掃除：毎分の見回り（`/api/obi/cloud-tick`）の最後に `sweepGroupSatei`。前段が30秒未満のときだけ、`gsatei:pending` から「asking・未決定・pushed でない・係の印なし・読み直す時刻か依頼から3分」の票を1件、AI を呼ばずに知らせる（同じ版の retry key）。
   - ログは `[group-satei] ticket G7 opened B deferred`・`late-media`・`reread read ok first|v2`・`reread stale`・`reread out-of-time`・`swept` の形（符号だけ）。テスト `tests/group-satei-reread.test.ts`。
   - 画像が続くと、その webhook の応答は係の待ち（最後の資料から1分＋読み取り）のあいだ止まる。LINE の再送は無効なので二重にはならない。
+
+（普通のグループの査定依頼・段2a・2026-11-26）`GROUP_SATEI_STAGE2`（`1` かつ `GROUP_SATEI=1` のときだけ動く。既定 off。off なら段1のカード・ボタン・受付票は1バイトも変わらない）。新しい環境変数はこれだけ。設計 `docs/superpowers/specs/2026-11-25-group-satei-stage2-design.md`、計画 `docs/superpowers/plans/2026-11-26-group-satei-stage2.md`。
+- 下村さんへの知らせのカードの上の段に「何の依頼？」の8つ（［査定］［資料を送る］［書類の作成・チェック］［日程・内見］［物件調査・謄本］［振込・お金］［メール・電話］［その他］）。AI の見立て（今はいつも［査定］）を先頭・色つき。data `v1|gk|<受付票>|<版>|<符号>`（`satei`・`doc`・`check`・`sched`・`survey`・`money`・`mail`・`other`）。押せるのは `TASK_SATEI_USER_IDS` の人だけ。
+- ［査定］は印（`gsatei:dec`）を取らず、受付票に `requestKind: "satei"` を書いて「一覧から選ぶ／案件がまだ無い」のカードを返す（前のカードの候補もそのまま押せる）。案件を選んだ受付票にも `requestKind: "satei"` が残る。
+- ほかの7つは記録だけ：印を `gk:<符号>` で取り、受付票を `manual`（`requestKind` つき）にして「〈種類〉として控えました。中身は手作業でお願いします（受付 G7）」。LINEタスク の `種別の依頼` には書かない（欄が無い・受付票がタスクを指していない）。
+- スイッチ off のあいだに前のカードの gk を押されたら「いまは止めています」だけ（`[group-satei] gk paused stage2`）。
+- ログは `[group-satei] gk kind doc G7`・`gk kind satei G7` の形（符号と受付番号だけ）。
+- 事例の期日の関数 `src/lib/group-satei-deadline.ts`（17時より前は当日18時、17時以降・火水は次の営業日の18時。土日は営業日。祝日は扱わない）は 2d で使う。まだどこからも呼ばない。
