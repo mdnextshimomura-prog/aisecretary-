@@ -16,6 +16,25 @@ export function groupSateiOn(groupId: string | undefined, env: GsEnv = process.e
   return Boolean(groupId) && groupSateiActive(env) && groupSateiGroupIds(env).includes(groupId as string);
 }
 
+/** 段2（設計 2026-11-25 の 12）。GROUP_SATEI も on のときだけ。off なら段1のまま */
+export const groupSateiStage2On = (env: GsEnv = process.env) => groupSateiActive(env) && env.GROUP_SATEI_STAGE2 === "1";
+
+/** 段2：「何の依頼？」の8つ（設計 3。並びはこの順。AI の見立ては先頭に出す） */
+export type GsReqKind = "satei" | "doc" | "check" | "sched" | "survey" | "money" | "mail" | "other";
+export const GS_REQ_KINDS: ReadonlyArray<{ code: GsReqKind; label: string }> = [
+  { code: "satei", label: "査定" },
+  { code: "doc", label: "資料を送る" },
+  { code: "check", label: "書類の作成・チェック" },
+  { code: "sched", label: "日程・内見" },
+  { code: "survey", label: "物件調査・謄本" },
+  { code: "money", label: "振込・お金" },
+  { code: "mail", label: "メール・電話" },
+  { code: "other", label: "その他" },
+];
+export const isGsReqKind = (x: unknown): x is GsReqKind => typeof x === "string" && GS_REQ_KINDS.some((k) => k.code === x);
+export const gsReqLabel = (code: GsReqKind): string => GS_REQ_KINDS.find((k) => k.code === code)?.label ?? "その他";
+export const encodeGsKind = (tid: string, ver: number, code: GsReqKind) => `v1|gk|${tid}|${ver}|${code}`;
+
 export const GS_TICKET_TTL = 7 * 24 * 60 * 60;
 export const GS_MEDIA_TTL = 3 * 60 * 60;
 export const GS_MEDIA_MAX = 30;
@@ -123,6 +142,8 @@ export interface GsTicket {
   rereadAt?: number;
   /** 知らせたあとに読み直した回数 */
   rereads?: number;
+  /** 段2：押された「何の依頼？」の符号（GROUP_SATEI_STAGE2 on のときだけ書く） */
+  requestKind?: GsReqKind;
 }
 
 const STATES: readonly GsState[] = ["asking", "started", "manual", "dismissed"];
@@ -143,6 +164,7 @@ export function asTicket(raw: unknown): GsTicket | null {
   if (typeof r.requesterId !== "string" || typeof r.at !== "number") return null;
   if (!strs(r.triggerMsgIds) || !strs(r.mediaIds) || !STATES.includes(r.state as GsState)) return null;
   if (r.pushed !== undefined && typeof r.pushed !== "boolean") return null;
+  if (r.requestKind !== undefined && !isGsReqKind(r.requestKind)) return null;
   return r as unknown as GsTicket;
 }
 
