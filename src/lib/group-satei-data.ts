@@ -43,6 +43,10 @@ export const gsWaitKey = (groupId: string) => `gsatei:wait:${groupId}`;
 export const gsCasesKey = (tid: string) => `gsatei:cases:${tid}`;
 /** ［いいよ］は受付票ごとに最初の1回だけ */
 export const gsOkKey = (tid: string) => `gsatei:ok:${tid}`;
+/** ［いいよ］の印だけ残って送れていない票の、送り直しの1回（同じ retry key で。LINE が重ねない） */
+export const gsOkRetryKey = (tid: string) => `gsatei:okr:${tid}`;
+/** ［いいよ］の印が残ったまま送れていないとみなすまで */
+export const GS_OK_STALE_MS = 2 * 60 * 1000;
 /** リマインドは受付票ごとに1回だけ */
 export const gsRemindKey = (tid: string) => `gsatei:rem:${tid}`;
 /** ［直す］のあとの次の1通（30分） */

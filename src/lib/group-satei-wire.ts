@@ -21,7 +21,7 @@ import {
 import type { GsActionDeps } from "./group-satei-actions";
 import { capByTotalBytes, readGsMaterials, type GsCreate } from "./group-satei-read";
 import { sateiPrepDecide, sateiPrepIntake, sateiPrepNotices, type GsPrepPortal } from "./group-satei-prep-portal";
-import { gsFixRequest, gsParseFix } from "./group-satei-case";
+import { gsFixRequest, gsParseFixResult } from "./group-satei-case";
 import { handleGsFixText, markGsCasePdf, sweepGsStage2, type GsFixDeps } from "./group-satei-propose";
 import { SATEI_PORTAL_TIMEOUT_MS, sateiPortalConfig } from "./satei-portal";
 import { pushMessagesWithRetryKey, replyTextAndCard, sendLineMessage } from "./line";
@@ -354,7 +354,7 @@ export function groupSateiFixDeps(): GsFixDeps {
   const mark = sateiReasonKv();
   return {
     kv: base && mark ? { ...base, delIfToken: mark.delIfToken } : null,
-    revise: async (lines, text, kind) => gsParseFix(await within(create(gsFixRequest(lines, text, kind)), FIX_TIMEOUT_MS)),
+    revise: async (lines, text, kind) => gsParseFixResult(await within(create(gsFixRequest(lines, text, kind)), FIX_TIMEOUT_MS)),
     reply: (token, text, card) => (card ? replyTextAndCard(token, text, card) : sendLineMessage(token, text)),
     now: () => Date.now(),
     log,

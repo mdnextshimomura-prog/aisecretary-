@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { handleGroupSateiPostback, type GsActionDeps } from "../src/lib/group-satei-actions";
 import {
-  asTicket, GS_STAGE2_SET, gsFixKey, gsOkKey, gsTicketKey, gsWaitKey, parseGsData, ticketIdOf, type GsTicket,
+  asTicket, GS_STAGE2_SET, gsFixKey, gsOkKey, gsOkRetryKey, gsTicketKey, gsWaitKey, parseGsData, ticketIdOf, type GsTicket,
 } from "../src/lib/group-satei-data";
 import { handleGsFixText, type GsFixDeps } from "../src/lib/group-satei-propose";
 
@@ -156,6 +156,54 @@ const fixDeps = (x: ReturnType<typeof mk>, revise: GsFixDeps["revise"]): GsFixDe
     await press(x, `v1|gy|${tid}|1|1`);
     assert.equal(x.replies[0].text, "いまは止めています");
     assert.equal(x.pushes.length, 0);
+  });
+  await t("直しの1通：作り直しに人の名前が入りそう（unsafe）→ 前の案のまま・回数に数えず、そう伝える", async () => {
+    const x = mk();
+    await press(x, `v1|gf|${tid}|1|1`);
+    const got = await handleGsFixText({ userId: SHIMO, text: "田中さんの部屋と同じ階で", replyToken: "r2" }, fixDeps(x, async () => ({ unsafe: true })));
+    assert.equal(got, true);
+    assert.deepEqual([ticket(x).prep!.lines, ticket(x).prep!.rev, ticket(x).prep!.fixes], [LINES, 1, 0]);
+    assert.ok(x.replies[1].text.startsWith("直した案に人の名前や番地のような言葉が入ったので、使わずに前の案のままにしました"));
+    assert.ok(x.logs.includes("[group-satei] fix unsafe G7"));
+  });
+  await t("直しの1通：印を消せなかった（同時の別の1通が先に取った）→ 作り直さず false", async () => {
+    const x = mk();
+    await press(x, `v1|gf|${tid}|1|1`);
+    let called = 0;
+    const d = fixDeps(x, async () => { called++; return ["成約：同じ階"]; });
+    const got = await handleGsFixText({ userId: SHIMO, text: "同じ階で", replyToken: "r2" }, { ...d, kv: { ...x.kv, delIfToken: async () => false } });
+    assert.equal(got, false);
+    assert.equal(called, 0);
+    assert.equal(ticket(x).prep!.rev, 1);
+  });
+  await t("［いいよ］の印だけ残って送れていない（2分より前・グループへ0回）→ 同じ retry key で1回だけ送り直す", async () => {
+    const x = mk();
+    x.m.set(gsOkKey(tid), { rev: 1, at: NOW - 3 * 60_000 });
+    await press(x, `v1|gy|${tid}|1|1`, "e1");
+    assert.equal(x.pushes.length, 1);
+    assert.equal(x.pushes[0].key, `case:${tid}`);
+    assert.equal(ticket(x).state, "waiting-cases");
+    // 送り直しは1回だけ（印の時刻が古いままでも、2回目は「もう頼んであります」）
+    const y = mk();
+    y.m.set(gsOkKey(tid), { rev: 1, at: NOW - 3 * 60_000 });
+    y.m.set(gsOkRetryKey(tid), 1);
+    await press(y, `v1|gy|${tid}|1|1`, "e1");
+    assert.equal(y.pushes.length, 0);
+    assert.equal(y.replies[0].text, "山口さんへはもう頼んであります（受付 G7）");
+  });
+  await t("［いいよ］の印が2分以内・古い形（文字）・グループへ送った記録あり → 送り直さない", async () => {
+    for (const [v, tk] of [[{ rev: 1, at: NOW - 60_000 }, {}], ["1", {}], [{ rev: 1, at: NOW - 3 * 60_000 }, { prep: { ...base.prep!, groupPushes: 1 } }]] as const) {
+      const x = mk({ ticket: tk as Partial<GsTicket> });
+      x.m.set(gsOkKey(tid), v);
+      await press(x, `v1|gy|${tid}|1|1`);
+      assert.equal(x.pushes.length, 0, JSON.stringify(v));
+      assert.equal(x.replies[0].text, "山口さんへはもう頼んであります（受付 G7）");
+    }
+  });
+  await t("［いいよ］の印は版と時刻を持つ", async () => {
+    const x = mk();
+    await press(x, `v1|gy|${tid}|1|1`);
+    assert.deepEqual(x.m.get(gsOkKey(tid)), { rev: 1, at: NOW });
   });
   console.log(`${n} passed`);
 })();

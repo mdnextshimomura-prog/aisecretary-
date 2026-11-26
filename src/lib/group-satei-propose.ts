@@ -4,8 +4,8 @@
  */
 import { randomUUID } from "node:crypto";
 import {
-  GS_CASES_TTL, GS_FIX_MAX, GS_FIX_TTL, GS_GROUP_PUSH_MAX, GS_LATE_MS, GS_PROPOSE_TRIES, GS_STAGE2_SET, GS_TICKET_TTL, asTicket,
-  groupSateiPrepOn, gsCaseStaffId, gsCasesKey, gsDecKey, gsFixKey, gsOkKey, gsOpenKey, gsRemindKey, gsTicketKey, gsWaitKey, receiptOf,
+  GS_CASES_TTL, GS_FIX_MAX, GS_FIX_TTL, GS_GROUP_PUSH_MAX, GS_LATE_MS, GS_OK_STALE_MS, GS_PROPOSE_TRIES, GS_STAGE2_SET, GS_TICKET_TTL, asTicket,
+  groupSateiPrepOn, gsCaseStaffId, gsCasesKey, gsDecKey, gsFixKey, gsOkKey, gsOkRetryKey, gsOpenKey, gsRemindKey, gsTicketKey, gsWaitKey, receiptOf,
   type GsAction, type GsMedia, type GsPrepKind, type GsTicket,
 } from "./group-satei-data";
 import type { GsActionDeps, GsOutcome } from "./group-satei-actions";
@@ -13,7 +13,7 @@ import type { GsKv } from "./group-satei-open";
 import { MSG_GS_BUSY, MSG_GS_NO_FOLDER, msgGsAlready } from "./group-satei-card";
 import {
   gsBuildingOf, gsCaseRequestMessages, gsCleanLines, gsReminderMessages, msgGsPrepFailed, msgGsPrepLate, msgGsRemindMe, gsCaseRequestPlain, gsProposalCard, gsPublicPlace, msgGsAlreadyRequested, msgGsCaseRequested,
-  msgGsCaseSendFailed, msgGsFixAsk, msgGsFixDone, msgGsFixFailed, msgGsFixLimit, msgGsPrepRejected, msgGsPrepStarted, msgGsPrepStopped,
+  msgGsCaseSendFailed, msgGsFixAsk, msgGsFixDone, msgGsFixFailed, msgGsFixLimit, msgGsFixUnsafe, msgGsPrepRejected, msgGsPrepStarted, msgGsPrepStopped,
   msgGsPrepUnknown, MSG_GS_PROPOSAL_STALE,
 } from "./group-satei-case";
 import { gsCaseDeadline, gsDeadlineLabel } from "./group-satei-deadline";
@@ -98,6 +98,18 @@ async function closeManual(tid: string, tk: GsTicket, rev: number, deps: { prep?
   if (deps.prep) await quiet(() => deps.prep!.decide(tid, { decision: "manual", rev }), deps, "prep decide-failed");
 }
 
+/**
+ * ［いいよ］の印が取られたまま送れていない票（印を取ったあと push の前に落ちた）を、1回だけ送り直してよいか。
+ * まだ proposing（呼ぶ側で確かめ済み）・グループへ0回・印が2分より前のときだけ。送り直しは同じ retry key（LINE が重ねない）
+ */
+async function mayRetryOk(tid: string, p: NonNullable<GsTicket["prep"]>, now: number, kv: Kv): Promise<boolean> {
+  if (p.groupPushes > 0 || p.requestedAt !== undefined) return false;
+  const v = await kv.get(gsOkKey(tid)).catch(() => null);
+  const at = v && typeof v === "object" ? (v as { at?: unknown }).at : undefined;
+  if (typeof at !== "number" || now - at < GS_OK_STALE_MS) return false;
+  return kv.setNx(gsOkRetryKey(tid), 1, GS_TICKET_TTL).catch(() => false);
+}
+
 /** ［いいよ］（gy）と［直す］（gf）。版（rev）が今の案と同じときだけ */
 export async function answerGsProposal(
   a: Extract<GsAction, { op: "gy" | "gf" }>,
@@ -129,7 +141,9 @@ export async function answerGsProposal(
   const place = gsPublicPlace(tk.read, p.kind);
   const plain = gsCaseRequestPlain({ no, place, lines: p.lines, deadline });
   const messages = gsCaseRequestMessages({ staffId: staff, no, place, lines: p.lines, deadline });
-  if (!(await kv.setNx(gsOkKey(a.tid), String(p.rev), GS_TICKET_TTL))) return { text: msgGsAlreadyRequested(no), code: "already", settled: true };
+  if (!(await kv.setNx(gsOkKey(a.tid), { rev: p.rev, at: now }, GS_TICKET_TTL)) && !(await mayRetryOk(a.tid, p, now, kv))) {
+    return { text: msgGsAlreadyRequested(no), code: "already", settled: true };
+  }
   if (!messages) {
     await closeManual(a.tid, tk, p.rev, deps, kv);
     return { text: msgGsCaseSendFailed(no, false, plain), code: `case-request unsafe ${receiptOf(no)}`, settled: true };
@@ -158,7 +172,8 @@ export async function answerGsProposal(
 export interface GsFixDeps {
   env?: Record<string, string | undefined>;
   kv: (Kv & { delIfToken(key: string, token: string): Promise<boolean> }) | null;
-  revise(lines: string[], text: string, kind: GsPrepKind): Promise<string[] | null>;
+  /** 作り直した行／{ unsafe: true }＝検査に通らない（人の名前・番地など）／null＝作れなかった */
+  revise(lines: string[], text: string, kind: GsPrepKind): Promise<string[] | { unsafe: true } | null>;
   reply(token: string, text: string, card?: FlexMessage): Promise<unknown>;
   now?(): number;
   log(l: string): void;
@@ -188,7 +203,14 @@ export async function handleGsFixText(m: { userId?: string; groupId?: string; te
   }
   if (!mark || typeof mark.tid !== "string" || typeof mark.rev !== "number" || typeof mark.token !== "string") return false;
   const tid = mark.tid;
-  await quiet(() => kv.delIfToken(key, mark!.token as string), deps, "fix clear-failed");
+  // 印を消せたときだけ受ける（同時の2通目・消せなかったときは作り直さず今の流れへ）
+  let mine = false;
+  try {
+    mine = await kv.delIfToken(key, mark.token);
+  } catch {
+    deps.log("[group-satei] fix clear-failed");
+  }
+  if (!mine) return false;
   const say = async (s: string, card?: FlexMessage) => {
     try {
       await deps.reply(m.replyToken, s, card);
@@ -203,12 +225,19 @@ export async function handleGsFixText(m: { userId?: string; groupId?: string; te
     return true;
   }
   const p = tk.prep;
-  let lines: string[] | null = null;
+  let got: string[] | { unsafe: true } | null = null;
   try {
-    lines = await deps.revise(p.lines, text, p.kind);
+    got = await deps.revise(p.lines, text, p.kind);
   } catch {
-    lines = null;
+    got = null;
   }
+  if (got && !Array.isArray(got)) {
+    // 人の名前・番地が入りそうな作り直しは使わない（前の案のまま・回数に数えない）
+    deps.log(`[group-satei] fix unsafe ${receiptOf(tk.no)}`);
+    await say(msgGsFixUnsafe(tk.no));
+    return true;
+  }
+  const lines = got;
   if (!lines) {
     deps.log(`[group-satei] fix failed ${receiptOf(tk.no)}`);
     await say(msgGsFixFailed(tk.no));
