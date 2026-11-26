@@ -142,7 +142,22 @@ export interface GsPrep {
   casesDraftTries?: number;
   /** 段2e：30分たっても結果が無いことを知らせた */
   casesLateNotified?: boolean;
+  /** 段2f（F4）：結果の知らせの文を作り直すための数（文は入れない）。送る前に書く */
+  casesNote?: GsCasesNote;
+  /** 段2f（F3）：催促のあとの下村さんへの1行がどれだったか（送り直しで文を作り直す） */
+  remindNote?: "sent" | "unknown" | "failed";
 }
+
+/** 段2f（F4）：段2e の結果の知らせの中身（数と下書きの結果の種類だけ） */
+export interface GsCasesNote {
+  contract: number;
+  listing: number;
+  failed: number;
+  unsaved: number;
+  draft: "started" | "manual" | "unknown" | "house" | "land" | "failed";
+  jobNo?: number;
+}
+const GS_CASES_DRAFTS: ReadonlyArray<GsCasesNote["draft"]> = ["started", "manual", "unknown", "house", "land", "failed"];
 
 /** 段2：「何の依頼？」の8つ（設計 3。並びはこの順。AI の見立ては先頭に出す） */
 export type GsReqKind = "satei" | "doc" | "check" | "sched" | "survey" | "money" | "mail" | "other";
@@ -318,7 +333,18 @@ function isGsPrep(v: unknown): v is GsPrep {
     (p.casesDone === undefined || typeof p.casesDone === "boolean") &&
     (p.casesPushTries === undefined || isCount(p.casesPushTries)) &&
     (p.casesDraftTries === undefined || isCount(p.casesDraftTries)) &&
-    (p.casesLateNotified === undefined || typeof p.casesLateNotified === "boolean")
+    (p.casesLateNotified === undefined || typeof p.casesLateNotified === "boolean") &&
+    (p.casesNote === undefined || isCasesNote(p.casesNote)) &&
+    (p.remindNote === undefined || p.remindNote === "sent" || p.remindNote === "unknown" || p.remindNote === "failed")
+  );
+}
+function isCasesNote(v: unknown): v is GsCasesNote {
+  if (!v || typeof v !== "object") return false;
+  const n = v as Record<string, unknown>;
+  return (
+    isCount(n.contract) && isCount(n.listing) && isCount(n.failed) && isCount(n.unsaved) &&
+    GS_CASES_DRAFTS.includes(n.draft as GsCasesNote["draft"]) &&
+    (n.jobNo === undefined || (typeof n.jobNo === "number" && Number.isInteger(n.jobNo) && n.jobNo > 0))
   );
 }
 

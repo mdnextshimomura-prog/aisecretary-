@@ -217,17 +217,23 @@ const text0 = (p: { messages: unknown[] }) => (p.messages[0] as { text: string }
     );
     assert.equal(ticket(x).state, "manual");
   });
-  await t("保存済み・マンション：受付の不明で1回使っても、push は2回まで試す（受付と push は別に数える）", async () => {
+  await t("保存済み・マンション：受付の不明で1回使っても、push は1回。だめなら票を閉じて控えへ（段2f。受付はやり直さない）", async () => {
     const x = mk({ prep: handedPrep, items: three, notices: [SAVED], push: [500, 200] });
     const seq: unknown[] = [{ kind: "unknown", reason: "timeout" }, { kind: "ok", value: { created: true, no: 12, status: "受付" } }, { kind: "ok", value: { created: false, no: 12, status: "受付" } }];
     x.deps.satei!.intake = async (req) => { x.intakes.push(req); return seq.shift() as never; };
     await sweepGsStage2(x.deps);
     assert.equal(x.pushes.length, 0);
     await sweepGsStage2(x.deps);
-    assert.deepEqual([x.pushes.length, ticket(x).state, ticket(x).prep!.casesPushTries], [1, "waiting-cases", 1]);
+    assert.deepEqual([x.pushes.length, ticket(x).state, ticket(x).jobNo, ticket(x).prep!.casesDone, ticket(x).prep!.casesPushTries], [1, "started", 12, true, 1]);
+    assert.deepEqual(ticket(x).prep!.casesNote, { contract: 2, listing: 1, failed: 0, unsaved: 0, draft: "started", jobNo: 12 });
+    assert.equal(x.sets.get("gsatei:outbox")!.has(`cases:${tid}`), true);
+    // 2分たてば控えから同じ文・同じ retry key で（受付は呼ばない）
+    const first = text0(x.pushes[0]);
+    x.deps.now = () => NOW + 2 * 60_000;
     await sweepGsStage2(x.deps);
-    assert.equal(x.pushes.length, 2);
-    assert.deepEqual([ticket(x).state, ticket(x).jobNo, ticket(x).prep!.casesDone], ["started", 12, true]);
+    assert.equal(x.intakes.length, 2);
+    assert.deepEqual([x.pushes.length, x.pushes[1].key, text0(x.pushes[1])], [2, `cases:${tid}`, first]);
+    assert.equal(x.sets.get("gsatei:outbox")!.has(`cases:${tid}`), false);
     assert.ok(x.intakes.every((r) => r.eventId === `gs${tid}`));
   });
   await t("保存済み・戸建／土地：下書きは自動で作れない案内（受付は呼ばない）", async () => {
@@ -321,15 +327,14 @@ const text0 = (p: { messages: unknown[] }) => (p.messages[0] as { text: string }
     await sweepGsStage2(two.deps);
     assert.equal(two.pushes.filter((p) => p.key.startsWith("cases:")).length, 2);
   });
-  await t("知らせの push は2回まで（同じ retry key）。2回だめなら諦めて閉じる（ログは符号だけ）", async () => {
+  await t("知らせの push は1回。だめなら閉じて控えへ（段2f。ログは符号だけ）", async () => {
     const x = mk({ prep: handedPrep, items: three, notices: [SAVED], push: [500, null, 200] });
     await sweepGsStage2(x.deps);
-    assert.equal(ticket(x).state, "waiting-cases");
-    await sweepGsStage2(x.deps);
-    await sweepGsStage2(x.deps);
-    assert.deepEqual(x.pushes.map((p) => p.key), [`cases:${tid}`, `cases:${tid}`]);
     assert.deepEqual([ticket(x).state, ticket(x).prep!.casesDone], ["started", true]);
-    assert.ok(x.logs.includes("[group-satei] cases push-failed G7 gave-up"));
+    await sweepGsStage2(x.deps);
+    assert.deepEqual(x.pushes.map((p) => p.key), [`cases:${tid}`]);
+    assert.ok(x.logs.includes("[group-satei] cases push-failed G7 outbox"));
+    assert.ok(x.logs.includes("[group-satei] outbox cases G7 queued"));
   });
   await t("一覧は1回の見回りで1回だけ（案の配達と結果で共有）", async () => {
     const x = mk({ prep: handedPrep, items: three, notices: [SAVED] });

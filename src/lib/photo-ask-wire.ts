@@ -31,7 +31,7 @@ export async function listGsTicketsReal(groupId: string): Promise<unknown[]> {
   for (const k of [gsOpenKey(groupId), gsWaitKey(groupId), GS_STAGE2_SET]) {
     for (const x of (await kv.smembers<unknown[]>(k)) ?? []) if (typeof x === "string") ids.add(x);
   }
-  const list = [...ids].slice(0, GS_YIELD_SCAN_MAX);
+  const list = Array.from(ids).slice(0, GS_YIELD_SCAN_MAX);
   return Promise.all(list.map((tid) => kv.get(gsTicketKey(tid))));
 }
 // Claude に渡せる添付のサイズ上限（media.ts と同じ考え方）
