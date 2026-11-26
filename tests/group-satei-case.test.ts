@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import {
   gsBuildingOf, gsCaseRequestMessages, gsCleanLines, gsFixRequest, gsParseFix, gsProposalCard, gsPublicPlace, gsReminderMessages,
-  gsSafeText, gsTownOf, msgGsCaseRequested,
+  gsParseFixResult, gsSafeText, gsTownOf, msgGsCaseRequested,
 } from "../src/lib/group-satei-case";
 import { ticketIdOf, type GsRead } from "../src/lib/group-satei-data";
 import { cardActions } from "../src/lib/task-card";
@@ -83,5 +83,31 @@ t("依頼の返事：期日と、2e までのつなぎの一言", () => {
   const s = msgGsCaseRequested(7, "11/26（木）18時");
   assert.ok(s.includes("山口さんに頼みました（受付 G7・期日 11/26（木）18時）"));
   assert.ok(s.includes("02 に入れて［査定書を作る］"));
+});
+t("町名（漢数字の番地）：市区町村＋町名だけ。漢数字の番地・字・都道府県は落とす（京都の通り名は残す）", () => {
+  assert.equal(gsTownOf("兵庫県加古郡稲美町国岡百二十三番地"), "加古郡稲美町国岡");
+  assert.equal(gsTownOf("京都市中京区新町通錦小路上る梅忠町二十番地の五"), "京都市中京区新町通錦小路上る梅忠町");
+  assert.equal(gsTownOf("京都市下京区四条通烏丸東入長刀鉾町"), "京都市下京区四条通烏丸東入長刀鉾町");
+  assert.equal(gsTownOf("京都市中京区烏丸通三条上る場之町六〇二"), "京都市中京区烏丸通三条上る場之町");
+  assert.equal(gsTownOf("加古郡稲美町大字国岡字北山123"), "加古郡稲美町国岡");
+  assert.equal(gsTownOf("大阪府大阪市北区天満二丁目3番4号"), "大阪市北区天満二丁目");
+  assert.equal(gsTownOf("千代田区一番町五番地"), "千代田区一番町");
+  const k = read({ address: "兵庫県加古郡稲美町国岡百二十三番地" });
+  assert.equal(gsPublicPlace(k, "戸建"), "加古郡稲美町国岡");
+});
+t("検査（漢数字・長音のハイフン）：漢数字＋番地・番・号・の＋数字、数字の間の「ー」「－」「―」は通さない", () => {
+  for (const s of ["国岡百二十三番地", "梅忠町二十番地の五", "百二十三番五", "三号", "二十の五", "2ー3ー4", "2－3", "2―3", "二ー三"]) assert.equal(gsSafeText(s), false, s);
+  for (const s of ["京都市下京区四条通烏丸東入長刀鉾町", "第一種住居地域", "一番近い事例から", "千代田区一番町", "成約：同じ小学校区（第三小学校）"]) assert.equal(gsSafeText(s), true, s);
+});
+t("検査（人の名前）：〇〇さん・様・氏・邸・方・ちゃん・くん・殿は通さない。同様・様子・様式・仕様・多様・山口さん・両方は通す", () => {
+  for (const s of ["田中さんの部屋と同じ階", "田中様", "田中氏", "田中邸の隣", "田中方", "ユウキちゃん", "タロウくん", "田中殿"]) assert.equal(gsSafeText(s), false, s);
+  for (const s of ["同様に", "様子を見る", "様式どおり", "仕様が同じ", "多様な", "※築年は資料で確かめられず（幅は山口さんにお任せ）", "成約・売出の両方", "事例の取り方"]) assert.equal(gsSafeText(s), true, s);
+});
+t("作り直し：人の名前が入りそうなら unsafe（前の行のまま）。指示文で人の名前を書かないよう頼む", () => {
+  const req = gsFixRequest(LINES, "田中さんの部屋と同じ階で", "マンション");
+  assert.ok(req.system.includes("直しの言葉に出てきても"));
+  assert.deepEqual(gsParseFixResult({ content: [{ type: "text", text: '{"lines":["成約：田中さんと同じ階"]}' }] }), { unsafe: true });
+  assert.deepEqual(gsParseFixResult({ content: [{ type: "text", text: '{"lines":["成約：同じ階"]}' }] }), ["成約：同じ階"]);
+  assert.equal(gsParseFixResult({ content: [{ type: "text", text: "わかりません" }] }), null);
 });
 console.log(`${n} passed`);

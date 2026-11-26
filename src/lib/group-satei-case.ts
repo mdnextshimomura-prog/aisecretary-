@@ -15,14 +15,35 @@ export const GS_LINE_LEN = 80;
 const PLACE_MAX = 40;
 const BUILDING_MAX = 30;
 
-const NG_RE = /[0-9]+\s*号室|[0-9]+\s*番地|[0-9]+番[0-9]|[0-9]+-[0-9]+|[0-9]{9,}|様/;
-/** 送ってよい文か（全角の数字・ハイフンも NFKC でそろえてから見る） */
+/** 漢数字（番地の「百二十三」「六〇二」など） */
+const KN = "〇一二三四五六七八九十百千";
+const NG_RE = new RegExp(
+  [
+    "[0-9]+\\s*号室", "[0-9]+\\s*番地", "[0-9]+番[0-9]", "[0-9]+-[0-9]+", "[0-9]{9,}",
+    // 漢数字の番地：「百二十三番地」「三号」「百二十三番五」「二十の五」（「一番近い」「一番町」は通す）
+    `[${KN}]+\\s*(?:番地|号|番[${KN}0-9]|の[${KN}0-9])`,
+    // 数字の間の長音・ハイフン（「2ー3」「二ー三」。全角の「－」「―」は下で「-」にそろえる）
+    `[0-9${KN}]\\s*[-ー]\\s*[0-9${KN}]`,
+  ].join("|"),
+);
+/** 人の名前らしい形：漢字・カタカナの後の さん・ちゃん・くん・殿・氏・邸、名字＋方（「田中方」）、様（同様・様子・様式・仕様・多様・模様・様々は通す） */
+const PERSON_RE = new RegExp(
+  [
+    "[一-龥々ァ-ヶー](?:さん|ちゃん|くん|殿|氏(?!名)|邸)",
+    "(?<![同多仕模])様(?![子式々相])",
+    "(?![両片双地仕味夕朝親先後前東西南北上下貴当行裏表])[一-龥々ァ-ヶ]方(?=[、。\\s)）]|$)",
+  ].join("|"),
+);
+/** 人の名前の形でも通す言葉（Mac の案の「幅は山口さんにお任せ」など） */
+const PERSON_OK_RE = /山口さん|皆さん|皆様/g;
+/** 送ってよい文か（全角の数字・ハイフンも NFKC でそろえてから見る）。号室・番地（漢数字も）・長い番号・人の名前は通さない */
 export function gsSafeText(s: string): boolean {
-  return !NG_RE.test(s.normalize("NFKC").replace(/[‐‑‒–—―ー−]/g, (c) => (c === "ー" ? c : "-")));
+  const n = s.normalize("NFKC").replace(/[‐‑‒–—―ー−]/g, (c) => (c === "ー" ? c : "-"));
+  return !NG_RE.test(n) && !PERSON_RE.test(n.replace(PERSON_OK_RE, ""));
 }
 
-/** 案の行をそろえる。形が違う・1行も無い・1つでも検査に通らなければ null */
-export function gsCleanLines(v: unknown): string[] | null {
+/** 案の行の形だけそろえる（検査はしない）。形が違う・1行も無ければ null */
+function tidyLines(v: unknown): string[] | null {
   if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) return null;
   // 頭の全角の空白（「　」で始める条件の行）は残す。半角の空白・改行と、末尾の空白だけ落とす
   const lines = (v as string[])
@@ -30,19 +51,28 @@ export function gsCleanLines(v: unknown): string[] | null {
     .filter((x) => x.trim() !== "")
     .slice(0, GS_LINES_MAX)
     .map((x) => cut(x, GS_LINE_LEN));
-  if (lines.length === 0 || !lines.every(gsSafeText)) return null;
-  return lines;
+  return lines.length === 0 ? null : lines;
 }
 
-/** 所在を町名まで：「丁目」があればそこまで、無ければ最初の数字の前まで（番地・号を落とす） */
+/** 案の行をそろえる。形が違う・1行も無い・1つでも検査に通らなければ null */
+export function gsCleanLines(v: unknown): string[] | null {
+  const lines = tidyLines(v);
+  return lines && lines.every(gsSafeText) ? lines : null;
+}
+
+const PREF_RE = /^(?:東京都|北海道|京都府|大阪府|[^\s]{2,3}県)/;
+/** 町名の後ろで切る所：数字・小字（「字」）・漢数字の番地（「百二十三番地」「六〇二」。「四条通」「一番町」では切らない）・番地・号 */
+const TOWN_CUTS = [/[0-9]/, /字/, new RegExp(`[${KN}]+(?:番地|番(?!町)|号|の|[-ー]|$)`), /番地|号/];
+/** 所在を市区町村＋町名まで：都道府県を落とし、「丁目」があればそこまで、無ければ番地・小字の前まで */
 export function gsTownOf(address: string | null): string | null {
   if (!address) return null;
-  const s = address.normalize("NFKC").replace(/\s+/g, "");
+  const s = address.normalize("NFKC").replace(/\s+/g, "").replace(PREF_RE, "").replace(/大字/g, "");
   const chome = /^(.*?丁目)/.exec(s);
   if (chome) return cut(chome[1], PLACE_MAX);
-  const i = s.search(/[0-9]/);
+  const at = TOWN_CUTS.map((re) => s.search(re)).filter((i) => i >= 0);
+  const i = at.length ? Math.min(...at) : -1;
   const head = (i >= 0 ? s.slice(0, i) : s).replace(/[-‐－ーの]+$/, "");
-  return Array.from(head).length >= 2 ? cut(head, PLACE_MAX) : null;
+  return Array.from(head).length >= 2 && gsSafeText(head) ? cut(head, PLACE_MAX) : null;
 }
 
 /** 物件名から号室を落とした建物名（読み取りの物件名は「マンション名と号室」。R8） */
@@ -137,6 +167,7 @@ const FIX_SYSTEM = [
   "あなたは不動産会社の査定の手伝いです。REINS の事例の取り方の案（行の配列）を、担当者の直しの言葉に合わせて書き直します。",
   '答えは JSON だけ：{"lines":["…","…"]}。行は6行まで、1行80字まで。書き方は今の行にそろえる（「成約：」「売出：」で始める行と、「　」で始める条件の行）。',
   "直しの言葉に無いことは変えない。号室・番地・人の名前・REINS の物件番号は書かない。分からないことを作らない。",
+  "人の名前（「〇〇さん」「〇〇様」など）は、直しの言葉に出てきても書かない（「田中さんの部屋と同じ階」なら「同じ階」のように言い換える）。",
 ].join("\n");
 
 /** ［直す］の作り直し（D3）。Claude 1回 */
@@ -149,16 +180,27 @@ export function gsFixRequest(lines: string[], fixText: string, kind: GsPrepKind)
   };
 }
 
-/** 作り直しの答えを読む。JSON の lines が検査に通るときだけ */
-export function gsParseFix(out: { content: Array<{ type: string; text?: string }> }): string[] | null {
+/**
+ * 作り直しの答えを読む。行の配列＝使える／{ unsafe: true }＝行はあるが検査に通らない（人の名前・番地など。前の行のまま）／null＝読めない
+ */
+export function gsParseFixResult(out: { content: Array<{ type: string; text?: string }> }): string[] | { unsafe: true } | null {
   const raw = out.content.map((c) => (c.type === "text" ? c.text ?? "" : "")).join("");
   const m = /\{[\s\S]*\}/.exec(raw);
   if (!m) return null;
+  let lines: string[] | null;
   try {
-    return gsCleanLines((JSON.parse(m[0]) as { lines?: unknown }).lines);
+    lines = tidyLines((JSON.parse(m[0]) as { lines?: unknown }).lines);
   } catch {
     return null;
   }
+  if (!lines) return null;
+  return lines.every(gsSafeText) ? lines : { unsafe: true };
+}
+
+/** 作り直しの答えを読む。JSON の lines が検査に通るときだけ */
+export function gsParseFix(out: { content: Array<{ type: string; text?: string }> }): string[] | null {
+  const r = gsParseFixResult(out);
+  return Array.isArray(r) ? r : null;
 }
 
 const R = (no: number) => `受付 ${receiptOf(no)}`;
@@ -178,6 +220,8 @@ export const msgGsFixAsk = (no: number, left: number) =>
   `直すところを1通で送ってください（喋ったままで大丈夫です）。30分以内・あと${left}回まで（${R(no)}）`;
 export const msgGsFixLimit = (no: number) => `直すのは2回までです。山口さんへは手で頼んでください（${R(no)}）`;
 export const msgGsFixDone = (no: number, fixes: number) => `直しました（${fixes}回目／2回まで）。これでよければ［いいよ］を押してください（${R(no)}）`;
+export const msgGsFixUnsafe = (no: number) =>
+  `直した案に人の名前や番地のような言葉が入ったので、使わずに前の案のままにしました。名前を出さない言い方で［直す］をもう一度押すか、山口さんへは手で頼んでください（${R(no)}）`;
 export const msgGsFixFailed = (no: number) => `うまく作り直せませんでした。［直す］をもう一度押すか、山口さんへは手で頼んでください（${R(no)}）`;
 export const msgGsRemindMe = (no: number, label: string) =>
   `${R(no)} の事例がまだ届いていないので、グループで山口さんに1回だけ声をかけました（期日 ${label}）`;
