@@ -39,33 +39,63 @@ export const GS_READ_PROMPT_V2 = `あなたは不動産会社の査定の受付�
  "確信度": 0〜1 の数}
 所有者・売主・人の名前は、どの欄にも書かないでください。`;
 
-/** ㎡・階・戸数の数。0 以下・数でない・ばかげて大きい値は null */
-export function numOrNull(x: unknown): number | null {
-  const v = typeof x === "number" ? x : typeof x === "string" ? Number((x.replace(/,/g, "").match(/\d+(?:\.\d+)?/) ?? [""])[0]) : Number.NaN;
-  return Number.isFinite(v) && v > 0 && v < 1_000_000 ? v : null;
+const nfkc = (x: string) => x.normalize("NFKC").replace(/\s+/g, "");
+
+/**
+ * ㎡・階・戸数の数。全角は半角にそろえる。0 以下・数でない・上限以上は null。
+ * 数が2つ以上ある・坪・地下（B・地下・マイナス）は読み違いを避けて null（人に聞き直す）
+ */
+export function numOrNull(x: unknown, max = 100_000): number | null {
+  let v = Number.NaN;
+  if (typeof x === "number") v = x;
+  else if (typeof x === "string") {
+    const t = nfkc(x).replace(/,/g, "").replace(/m2|m²|平米|平方メートル|階建?|戸$|階$/g, "");
+    if (/坪|地下|^B|^-/i.test(t)) return null;
+    const nums = t.match(/\d+(?:\.\d+)?/g) ?? [];
+    if (nums.length !== 1) return null;
+    v = Number(nums[0]);
+  }
+  return Number.isFinite(v) && v > 0 && v < max ? v : null;
 }
-const intOrNull = (x: unknown): number | null => {
-  const v = numOrNull(x);
+const intOrNull = (x: unknown, max: number): number | null => {
+  const v = numOrNull(x, max);
   return v !== null && Number.isInteger(v) ? v : null;
 };
+/** 階（1〜99）・総戸数（1〜4999） */
+export const floorOrNull = (x: unknown) => intOrNull(x, 100);
+export const unitsOrNull = (x: unknown) => intOrNull(x, 5_000);
 
-/** "2005-03"・"2005/3"・"2005年3月" → "2005-03"。読めなければ null */
+const ERA: Record<string, number> = { 令和: 2018, R: 2018, 平成: 1988, H: 1988, 昭和: 1925, S: 1925 };
+
+/** "2005-03"・"2005/3"・"2005年3月"・"平成17年3月"・"H17.3" → "2005-03"。読めなければ null */
 export function normYm(x: unknown): string | null {
   if (typeof x !== "string") return null;
-  const m = x.match(/(\d{4})\s*(?:-|\/|年)\s*(\d{1,2})/);
-  if (!m) return null;
-  const y = Number(m[1]);
-  const mo = Number(m[2]);
+  const t = nfkc(x).replace(/元(?=年)/, "1");
+  let y: number;
+  let mo: number;
+  const w = t.match(/(令和|平成|昭和|[RHS])(\d{1,2})(?:年|\.|\/|-)(\d{1,2})/i);
+  if (w) {
+    y = ERA[w[1].length === 1 ? w[1].toUpperCase() : w[1]] + Number(w[2]);
+    mo = Number(w[3]);
+  } else {
+    const m = t.match(/(\d{4})(?:-|\/|年|\.)(\d{1,2})/);
+    if (!m) return null;
+    y = Number(m[1]);
+    mo = Number(m[2]);
+  }
   if (y < 1900 || y > 2100 || mo < 1 || mo > 12) return null;
   return `${y}-${String(mo).padStart(2, "0")}`;
 }
 
-/** 号室："1203"・"1203号室"・"A-101" だけ通す */
+/** 号室："1203"・"1203号室"・"A-101"（全角・空白・「です」も可）。数字を1つ以上含むものだけ */
 export function normRoom(x: unknown): string | null {
   if (typeof x !== "string" && typeof x !== "number") return null;
-  const v = String(x).trim().replace(/号室?$/, "");
-  return /^[0-9A-Za-z-]{1,8}$/.test(v) ? v : null;
+  if (typeof x === "number" && !(Number.isInteger(x) && x > 0)) return null;
+  const v = nfkc(String(x)).replace(/[。.]$/, "").replace(/です$/, "").replace(/号室?$/, "");
+  return /^[0-9A-Za-z-]{1,8}$/.test(v) && /\d/.test(v) ? v : null;
 }
+
+const FACT_FIELD_RE = /"(?:号室|専有面積|土地面積|建物面積|築年月|間取り|階|総戸数|構造)"\s*:\s*(?:"[^"]*"|[^,}"]*)\s*,?/g;
 
 const NAME_RE = /様|邸|さん|氏|所有者|持分|殿|御中|名義|売主|買主|オーナー|夫妻|相続人/;
 
@@ -87,8 +117,8 @@ function parseFacts(o: Record<string, unknown>): GsFacts {
     buildingArea: numOrNull(o["建物面積"]),
     builtYm: normYm(o["築年月"]),
     layout: short(o["間取り"], 20),
-    floor: intOrNull(o["階"]),
-    totalUnits: intOrNull(o["総戸数"]),
+    floor: floorOrNull(o["階"]),
+    totalUnits: unitsOrNull(o["総戸数"]),
     structure: short(o["構造"], 20),
   };
 }
@@ -97,7 +127,15 @@ function parseFacts(o: Record<string, unknown>): GsFacts {
 export function parseGsReadText(text: string, opts: { facts?: boolean } = {}): GsRead {
   const m = text.match(/\{[\s\S]*\}/);
   if (!m) throw new Error("no-json");
-  const o = JSON.parse(m[0]) as Record<string, unknown>;
+  let o: Record<string, unknown>;
+  try {
+    o = JSON.parse(m[0]) as Record<string, unknown>;
+  } catch (e) {
+    // 段2b：新しい欄だけが形を崩した（例 "専有面積": 65.3㎡）なら、その欄を外して段1の欄だけで読む（facts は空）
+    if (!opts.facts) throw e;
+    const stripped = m[0].replace(FACT_FIELD_RE, "").replace(/,\s*\}/g, "}");
+    o = JSON.parse(stripped) as Record<string, unknown>;
+  }
   const c = o["確信度"];
   if (typeof c !== "number" || !Number.isFinite(c) || c < 0 || c > 1) throw new Error("bad-confidence");
   const kind = GS_KINDS.includes(o["種別の見込み"] as GsKind) ? (o["種別の見込み"] as GsKind) : "不明";

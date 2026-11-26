@@ -1,6 +1,6 @@
 /** 段2b：読み取りを広げる（group-satei-read.ts。AI は差し替え） */
 import assert from "node:assert/strict";
-import { GS_READ_PROMPT, GS_READ_PROMPT_V2, normRoom, normYm, numOrNull, parseGsReadText, readGsMaterials } from "../src/lib/group-satei-read";
+import { GS_READ_PROMPT, GS_READ_PROMPT_V2, floorOrNull, normRoom, normYm, numOrNull, parseGsReadText, readGsMaterials } from "../src/lib/group-satei-read";
 
 let n = 0;
 const t = async (name: string, f: () => void | Promise<void>) => { await f(); n++; console.log("ok", name); };
@@ -49,6 +49,37 @@ const V2_ANSWER = JSON.stringify({
     const two = await readGsMaterials([], "査定", "2026-11-26", create as any, { stage2: true });
     assert.equal(sys, GS_READ_PROMPT_V2);
     assert.equal(two.facts?.exclusiveArea, 65.3);
+  });
+  await t("数：全角・㎡はそろえる。坪・数が2つ・地下は null（聞き直す）", () => {
+    assert.equal(numOrNull("６５．３"), 65.3);
+    assert.equal(numOrNull("65．3"), 65.3);
+    assert.equal(numOrNull("65.3m2"), 65.3);
+    assert.equal(numOrNull("20坪"), null);
+    assert.equal(numOrNull("2005年築 65㎡"), null);
+    assert.equal(floorOrNull("B1"), null);
+    assert.equal(floorOrNull("-3"), null);
+    assert.equal(floorOrNull(500), null);
+    assert.equal(floorOrNull("12階"), 12);
+  });
+  await t("号室：数字を含むものだけ。全角・空白・「です」はそろえる", () => {
+    for (const bad of ["null", "none", "abc", -1]) assert.equal(normRoom(bad), null);
+    assert.equal(normRoom("１２０３"), "1203");
+    assert.equal(normRoom("1203 号室"), "1203");
+    assert.equal(normRoom("1203号室です"), "1203");
+  });
+  await t("年月：和暦も読む", () => {
+    assert.equal(normYm("平成17年3月"), "2005-03");
+    assert.equal(normYm("H17.3"), "2005-03");
+    assert.equal(normYm("令和元年5月"), "2019-05");
+    assert.equal(normYm("２００５年３月"), "2005-03");
+  });
+  await t("新しい欄だけ形が崩れても、段1の欄は読める（facts は空）。スイッチ off は今までどおり失敗", () => {
+    const broken = '{"所在":"大阪市北区","物件名":"テスト","種別の見込み":"マンション","根拠":"チラシ","専有面積": 65.3㎡,"階":3,"確信度":0.8}';
+    const r = parseGsReadText(broken, { facts: true });
+    assert.equal(r.address, "大阪市北区");
+    assert.equal(r.kind, "マンション");
+    assert.equal(r.facts?.exclusiveArea, null);
+    assert.throws(() => parseGsReadText(broken));
   });
   console.log(`group-satei-read-v2: ${n} ok`);
 })().catch((e) => { console.error(e); process.exit(1); });
