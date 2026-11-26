@@ -111,10 +111,17 @@ const text0 = (p: { messages: unknown[] }) => (p.messages[0] as { text: string }
     const d = { env: ON, kv: x.kv, push: x.deps.push, log: (l: string) => x.logs.push(l) };
     await markGsCasePdf(pdf("p1"), G, d);
     await markGsCasePdf(pdf("p1"), G, d);
+    // PDF が続いても、同じグループ・同じ日・同じ候補の組なら1回にまとめる
+    await markGsCasePdf(pdf("p2", NOW + 60_000), G, d);
+    await markGsCasePdf(pdf("p3", NOW + 120_000), G, d);
     assert.deepEqual([items(x).length, items(x, tid2).length], [0, 0]);
-    assert.deepEqual(x.pushes.map((p) => [p.to, p.key, text0(p)]), [[SHIMO, "ambig:p1", "どの受付のものか決められません。02 に入れてください"]]);
-    assert.equal(x.m.has(gsAmbigKey("p1")), true);
+    const set = [tid, tid2].sort().join(",");
+    assert.deepEqual(x.pushes.map((p) => [p.to, p.key, text0(p)]), [[SHIMO, `ambig:${G}:2026-11-26:${set}`, "どの受付のものか決められません（受付 G7・G8）。02 に入れてください"]]);
+    assert.equal(x.m.has(gsAmbigKey(G, "2026-11-26", [tid2, tid])), true);
+    // ログ・KV の鍵に messageId を増やさない
+    assert.ok(Array.from(x.m.keys()).every((k) => !/p[123]/.test(k)));
     assert.ok(x.logs.includes("[group-satei] cases ambig 2"));
+    assert.ok(x.logs.every((l) => !/p[123]/.test(l)));
   });
   await t("待ちの票が2件でも、依頼カードの messageId（cardMsgId）を引用した PDF はその票だけに", async () => {
     const x = mk({ prep: { cardMsgId: "card7" } });
@@ -198,14 +205,30 @@ const text0 = (p: { messages: unknown[] }) => (p.messages[0] as { text: string }
     await sweepGsStage2(b.deps);
     assert.deepEqual([b.intakes.length, text0(b.pushes[0]), ticket(b).state], [1, msg, "manual"]);
   });
-  await t("保存済み・マンション：受付の結果不明は次の回にもう1回（同じ eventId）。2回目も不明なら手作業の案内", async () => {
+  await t("保存済み・マンション：受付の結果不明は次の回にもう1回（同じ eventId・casesDraftTries）。2回目も不明なら「確かめられませんでした」", async () => {
     const x = mk({ prep: handedPrep, items: three, notices: [SAVED], intake: { kind: "unknown", reason: "timeout" } });
     await sweepGsStage2(x.deps);
-    assert.deepEqual([x.pushes.length, ticket(x).prep!.casesPushTries], [0, 1]);
+    assert.deepEqual([x.pushes.length, ticket(x).prep!.casesDraftTries, ticket(x).prep!.casesPushTries], [0, 1, undefined]);
     await sweepGsStage2(x.deps);
     assert.equal(x.intakes.length, 2);
-    assert.ok(text0(x.pushes[0]).includes("下書きを始められませんでした"));
+    assert.equal(
+      text0(x.pushes[0]),
+      "事例を保存しました（成約 2件・売出 1件）。下書きを始められたか確かめられませんでした。しばらくして #J の知らせが来なければ、案件カードの［査定書を作る］を押してください（受付 G7）",
+    );
     assert.equal(ticket(x).state, "manual");
+  });
+  await t("保存済み・マンション：受付の不明で1回使っても、push は2回まで試す（受付と push は別に数える）", async () => {
+    const x = mk({ prep: handedPrep, items: three, notices: [SAVED], push: [500, 200] });
+    const seq: unknown[] = [{ kind: "unknown", reason: "timeout" }, { kind: "ok", value: { created: true, no: 12, status: "受付" } }, { kind: "ok", value: { created: false, no: 12, status: "受付" } }];
+    x.deps.satei!.intake = async (req) => { x.intakes.push(req); return seq.shift() as never; };
+    await sweepGsStage2(x.deps);
+    assert.equal(x.pushes.length, 0);
+    await sweepGsStage2(x.deps);
+    assert.deepEqual([x.pushes.length, ticket(x).state, ticket(x).prep!.casesPushTries], [1, "waiting-cases", 1]);
+    await sweepGsStage2(x.deps);
+    assert.equal(x.pushes.length, 2);
+    assert.deepEqual([ticket(x).state, ticket(x).jobNo, ticket(x).prep!.casesDone], ["started", 12, true]);
+    assert.ok(x.intakes.every((r) => r.eventId === `gs${tid}`));
   });
   await t("保存済み・戸建／土地：下書きは自動で作れない案内（受付は呼ばない）", async () => {
     const x = mk({ prep: { ...handedPrep, kind: "戸建" }, items: three, notices: [SAVED] });
@@ -222,7 +245,7 @@ const text0 = (p: { messages: unknown[] }) => (p.messages[0] as { text: string }
     await sweepGsStage2(x.deps);
     assert.equal(
       text0(x.pushes[0]),
-      "事例を保存しました（成約 1件・売出 1件）。土地の下書きは自動で作れません。資料は 01・02 にそろえました（受付 G7）\n取り出せなかった PDF が 1件あります。02 に入れてください\nあとから貼られた 2件は保存していません。02 に入れてください",
+      "事例を保存しました（成約 1件・売出 1件）。土地の下書きは自動で作れません。資料は 01・02 にそろえました（受付 G7）\n取り出せなかった PDF が 1件あります。02 に入れてください\n保存していない PDF が 2件あります。02 に入れてください",
     );
   });
   await t("事例失敗：手作業・「取り出せませんでした」・ack", async () => {
@@ -232,6 +255,71 @@ const text0 = (p: { messages: unknown[] }) => (p.messages[0] as { text: string }
     assert.equal(ticket(x).state, "manual");
     assert.ok(x.calls.includes("ack tid"));
     assert.ok(x.logs.includes("[group-satei] cases failed G7 fetch"));
+  });
+  await t("保存していない PDF の数は portal の casesCount から（PREP_CLOSED で casesHanded が多めでも）", async () => {
+    const x = mk({ prep: { ...handedPrep, kind: "土地" }, items: three, notices: [{ ...SAVED, casesCount: 2, cases: { contract: 2, listing: 0, failed: 0 } }] });
+    await sweepGsStage2(x.deps);
+    assert.equal(text0(x.pushes[0]), "事例を保存しました（成約 2件・売出 0件）。土地の下書きは自動で作れません。資料は 01・02 にそろえました（受付 G7）\n保存していない PDF が 1件あります。02 に入れてください");
+    const f = mk({ prep: handedPrep, items: three, notices: [{ ...SAVED, status: "事例失敗", cases: null, casesFailReason: "fetch", casesCount: 1 }] });
+    await sweepGsStage2(f.deps);
+    assert.equal(text0(f.pushes[0]), "事例の PDF を取り出せませんでした。案件フォルダの 02 に入れてください（受付 G7）\n保存していない PDF が 2件あります。02 に入れてください");
+    // casesCount が null なら casesHanded を使う
+    const n2 = mk({ prep: { ...handedPrep, casesHanded: 2 }, items: three, notices: [{ ...SAVED, status: "事例失敗", cases: null, casesFailReason: "fetch", casesCount: null }] });
+    await sweepGsStage2(n2.deps);
+    assert.ok(text0(n2.pushes[0]).endsWith("保存していない PDF が 1件あります。02 に入れてください"));
+  });
+  const SLOW = "事例の PDF の保存がまだ終わっていません。Mac の様子を見るか、案件フォルダの 02 に入れてください（受付 G7）";
+  await t("渡してから30分たっても結果が無ければ、下村さんへ1回だけ（cases-late:<tid>）。票は閉じない。あとで結果が来れば今の道で閉じる", async () => {
+    const early = mk({ prep: { casesHanded: 3, casesHandedAt: NOW - 29 * 60_000 }, items: three, notices: [] });
+    await sweepGsStage2(early.deps);
+    assert.equal(early.pushes.length, 0);
+    const x = mk({ prep: { casesHanded: 3, casesHandedAt: NOW - 31 * 60_000 }, items: three, notices: [] });
+    await sweepGsStage2(x.deps);
+    await sweepGsStage2(x.deps);
+    assert.deepEqual(x.pushes.map((p) => [p.to, p.key, text0(p)]), [[SHIMO, `cases-late:${tid}`, SLOW]]);
+    assert.deepEqual([ticket(x).state, ticket(x).prep!.casesLateNotified], ["waiting-cases", true]);
+    assert.equal(x.sets.get(GS_STAGE2_SET)!.has(tid), true);
+    assert.ok(x.logs.includes("[group-satei] cases late G7"));
+    // 一覧が取れないあいだも知らせる
+    const lf = mk({ prep: { casesHanded: 3, casesHandedAt: NOW - 31 * 60_000 }, items: three });
+    lf.deps.prep!.notices = async () => ({ kind: "unknown", reason: "timeout" });
+    await sweepGsStage2(lf.deps);
+    assert.deepEqual(lf.pushes.map((p) => p.key), [`cases-late:${tid}`]);
+    // 結果が来たら今の知らせで閉じる
+    const y = mk({ prep: { casesHanded: 3, casesHandedAt: NOW - 31 * 60_000, casesLateNotified: true }, items: three, notices: [SAVED] });
+    await sweepGsStage2(y.deps);
+    assert.deepEqual([y.pushes.map((p) => p.key), ticket(y).state], [[`cases:${tid}`], "started"]);
+  });
+  await t("渡す前の結果不明（hand-unknown）が続く票も、最後の PDF から30分で同じ知らせに乗る", async () => {
+    const x = mk({ items: [{ m: "p1", at: NOW - 40 * 60_000 }, { m: "p2", at: NOW - 31 * 60_000 }], cases: { kind: "unknown", reason: "timeout" } });
+    await sweepGsStage2(x.deps);
+    await sweepGsStage2(x.deps);
+    assert.equal(x.calls.filter((c) => c.startsWith("cases")).length, 2);
+    assert.deepEqual(x.pushes.map((p) => [p.key, text0(p)]), [[`cases-late:${tid}`, SLOW]]);
+    assert.equal(ticket(x).prep!.casesHanded, undefined);
+    // 30分たつ前は知らせない
+    const y = mk({ items: [{ m: "p1", at: NOW - 29 * 60_000 }], cases: { kind: "unknown", reason: "timeout" } });
+    await sweepGsStage2(y.deps);
+    assert.equal(y.pushes.length, 0);
+  });
+  await t("結果の知らせ（finishCases）は、見回りの残りが30秒以上あるときだけ・1回の見回りで1件だけ", async () => {
+    const late = mk({ prep: handedPrep, items: three, notices: [SAVED] });
+    late.deps.startedAt = NOW - 21_000;
+    await sweepGsStage2(late.deps);
+    assert.deepEqual([late.pushes.length, late.intakes.length, ticket(late).state], [0, 0, "waiting-cases"]);
+    const ok = mk({ prep: handedPrep, items: three, notices: [SAVED] });
+    ok.deps.startedAt = NOW - 20_000;
+    await sweepGsStage2(ok.deps);
+    assert.equal(ok.pushes.length, 1);
+    // 2件そろっていても1件だけ
+    const two = mk({ prep: handedPrep, items: three, notices: [SAVED, { ...SAVED, tid: tid2, no: 8 }] });
+    two.m.set(gsTicketKey(tid2), { ...waiting, no: 8, triggerMsgIds: ["m2"], prep: { ...prepW, ...handedPrep } });
+    two.lists.set(gsCaseItemsKey(tid2), three.map((v) => JSON.stringify(v)));
+    two.sets.get(GS_STAGE2_SET)!.add(tid2);
+    await sweepGsStage2(two.deps);
+    assert.equal(two.pushes.filter((p) => p.key.startsWith("cases:")).length, 1);
+    await sweepGsStage2(two.deps);
+    assert.equal(two.pushes.filter((p) => p.key.startsWith("cases:")).length, 2);
   });
   await t("知らせの push は2回まで（同じ retry key）。2回だめなら諦めて閉じる（ログは符号だけ）", async () => {
     const x = mk({ prep: handedPrep, items: three, notices: [SAVED], push: [500, null, 200] });
@@ -347,6 +435,32 @@ const text0 = (p: { messages: unknown[] }) => (p.messages[0] as { text: string }
     assert.equal((await handleGsMedia(H, body(1), mdeps({ res: () => new Response(exact, { status: 200 }) }).deps)).status, 200);
   });
 
+  await t("口：KV の読みは3秒まで（返らなければ 502 UPSTREAM。LINE を呼ばない）", async () => {
+    const x = mdeps();
+    const never = new Promise<never>(() => undefined);
+    const r = await handleGsMedia(H, body(1), { ...x.deps, kv: { get: () => never, lrange: () => never }, kvTimeoutMs: 30 });
+    assert.deepEqual([r, x.fetched.length], [{ status: 502, code: "UPSTREAM" }, 0]);
+    const y = mdeps();
+    const r2 = await handleGsMedia(H, body(1), { ...y.deps, kv: { get: y.deps.kv!.get, lrange: () => never }, kvTimeoutMs: 30 });
+    assert.deepEqual(r2, { status: 502, code: "UPSTREAM" });
+  });
+  await t("口の route：合言葉を確かめてから本文を読む（違えば本文を読まずに 401）", async () => {
+    const { NextRequest } = await import("next/server");
+    const { POST } = await import("../src/app/api/satei/media/route");
+    const saved = process.env.JOB_API_TOKEN;
+    process.env.JOB_API_TOKEN = JOB;
+    try {
+      let read = 0;
+      const req = new NextRequest("https://a.example.test/api/satei/media", { method: "POST", headers: { "x-satei-token": "wrong" }, body: body(1) });
+      const orig = req.text.bind(req);
+      req.text = async () => { read++; return orig(); };
+      const r = await POST(req);
+      assert.deepEqual([r.status, read], [401, 0]);
+    } finally {
+      if (saved === undefined) delete process.env.JOB_API_TOKEN; else process.env.JOB_API_TOKEN = saved;
+    }
+  });
+
   // ─── portal の口 ───
   function fake(status: number, resBody: unknown, calls: Array<{ url: string; init: RequestInit }>): typeof fetch {
     return (async (url: string, init: RequestInit) => { calls.push({ url, init }); return { status, ok: status < 300, json: async () => resBody } as Response; }) as unknown as typeof fetch;
@@ -365,12 +479,14 @@ const text0 = (p: { messages: unknown[] }) => (p.messages[0] as { text: string }
   });
   await t("portal：一覧は事例保存済み・事例失敗の行も読む（cases の形が違う保存済みは捨てる）。相談中の行は段2d と同じ形", async () => {
     const good = { tid, no: 7, status: "相談中", lines: ["a"], areaDone: true, failReason: "", cases: null, casesFailReason: "" };
-    const saved = { tid, no: 7, status: "事例保存済み", lines: [], areaDone: false, failReason: "", cases: { contract: 2, listing: 1, failed: 0 }, casesFailReason: "" };
-    const failed = { ...saved, status: "事例失敗", cases: null, casesFailReason: "timeout" };
-    const r = await sateiPrepNotices(opts(200, { preps: [good, saved, failed, { ...saved, cases: { contract: -1, listing: 0, failed: 0 } }] }, []));
+    const saved = { tid, no: 7, status: "事例保存済み", lines: [], areaDone: false, failReason: "", cases: { contract: 2, listing: 1, failed: 0 }, casesFailReason: "", casesCount: 3 };
+    const failed = { ...saved, status: "事例失敗", cases: null, casesFailReason: "timeout", casesCount: null };
+    const oldRow = { ...failed, casesCount: undefined };
+    const badCount = { ...failed, casesCount: 11 };
+    const r = await sateiPrepNotices(opts(200, { preps: [good, saved, failed, { ...saved, cases: { contract: -1, listing: 0, failed: 0 } }, oldRow, badCount] }, []));
     assert.deepEqual(r, {
       kind: "ok",
-      value: [{ tid, no: 7, status: "相談中", lines: ["a"], areaDone: true, failReason: "" }, saved, failed],
+      value: [{ tid, no: 7, status: "相談中", lines: ["a"], areaDone: true, failReason: "" }, saved, failed, { ...failed }, { ...failed }],
     });
   });
   console.log(`${n} passed`);

@@ -59,8 +59,8 @@ export const gsFixKey = (userId: string) => `gsatei:fix:${userId}`;
 
 /** 段2e（計画 2026-11-26-group-satei-2e）：受付票に結びついた事例の PDF（JSON の配列 [{m: messageId, at}]。結びついた順。14日・10件まで） */
 export const gsCaseItemsKey = (tid: string) => `gsatei:caseitems:${tid}`;
-/** どの受付のものか決められない PDF の知らせは1回だけ（1日） */
-export const gsAmbigKey = (messageId: string) => `gsatei:ambig:${messageId}`;
+/** どの受付のものか決められない PDF の知らせは、グループ・JST の日・候補の受付票の組ごとに1回だけ（1日。messageId は鍵に入れない） */
+export const gsAmbigKey = (groupId: string, day: string, tids: string[]) => `gsatei:ambig:${groupId}:${day}:${[...tids].sort().join(",")}`;
 export const GS_AMBIG_TTL = 24 * 60 * 60;
 /** 1受付票の事例 PDF の上限 */
 export const GS_CASE_ITEMS_MAX = 10;
@@ -72,6 +72,12 @@ export const GS_CASE_PDF_MAX = 4 * 1024 * 1024;
 export const GS_CASES_QUIET_MS = 2 * 60 * 1000;
 /** 事例の結果の知らせの push（retry key cases:<tid>）を試す回数 */
 export const GS_CASES_PUSH_TRIES = 2;
+/** マンションの下書きの受付（結果不明のとき）を試す回数。push の回数とは別に数える */
+export const GS_CASES_DRAFT_TRIES = 2;
+/** 渡してから（渡せていなければ最後の PDF から）これだけ結果が無ければ、下村さんへ1回だけ知らせる */
+export const GS_CASES_LATE_MS = 30 * 60 * 1000;
+/** 結果の知らせ（finishCases）に入るのは、見回りの予算の残りがこれ以上あるときだけ */
+export const GS_CASES_FINISH_MIN_MS = 30_000;
 export interface GsCaseItem {
   m: string;
   at: number;
@@ -132,6 +138,10 @@ export interface GsPrep {
   casesDone?: boolean;
   /** 段2e：結果の知らせを試した回数（GS_CASES_PUSH_TRIES まで） */
   casesPushTries?: number;
+  /** 段2e：下書きの受付が結果不明だった回数（GS_CASES_DRAFT_TRIES まで） */
+  casesDraftTries?: number;
+  /** 段2e：30分たっても結果が無いことを知らせた */
+  casesLateNotified?: boolean;
 }
 
 /** 段2：「何の依頼？」の8つ（設計 3。並びはこの順。AI の見立ては先頭に出す） */
@@ -302,7 +312,9 @@ function isGsPrep(v: unknown): v is GsPrep {
     (p.casesHanded === undefined || isCount(p.casesHanded)) &&
     (p.casesHandedAt === undefined || typeof p.casesHandedAt === "number") &&
     (p.casesDone === undefined || typeof p.casesDone === "boolean") &&
-    (p.casesPushTries === undefined || isCount(p.casesPushTries))
+    (p.casesPushTries === undefined || isCount(p.casesPushTries)) &&
+    (p.casesDraftTries === undefined || isCount(p.casesDraftTries)) &&
+    (p.casesLateNotified === undefined || typeof p.casesLateNotified === "boolean")
   );
 }
 

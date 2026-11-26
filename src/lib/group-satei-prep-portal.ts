@@ -34,6 +34,8 @@ export interface SateiPrepNotice {
   /** 段2e の行（事例保存済み・事例失敗）だけに付ける。相談中・失敗の行は段2d と同じ形のまま */
   cases?: SateiPrepCases | null;
   casesFailReason?: SateiPrepCasesFail;
+  /** 段2e の行だけ：portal が受けた件数（Mac が取り出す数）。古い行・形が違えば null */
+  casesCount?: number | null;
 }
 export type SateiPrepDecideReq = { decision: "ok"; rev: number; lines: string[]; deadline: number } | { decision: "manual"; rev: number };
 
@@ -78,7 +80,9 @@ function asNotice(v: unknown): SateiPrepNotice | null {
   if (r.status === "事例保存済み" && !cases) return null;
   const fr = r.casesFailReason;
   const casesFailReason: SateiPrepCasesFail = fr === "folder" || fr === "fetch" || fr === "internal" || fr === "timeout" ? fr : "";
-  return { ...base, status: r.status, cases, casesFailReason };
+  const cc = r.casesCount;
+  const casesCount = typeof cc === "number" && Number.isInteger(cc) && cc >= 1 && cc <= 10 ? cc : null;
+  return { ...base, status: r.status, cases, casesFailReason, casesCount };
 }
 
 const isCountN = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 10;

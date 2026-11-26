@@ -4,9 +4,9 @@
  */
 import { randomUUID } from "node:crypto";
 import {
-  GS_AMBIG_TTL, GS_CASE_ITEMS_RAW_MAX, GS_CASES_PUSH_TRIES, GS_CASES_QUIET_MS, GS_CASES_TTL, GS_FIX_MAX, GS_FIX_TTL, GS_GROUP_PUSH_MAX, GS_LATE_MS, GS_OK_STALE_MS, GS_PROPOSE_TRIES, GS_REMIND_TRIES, GS_STAGE2_SET, GS_SWEEP_BUDGET_MS, GS_SWEEP_MARGIN_MS, GS_TICKET_TTL, asTicket,
+  GS_AMBIG_TTL, GS_CASE_ITEMS_RAW_MAX, GS_CASES_DRAFT_TRIES, GS_CASES_FINISH_MIN_MS, GS_CASES_LATE_MS, GS_CASES_PUSH_TRIES, GS_CASES_QUIET_MS, GS_CASES_TTL, GS_FIX_MAX, GS_FIX_TTL, GS_GROUP_PUSH_MAX, GS_LATE_MS, GS_OK_STALE_MS, GS_PROPOSE_TRIES, GS_REMIND_TRIES, GS_STAGE2_SET, GS_SWEEP_BUDGET_MS, GS_SWEEP_MARGIN_MS, GS_TICKET_TTL, asTicket,
   asCaseItems, groupSateiPrepOn, gsAmbigKey, gsCaseItemsKey, gsCaseStaffId, gsCasesKey, gsDecKey, gsFixKey, gsOkKey, gsOkRetryKey, gsOpenKey, gsRemindKey, gsTicketKey, gsWaitKey, receiptOf,
-  type GsAction, type GsMedia, type GsPrepKind, type GsState, type GsTicket,
+  type GsAction, type GsCaseItem, type GsMedia, type GsPrepKind, type GsState, type GsTicket,
 } from "./group-satei-data";
 import type { GsActionDeps, GsOutcome } from "./group-satei-actions";
 import type { GsKv } from "./group-satei-open";
@@ -15,7 +15,7 @@ import {
   gsBuildingOf, gsCaseRequestMessages, gsCleanLines, gsReminderMessages, msgGsPrepFailed, msgGsPrepLate, msgGsRemindFailed, msgGsRemindMe, msgGsRemindUnknown, gsCaseRequestPlain, gsProposalCard, gsPublicPlace, msgGsAlreadyRequested, msgGsCaseRequested,
   msgGsCaseSendFailed, msgGsFixAsk, msgGsFixDone, msgGsFixFailed, msgGsFixLimit, msgGsFixUnsafe, msgGsPrepRejected, msgGsPrepStarted, msgGsPrepStopped,
   msgGsPrepUnknown, MSG_GS_PROPOSAL_STALE,
-  MSG_GS_CASES_AMBIG, msgGsCasesFailed, msgGsCasesLate, msgGsCasesNoAuto, msgGsCasesNoStart, msgGsCasesSomeFailed, msgGsCasesStarted,
+  msgGsCasesAmbig, msgGsCasesDraftUnknown, msgGsCasesFailed, msgGsCasesNoAuto, msgGsCasesSlow, msgGsCasesUnsaved, msgGsCasesNoStart, msgGsCasesSomeFailed, msgGsCasesStarted,
 } from "./group-satei-case";
 import { gsSateiIntake } from "./group-satei-intake";
 import { gsCaseDeadline, gsDeadlineLabel } from "./group-satei-deadline";
@@ -413,7 +413,7 @@ export async function sweepGsStage2(deps: GsSweepDeps): Promise<void> {
         }
       }
     }
-    const handed: Array<{ tid: string; tk: GsTicket; seen: number }> = [];
+    const handed: Array<{ tid: string; tk: GsTicket; seen: number; items: GsCaseItem[] }> = [];
     for (const { tid, tk } of live) {
       if (tk.state !== "waiting-cases") continue;
       const p = tk.prep!;
@@ -421,14 +421,20 @@ export async function sweepGsStage2(deps: GsSweepDeps): Promise<void> {
       const raw = await kv.lrange(gsCaseItemsKey(tid));
       const items = asCaseItems(raw);
       if (p.casesHanded !== undefined) {
-        handed.push({ tid, tk, seen: asCaseItems(raw, GS_CASE_ITEMS_RAW_MAX).length });
+        handed.push({ tid, tk, seen: asCaseItems(raw, GS_CASE_ITEMS_RAW_MAX).length, items });
         continue;
       }
       if (items.length > 0) {
         const last = Math.max(...items.map((x) => x.at));
+        let changed = false;
         if (deps.prep?.cases && deps.now() - last >= GS_CASES_QUIET_MS) {
           if (!go()) break;
-          await handCases(tid, tk, items.length, to, deps, kv);
+          changed = await handCases(tid, tk, items.length, to, deps, kv);
+        }
+        // 渡せないまま（結果不明が続く・portal が無い）なら、最後の PDF から30分で下村さんへ1回だけ（H1・M2）
+        if (!changed && to) {
+          if (!go()) break;
+          await casesLate(tid, tk, items, to, deps, kv);
         }
         continue;
       }
@@ -446,10 +452,22 @@ export async function sweepGsStage2(deps: GsSweepDeps): Promise<void> {
       const r = await notices();
       if (!r || r.kind !== "ok") deps.log("[group-satei] cases list-failed");
       const list = r && r.kind === "ok" ? r.value : [];
+      // finishCases は readDeal・受付・push・ack で長くかかるので、残りが厚いときだけ・1回の見回りで1件だけ（M3）
+      let finished = false;
       for (const h of handed) {
         const nt = list.find((x) => x.tid === h.tid && (x.status === "事例保存済み" || x.status === "事例失敗"));
-        if (!nt) continue;
         if (!go()) break;
+        if (!nt) {
+          await casesLate(h.tid, h.tk, h.items, to, deps, kv);
+          continue;
+        }
+        if (finished) continue;
+        if (deps.now() - start > GS_SWEEP_BUDGET_MS - GS_CASES_FINISH_MIN_MS) {
+          deps.log("[group-satei] cases finish-later");
+          finished = true;
+          continue;
+        }
+        finished = true;
         await finishCases(h.tid, h.tk, nt, h.seen, to, deps, kv);
       }
     }
@@ -458,29 +476,47 @@ export async function sweepGsStage2(deps: GsSweepDeps): Promise<void> {
   }
 }
 
-/** 段2e：portal に「事例あり」を渡す。ok・PREP_CLOSED（前の回に渡せていた）は渡したことにし、ほかに断られたら手作業の知らせ */
-async function handCases(tid: string, tk: GsTicket, n: number, to: string | null, deps: GsSweepDeps, kv: SweepKv): Promise<void> {
+/**
+ * 段2e：渡してから（渡せていなければ最後の PDF から）30分たっても portal の結果で閉じていなければ、下村さんへ1回だけ
+ * （retry key cases-late:<tid>、印 prep.casesLateNotified）。票は閉じない（あとで結果が来れば finishCases で閉じる）
+ */
+async function casesLate(tid: string, tk: GsTicket, items: GsCaseItem[], to: string, deps: GsSweepDeps, kv: SweepKv): Promise<void> {
+  const p = tk.prep!;
+  if (p.casesDone || p.casesLateNotified || items.length === 0) return;
+  const since = p.casesHandedAt ?? Math.max(...items.map((x) => x.at));
+  if (deps.now() - since < GS_CASES_LATE_MS) return;
+  const st = await deps.push(to, textMsg(msgGsCasesSlow(tk.no)), `cases-late:${tid}`).catch(() => null);
+  const fresh = asTicket(await kv.get(gsTicketKey(tid)));
+  if (fresh && fresh.state === "waiting-cases" && fresh.prep) {
+    await saveGsTicket(kv, tid, { ...fresh, prep: { ...fresh.prep, casesLateNotified: true } });
+  }
+  deps.log(`[group-satei] cases late ${receiptOf(tk.no)}${sentOk(st) ? "" : " push-failed"}`);
+}
+
+/** 段2e：portal に「事例あり」を渡す。ok・PREP_CLOSED（前の回に渡せていた）は渡したことにし、ほかに断られたら手作業の知らせ。票を書き換えたら true */
+async function handCases(tid: string, tk: GsTicket, n: number, to: string | null, deps: GsSweepDeps, kv: SweepKv): Promise<boolean> {
   const R = receiptOf(tk.no);
   const r = await deps.prep!.cases!(tid, { count: n }).catch(() => ({ kind: "unknown" as const, reason: "exception" }));
   if (r.kind === "unknown") {
     deps.log(`[group-satei] cases hand-unknown ${R}`);
-    return;
+    return false;
   }
   const fresh = asTicket(await kv.get(gsTicketKey(tid)));
-  if (!fresh || fresh.state !== "waiting-cases" || !fresh.prep || fresh.prep.casesHanded !== undefined) return;
+  if (!fresh || fresh.state !== "waiting-cases" || !fresh.prep || fresh.prep.casesHanded !== undefined) return true;
   if (r.kind === "ok" || r.code === "PREP_CLOSED") {
     await saveGsTicket(kv, tid, { ...fresh, prep: { ...fresh.prep, casesHanded: n, casesHandedAt: deps.now() } });
     deps.log(r.kind === "ok" ? `[group-satei] cases handed ${R} ${n}` : `[group-satei] cases closed ${R}`);
-    return;
+    return true;
   }
   // PREP_STALE・404 など：Mac は取り出さない。PDF は人が 02 へ（結果の知らせと同じ文・同じ retry key）
   deps.log(`[group-satei] cases rejected ${R} ${r.code}`);
-  if (!to) return;
+  if (!to) return false;
   const st = await deps.push(to, textMsg(msgGsCasesFailed(tk.no)), `cases:${tid}`).catch(() => null);
   await saveGsTicket(kv, tid, { ...fresh, state: "manual", prep: { ...fresh.prep, casesHanded: n, casesHandedAt: deps.now(), casesDone: true, casesPushTries: 1 } });
   await quiet(() => kv.srem(GS_STAGE2_SET, tid), deps, "cases s2-rem-failed");
   await quiet(() => kv.srem(gsWaitKey(tk.groupId), tid), deps, "cases wait-rem-failed");
   if (!sentOk(st)) deps.log(`[group-satei] cases push-failed ${R}`);
+  return true;
 }
 
 type DraftStart = { kind: "ok"; jobNo: number } | { kind: "no"; code: string } | { kind: "unknown" };
@@ -507,14 +543,16 @@ async function startDraft(tid: string, tk: GsTicket, deps: GsSweepDeps, env: Rec
 
 /**
  * 段2e：portal の結果（事例保存済み・事例失敗）を下村さんへ1通（retry key cases:<tid>。2回まで）。
- * 送れたら（2回だめでも）受付票を閉じ、portal に cases-ack、見回りから外す。seen＝結びついた PDF の数（渡したあとの分も）
+ * 送れたら（2回だめでも）受付票を閉じ、portal に cases-ack、見回りから外す。seen＝結びついた PDF の数（渡したあとの分も）。
+ * 保存していない PDF の数は portal の結果から数える（seen − casesCount。casesCount が null なら casesHanded）。
+ * 下書きの受付の取り直し（casesDraftTries）と push の取り直し（casesPushTries）は別に数える（それぞれ2回まで）
  */
 async function finishCases(tid: string, tk: GsTicket, nt: SateiPrepNotice, seen: number, to: string, deps: GsSweepDeps, kv: SweepKv): Promise<void> {
   const env = deps.env ?? process.env;
   const R = receiptOf(tk.no);
   const p = tk.prep!;
   const tries = (p.casesPushTries ?? 0) + 1;
-  const late = Math.max(0, seen - (p.casesHanded ?? 0));
+  const unsaved = Math.max(0, seen - (nt.casesCount ?? p.casesHanded ?? 0));
   let state: GsState = "manual";
   let jobNo: number | undefined;
   const lines: string[] = [];
@@ -523,19 +561,26 @@ async function finishCases(tid: string, tk: GsTicket, nt: SateiPrepNotice, seen:
     deps.log(`[group-satei] cases saved ${R} ${c.contract}/${c.listing}/${c.failed}`);
     if (p.kind === "マンション") {
       const d = await startDraft(tid, tk, deps, env);
-      if (d.kind === "unknown" && tries < GS_CASES_PUSH_TRIES) {
-        await saveGsTicket(kv, tid, { ...tk, prep: { ...p, casesPushTries: tries } });
-        deps.log(`[group-satei] cases draft-unknown ${R} retry`);
-        return;
+      if (d.kind === "unknown") {
+        const dt = (p.casesDraftTries ?? 0) + 1;
+        if (dt < GS_CASES_DRAFT_TRIES) {
+          await saveGsTicket(kv, tid, { ...tk, prep: { ...p, casesDraftTries: dt } });
+          deps.log(`[group-satei] cases draft-unknown ${R} retry`);
+          return;
+        }
       }
       if (d.kind === "ok") {
         state = "started";
         jobNo = d.jobNo;
         lines.push(msgGsCasesStarted(tk.no, c, d.jobNo));
         deps.log(`[group-satei] cases draft ${R} #J${d.jobNo}`);
+      } else if (d.kind === "unknown") {
+        // 1回目が実は通っていることがある：押す前に #J の知らせを待つよう案内する（二重の下書きを避ける）
+        lines.push(msgGsCasesDraftUnknown(tk.no, c));
+        deps.log(`[group-satei] cases draft-no ${R} unknown`);
       } else {
         lines.push(msgGsCasesNoStart(tk.no, c));
-        deps.log(`[group-satei] cases draft-no ${R} ${d.kind === "no" ? d.code : "unknown"}`);
+        deps.log(`[group-satei] cases draft-no ${R} ${d.code}`);
       }
     } else {
       lines.push(msgGsCasesNoAuto(tk.no, c, p.kind));
@@ -545,7 +590,7 @@ async function finishCases(tid: string, tk: GsTicket, nt: SateiPrepNotice, seen:
     deps.log(`[group-satei] cases failed ${R} ${nt.casesFailReason || "unknown"}`);
     lines.push(msgGsCasesFailed(tk.no));
   }
-  if (late > 0) lines.push(msgGsCasesLate(late));
+  if (unsaved > 0) lines.push(msgGsCasesUnsaved(unsaved));
   const st = await deps.push(to, textMsg(lines.join("\n")), `cases:${tid}`).catch(() => null);
   const fresh = asTicket(await kv.get(gsTicketKey(tid)));
   if (!fresh || fresh.state !== "waiting-cases" || !fresh.prep) return;
@@ -571,7 +616,7 @@ async function finishCases(tid: string, tk: GsTicket, nt: SateiPrepNotice, seen:
  * グループに PDF が貼られたら（段1の控えの道から呼ぶ）、そのグループの事例待ちの票に控える（D8）。
  * 依頼の時刻より後の PDF だけ。待ちの票が2件以上で区別がつかなければ全部に足す（催促しない側）。
  * 段2e：1件の票に決まったとき（E3 の引用か、待ちの票が1件だけ）だけ、その票の gsatei:caseitems に足す（取り出し・保存の対象）。
- * 決まらなければ下村さんへ1回だけ知らせる（E2。gsatei:ambig:<messageId>）
+ * 決まらなければ下村さんへ1回だけ知らせる（E2。gsatei:ambig:<groupId>:<JST の日>:<候補の tid>）
  */
 export async function markGsCasePdf(
   row: GsMedia,
@@ -597,14 +642,17 @@ export async function markGsCasePdf(
       deps.log(`[group-satei] cases marked ${receiptOf(tk.no)} ${count}`);
       cands.push({ tid, tk });
     }
-    await linkCasePdf(row, cands, env, deps, kv);
+    await linkCasePdf(row, groupId, cands, env, deps, kv);
   } catch {
     deps.log("[group-satei] cases skip:exception");
   }
 }
 
+const jstDay = (at: number) => new Date(at + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
 async function linkCasePdf(
   row: GsMedia,
+  groupId: string,
   cands: Array<{ tid: string; tk: GsTicket }>,
   env: Record<string, string | undefined>,
   deps: { push?(to: string, messages: unknown[], key: string): Promise<number | null>; log(l: string): void },
@@ -614,9 +662,12 @@ async function linkCasePdf(
   const byQuote = row.quoted !== undefined ? cands.filter((c) => c.tk.prep?.cardMsgId === row.quoted) : [];
   const one = byQuote.length === 1 ? byQuote[0] : cands.length === 1 ? cands[0] : null;
   if (!one) {
-    if (!(await kv.setNx(gsAmbigKey(row.messageId), 1, GS_AMBIG_TTL))) return;
+    // グループ・JST の日・候補の組で1回にまとめる（PDF ごとに出さない。鍵に messageId を入れない）
+    const key = gsAmbigKey(groupId, jstDay(row.at), cands.map((c) => c.tid));
+    if (!(await kv.setNx(key, 1, GS_AMBIG_TTL))) return;
     const to = sateiNotifyTarget(env);
-    const st = to && deps.push ? await deps.push(to, textMsg(MSG_GS_CASES_AMBIG), `ambig:${row.messageId}`).catch(() => null) : null;
+    const text = msgGsCasesAmbig(cands.map((c) => c.tk.no));
+    const st = to && deps.push ? await deps.push(to, textMsg(text), key.slice("gsatei:".length)).catch(() => null) : null;
     deps.log(`[group-satei] cases ambig ${cands.length}${sentOk(st) ? "" : " push-failed"}`);
     return;
   }

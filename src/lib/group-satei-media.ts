@@ -4,6 +4,7 @@
  * - 入力 {tid, index: 1..10}。groupSateiPrepOn でなければ 503 OFF。受付票が無い・waiting-cases でない・index 番目が無い → 404 NOT_FOUND。
  * - LINE の content API（1件20秒）。404/410 → 410 GONE、4MB 超 → 413 TOO_LARGE（読みながら数えて止める）、先頭が %PDF でない → 415 NOT_PDF、
  *   ほか・時間切れ → 502 UPSTREAM。成功は PDF のバイト。
+ * KV の読みは1回3秒まで（超えたら 502 UPSTREAM）。route は本文を読む前に合言葉を確かめる。
  * ログは受付番号・番号・符号だけ（messageId・ファイル名・中身は出さない）。例外は投げない。
  */
 import { createHmac } from "node:crypto";
@@ -13,6 +14,8 @@ import { asCaseItems, asTicket, GS_CASE_ITEMS_MAX, GS_CASE_PDF_MAX, groupSateiPr
 export const GS_MEDIA_TOKEN_CONTEXT = "satei-media";
 export const GS_MEDIA_KEY_MIN_LENGTH = 32;
 export const GS_MEDIA_TIMEOUT_MS = 20_000;
+/** KV の読み（受付票・控えの行）の上限。LINE の20秒と合わせて Mac の30秒に収める */
+export const GS_MEDIA_KV_TIMEOUT_MS = 3_000;
 
 export function gsMediaToken(jobApiToken: string): string {
   return createHmac("sha256", Buffer.from(jobApiToken, "utf8")).update(GS_MEDIA_TOKEN_CONTEXT, "utf8").digest("hex");
@@ -30,7 +33,15 @@ export interface GsMediaDeps {
   /** LINE の content API を呼ぶ（signal で打ち切る） */
   fetchContent(messageId: string, signal: AbortSignal): Promise<Response>;
   timeoutMs?: number;
+  /** KV の読みの上限（既定 GS_MEDIA_KV_TIMEOUT_MS） */
+  kvTimeoutMs?: number;
   log(l: string): void;
+}
+
+function within<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const t = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error("timeout")), ms); });
+  return Promise.race([p, t]).finally(() => clearTimeout(timer));
 }
 
 export type GsMediaResult = { status: number; code: string } | { status: 200; code: "OK"; pdf: Buffer };
@@ -90,8 +101,9 @@ export async function handleGsMedia(header: string | null, raw: string, deps: Gs
   let tkRaw: unknown;
   let itemsRaw: unknown[];
   try {
-    tkRaw = await deps.kv.get(gsTicketKey(req.tid));
-    itemsRaw = await deps.kv.lrange(gsCaseItemsKey(req.tid));
+    const ms = deps.kvTimeoutMs ?? GS_MEDIA_KV_TIMEOUT_MS;
+    tkRaw = await within(deps.kv.get(gsTicketKey(req.tid)), ms);
+    itemsRaw = await within(deps.kv.lrange(gsCaseItemsKey(req.tid)), ms);
   } catch {
     deps.log("[group-satei] media kv-failed");
     return fail(502, "UPSTREAM");

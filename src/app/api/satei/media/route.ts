@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { handleGsMedia } from "@/lib/group-satei-media";
+import { gsMediaAuthorized, handleGsMedia } from "@/lib/group-satei-media";
 import { groupSateiMediaDeps } from "@/lib/group-satei-wire";
 import { SATEI_TOKEN_HEADER } from "@/lib/satei-notify";
 
@@ -13,11 +13,21 @@ const NO_STORE = { "cache-control": "no-store" };
 const BODY_MAX = 1024;
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const token = req.headers.get(SATEI_TOKEN_HEADER);
+  // 合言葉を確かめてから本文を読む（合言葉の無い大きな POST を読まない）
+  if (!gsMediaAuthorized(token, process.env.JOB_API_TOKEN)) {
+    console.log("[group-satei] media unauthorized");
+    return NextResponse.json({ code: "UNAUTHORIZED" }, { status: 401, headers: NO_STORE });
+  }
+  const len = Number(req.headers.get("content-length") ?? "0");
+  if (Number.isFinite(len) && len > BODY_MAX) {
+    return NextResponse.json({ code: "BAD_REQUEST" }, { status: 400, headers: NO_STORE });
+  }
   const raw = await req.text();
   if (Buffer.byteLength(raw, "utf8") > BODY_MAX) {
     return NextResponse.json({ code: "BAD_REQUEST" }, { status: 400, headers: NO_STORE });
   }
-  const r = await handleGsMedia(req.headers.get(SATEI_TOKEN_HEADER), raw, groupSateiMediaDeps());
+  const r = await handleGsMedia(token, raw, groupSateiMediaDeps());
   if ("pdf" in r) {
     return new NextResponse(new Uint8Array(r.pdf), {
       status: 200,
