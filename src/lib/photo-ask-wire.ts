@@ -13,12 +13,27 @@ import { pushMessagesWithRetryKey } from "./line";
 import { PHOTO_ASK_RESERVE_TTL, type PhotoAskDeps } from "./photo-ask";
 import { uuidv5 } from "./satei-notify";
 import { loadActiveDeals } from "./task-record-wire";
+import { GS_STAGE2_SET, gsOpenKey, gsTicketKey, gsWaitKey } from "./group-satei-data";
+import { GS_YIELD_SCAN_MAX } from "./group-satei-gate";
 
 // X-Line-Retry-Key の uuidv5 の名前空間（固定。変えると送り直しの二重防止が効かなくなる）
 export const PHOTO_ASK_RETRY_NAMESPACE = "7b1e4c2a-5d3f-4a8b-9c6e-0f2d4a6b8c1e";
 const CONTENT_TIMEOUT_MS = 8_000;
 const READ_TIMEOUT_MS = 40_000;
 const DEALS_TIMEOUT_MS = 8_000;
+// 段2f：グループ査定の受付票を読む上限（譲るかの判定。押されたあと gathering 以降の票は open から外れるので、待ち・見回りの集合も見る）
+const GS_TICKETS_TIMEOUT_MS = 3_000;
+
+/** 段2f（F1(b)）：そのグループの開いている票・事例待ちの票と、見回りの票（ほかのグループの分は photo-ask 側で外す） */
+export async function listGsTicketsReal(groupId: string): Promise<unknown[]> {
+  if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return [];
+  const ids = new Set<string>();
+  for (const k of [gsOpenKey(groupId), gsWaitKey(groupId), GS_STAGE2_SET]) {
+    for (const x of (await kv.smembers<unknown[]>(k)) ?? []) if (typeof x === "string") ids.add(x);
+  }
+  const list = [...ids].slice(0, GS_YIELD_SCAN_MAX);
+  return Promise.all(list.map((tid) => kv.get(gsTicketKey(tid))));
+}
 // Claude に渡せる添付のサイズ上限（media.ts と同じ考え方）
 const MAX_BYTES = 3.5 * 1024 * 1024;
 
@@ -98,5 +113,6 @@ export function photoAskDeps(
       return status !== null && ((status >= 200 && status < 300) || status === 409);
     },
     log: (l) => console.log(l),
+    listGsTickets: (groupId) => within(listGsTicketsReal(groupId), GS_TICKETS_TIMEOUT_MS),
   };
 }

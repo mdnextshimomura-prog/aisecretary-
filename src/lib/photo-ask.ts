@@ -18,6 +18,8 @@ import { encodeSateiStart, sateiActive, sateiNotifyTarget } from "./satei-data";
 import { parseAllowedUserIds } from "./webhook-source";
 import { matchDeals, type DealRef } from "./task-record";
 import { POSTBACK_TEXT_MAX, pressedText, type FlexMessage } from "./task-card";
+import { groupSateiOn } from "./group-satei-data";
+import { gsClaimsMessage, gsHasActiveTicket } from "./group-satei-gate";
 
 export type PhotoAskEnv = Record<string, string | undefined>;
 
@@ -128,6 +130,11 @@ export interface PhotoAskDeps {
   /** key は予約の鍵（本物は X-Line-Retry-Key に使う＝同じ知らせを二重に届けない） */
   push(to: string, text: string, card: FlexMessage | undefined, key: string): Promise<boolean>;
   log(line: string): void;
+  /**
+   * 段2f（F1(b)）：このグループの、動いているかもしれない受付票（gsatei:t の値の配列。形はそのまま）。
+   * GROUP_SATEI が on でそのグループが対象のときだけ呼ぶ。無ければ受付票では譲らない
+   */
+  listGsTickets?(groupId: string): Promise<unknown[]>;
 }
 
 const NAME_MAX = 60;
@@ -222,6 +229,24 @@ export async function maybeAskPhotoMention(ev: PhotoAskEvent, deps: PhotoAskDeps
   if (!senderId) {
     deps.log("[photo-ask] skip:no-sender");
     return false;
+  }
+  // 段2f（F1）：グループ査定が受け持つ依頼なら譲る（下村さんへ2通にしない）。予約は取らない。
+  // GROUP_SATEI が off・そのグループが対象外なら何も読まない（今のまま）
+  if (groupSateiOn(groupId, env)) {
+    const botMentioned = Boolean(ev.botUserId && ev.mentionees.some((m) => m.type === "user" && m.userId === ev.botUserId));
+    let yieldTo = gsClaimsMessage({ groupId, senderId, text: ev.text, botMentioned }, env);
+    if (!yieldTo && deps.listGsTickets) {
+      try {
+        yieldTo = gsHasActiveTicket(await deps.listGsTickets(groupId), { groupId, senderId, at: ev.timestamp }, env);
+      } catch {
+        // 読めなければ譲らない（黙るより、2通になりうる側に倒す）
+        deps.log("[photo-ask] gs-check-failed");
+      }
+    }
+    if (yieldTo) {
+      deps.log("[photo-ask] skip:group-satei");
+      return false;
+    }
   }
   let picked: { ids: string[]; quoted: boolean };
   try {
