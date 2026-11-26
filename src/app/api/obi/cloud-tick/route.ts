@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleCloudTick } from "@/lib/obi/cloud-entry";
 import { runDueRemindersOnTick } from "@/lib/remind-due";
-import { sweepGroupSateiOnTick } from "@/lib/group-satei-wire";
+import { sweepGroupSateiOnTick, sweepGroupSateiStage2OnTick } from "@/lib/group-satei-wire";
 
 // 帯替えの完成リンク・差し戻し・失敗の知らせを、クラウドから出す毎分の見回り（設計 2026-10-11 の C1）。
 // 起こすのは portal（Railway の worker が毎分、portal の web を経由して、ここを POST でたたく）。
@@ -27,6 +27,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // 普通のグループの査定依頼の掃除：知らせの出ていない受付票を、読み直さずに知らせる（AI は呼ばない。
     // CRM 8秒＋名前3秒＋送信の程度）。上の処理で 30 秒を使っていたら、この回は飛ばす（次の回に回す）
     if (Date.now() - t0 < 30_000) await sweepGroupSateiOnTick();
+    // 段2d：事例の相談の案の配達・遅れの知らせ・山口さんへのリマインド（groupSateiPrepOn のときだけ。対象の票が無ければ KV を1回読むだけ）。
+    // 前段で 40 秒を使っていたら、この回は飛ばす
+    if (Date.now() - t0 < 40_000) await sweepGroupSateiStage2OnTick();
   }
   return NextResponse.json(r.body, { status: r.status, headers: NO_STORE });
 }

@@ -12,7 +12,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { kv } from "@vercel/kv";
 import { parseTaskFromMessage, type TaskAttachment } from "./claude";
-import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiActive, groupSateiOn, groupSateiStage2On, ticketIdOf } from "./group-satei-data";
+import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiActive, groupSateiOn, groupSateiPrepOn, groupSateiStage2On, ticketIdOf } from "./group-satei-data";
 import { gsEntryAOk, gsEntryBGate, gsMediaRow, looksLikeSateiWords } from "./group-satei-gate";
 import {
   attachLateMedia, openGroupSatei, recordGroupSateiMedia, runRereadWorker, sweepGroupSatei,
@@ -22,7 +22,7 @@ import type { GsActionDeps } from "./group-satei-actions";
 import { capByTotalBytes, readGsMaterials, type GsCreate } from "./group-satei-read";
 import { sateiPrepDecide, sateiPrepIntake, sateiPrepNotices, type GsPrepPortal } from "./group-satei-prep-portal";
 import { gsFixRequest, gsParseFix } from "./group-satei-case";
-import { handleGsFixText, type GsFixDeps } from "./group-satei-propose";
+import { handleGsFixText, markGsCasePdf, sweepGsStage2, type GsFixDeps } from "./group-satei-propose";
 import { SATEI_PORTAL_TIMEOUT_MS, sateiPortalConfig } from "./satei-portal";
 import { pushMessagesWithRetryKey, replyTextAndCard, sendLineMessage } from "./line";
 import { loadMembers } from "./members";
@@ -226,6 +226,10 @@ export async function recordGroupSateiMediaEvent(m: {
     if (!row) return null;
     const store = groupSateiKv();
     await within(recordGroupSateiMedia(row, m.groupId as string, store, log), MEDIA_KV_TIMEOUT_MS);
+    // 段2d：事例待ちの票があれば、依頼のあとの PDF を控える（リマインドの判定だけ。2d が off なら何もしない）
+    if (row.kind === "pdf" && groupSateiPrepOn()) {
+      await within(markGsCasePdf(row, m.groupId as string, { kv: store, log }), MEDIA_KV_TIMEOUT_MS).catch(() => log("[group-satei] cases skip:timeout"));
+    }
     const tid = await within(attachLateMedia(row, m.groupId as string, { kv: store, now: () => Date.now(), log }), LATE_KV_TIMEOUT_MS);
     return tid ? { job: runRereadWorker(tid, workerDeps(startedAt)) } : null;
   } catch {
@@ -250,6 +254,22 @@ export async function sweepGroupSateiOnTick(): Promise<void> {
     await sweepGroupSatei({ ...groupSateiOpenDeps(ymdJst(Date.now())), kv: groupSateiKv() });
   } catch {
     log("[group-satei] sweep skip:tick-exception");
+  }
+}
+
+/** 毎分の見回り（/api/obi/cloud-tick）の段2d：案の配達・失敗・遅れ・リマインド。例外は投げない */
+export async function sweepGroupSateiStage2OnTick(): Promise<void> {
+  try {
+    if (!groupSateiPrepOn()) return;
+    await sweepGsStage2({
+      kv: groupSateiKv(),
+      prep: gsPrepPortalReal(),
+      push: (to, messages, key) => pushMessagesWithRetryKey(to, messages, uuidv5(key, GS_RETRY_NAMESPACE)),
+      now: () => Date.now(),
+      log,
+    });
+  } catch {
+    log("[group-satei] s2-sweep skip:tick-exception");
   }
 }
 

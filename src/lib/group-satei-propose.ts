@@ -4,20 +4,21 @@
  */
 import { randomUUID } from "node:crypto";
 import {
-  GS_CASES_TTL, GS_FIX_MAX, GS_FIX_TTL, GS_STAGE2_SET, GS_TICKET_TTL, asTicket, groupSateiPrepOn, gsCaseStaffId, gsDecKey, gsFixKey,
-  gsOkKey, gsOpenKey, gsTicketKey, gsWaitKey, receiptOf,
-  type GsAction, type GsPrepKind, type GsTicket,
+  GS_CASES_TTL, GS_FIX_MAX, GS_FIX_TTL, GS_GROUP_PUSH_MAX, GS_LATE_MS, GS_PROPOSE_TRIES, GS_STAGE2_SET, GS_TICKET_TTL, asTicket,
+  groupSateiPrepOn, gsCaseStaffId, gsCasesKey, gsDecKey, gsFixKey, gsOkKey, gsOpenKey, gsRemindKey, gsTicketKey, gsWaitKey, receiptOf,
+  type GsAction, type GsMedia, type GsPrepKind, type GsTicket,
 } from "./group-satei-data";
 import type { GsActionDeps, GsOutcome } from "./group-satei-actions";
 import type { GsKv } from "./group-satei-open";
 import { MSG_GS_BUSY, MSG_GS_NO_FOLDER, msgGsAlready } from "./group-satei-card";
 import {
-  gsBuildingOf, gsCaseRequestMessages, gsCaseRequestPlain, gsProposalCard, gsPublicPlace, msgGsAlreadyRequested, msgGsCaseRequested,
+  gsBuildingOf, gsCaseRequestMessages, gsCleanLines, gsReminderMessages, msgGsPrepFailed, msgGsPrepLate, msgGsRemindMe, gsCaseRequestPlain, gsProposalCard, gsPublicPlace, msgGsAlreadyRequested, msgGsCaseRequested,
   msgGsCaseSendFailed, msgGsFixAsk, msgGsFixDone, msgGsFixFailed, msgGsFixLimit, msgGsPrepRejected, msgGsPrepStarted, msgGsPrepStopped,
   msgGsPrepUnknown, MSG_GS_PROPOSAL_STALE,
 } from "./group-satei-case";
 import { gsCaseDeadline, gsDeadlineLabel } from "./group-satei-deadline";
-import { isSateiUser } from "./satei-data";
+import type { GsPrepPortal, SateiPrepNotice } from "./group-satei-prep-portal";
+import { isSateiUser, sateiNotifyTarget } from "./satei-data";
 import { normNotionId, type SateiDeal } from "./satei-deal";
 import { MSG_SATEI_DEAL_NOT_FOUND } from "./satei-text";
 import type { FlexMessage } from "./task-card";
@@ -226,4 +227,135 @@ export async function handleGsFixText(m: { userId?: string; groupId?: string; te
   deps.log(`[group-satei] fix revised ${receiptOf(tk.no)} r${next.prep!.rev}`);
   await say(msgGsFixDone(tk.no, next.prep!.fixes), card);
   return true;
+}
+
+type SweepKv = Kv & { smembers(key: string): Promise<unknown[]> };
+
+export interface GsSweepDeps {
+  env?: Record<string, string | undefined>;
+  kv: SweepKv | null;
+  prep: GsPrepPortal | null;
+  push(to: string, messages: unknown[], key: string): Promise<number | null>;
+  now(): number;
+  log(l: string): void;
+}
+
+const textMsg = (text: string) => [{ type: "text", text }];
+
+async function deliverProposal(tid: string, tk: GsTicket, nt: SateiPrepNotice, to: string, deps: GsSweepDeps, kv: SweepKv): Promise<void> {
+  const p = tk.prep!;
+  const lines = nt.status === "相談中" ? gsCleanLines(nt.lines) : null;
+  if (!lines) {
+    // 失敗・検査に通らない案：下村さんに1回だけ知らせて手作業（グループには何も出さない）
+    const st = await deps.push(to, textMsg(msgGsPrepFailed(tk.no)), `prepfail:${tid}`).catch(() => null);
+    deps.log(`[group-satei] prep failed ${receiptOf(tk.no)}${sentOk(st) ? "" : " push-failed"}`);
+    await closeManual(tid, tk, 0, deps, kv);
+    return;
+  }
+  if (p.tries >= GS_PROPOSE_TRIES) return;
+  const card = gsProposalCard({ tid, ver: tk.ver, no: tk.no, rev: 1, place: gsPublicPlace(tk.read, p.kind), lines, previewDeadline: gsCaseDeadline(deps.now()) });
+  const st = await deps.push(to, [card], `prop:${tid}:1`).catch(() => null);
+  const fresh = asTicket(await kv.get(gsTicketKey(tid)));
+  if (!fresh || fresh.state !== "gathering") return;
+  const next: GsTicket = sentOk(st)
+    ? { ...fresh, state: "proposing", prep: { ...p, rev: 1, lines, sentRev: 1, tries: p.tries + 1 } }
+    : { ...fresh, prep: { ...p, tries: p.tries + 1 } };
+  await saveGsTicket(kv, tid, next);
+  deps.log(`[group-satei] propose ${sentOk(st) ? "sent" : "push-failed"} ${receiptOf(tk.no)} r1`);
+}
+
+async function remind(tid: string, tk: GsTicket, to: string | null, staff: string, deps: GsSweepDeps, kv: SweepKv): Promise<void> {
+  const p = tk.prep!;
+  if ((await kv.smembers(gsCasesKey(tid))).length > 0) {
+    await kv.srem(GS_STAGE2_SET, tid);
+    return;
+  }
+  if (!(await kv.setNx(gsRemindKey(tid), 1, GS_CASES_TTL))) return;
+  const st = await deps.push(tk.groupId, gsReminderMessages(staff, tk.no), `remind:${tid}`).catch(() => null);
+  await saveGsTicket(kv, tid, { ...tk, prep: { ...p, reminded: true, groupPushes: p.groupPushes + 1 } });
+  if (to && p.deadline) await deps.push(to, textMsg(msgGsRemindMe(tk.no, gsDeadlineLabel(p.deadline))), `remind-me:${tid}`).catch(() => null);
+  await kv.srem(GS_STAGE2_SET, tid);
+  deps.log(`[group-satei] remind ${sentOk(st) ? "sent" : "push-failed"} ${receiptOf(tk.no)}`);
+}
+
+/**
+ * 毎分の見回り（D10）：gsatei:s2 の受付票だけを見る。
+ * gathering → portal の一覧から案（相談中）を下村さんへ／失敗なら手作業／30分で遅れの知らせ。
+ * waiting-cases → 期日を過ぎて PDF の控えが無ければ1回だけリマインド。終わった票は集合から外す。例外は投げない
+ */
+export async function sweepGsStage2(deps: GsSweepDeps): Promise<void> {
+  const env = deps.env ?? process.env;
+  if (!groupSateiPrepOn(env) || !deps.kv) return;
+  const kv = deps.kv;
+  try {
+    const tids = (await kv.smembers(GS_STAGE2_SET)).filter((x): x is string => typeof x === "string");
+    if (tids.length === 0) return;
+    const to = sateiNotifyTarget(env);
+    const staff = gsCaseStaffId(env)!;
+    const live: Array<{ tid: string; tk: GsTicket }> = [];
+    for (const tid of tids) {
+      const tk = asTicket(await kv.get(gsTicketKey(tid)));
+      if (!tk || !tk.prep || !["gathering", "proposing", "waiting-cases"].includes(tk.state)) {
+        await kv.srem(GS_STAGE2_SET, tid);
+        continue;
+      }
+      live.push({ tid, tk });
+    }
+    const gathering = live.filter((x) => x.tk.state === "gathering");
+    if (gathering.length > 0 && deps.prep && to) {
+      const r = await deps.prep.notices().catch(() => null);
+      const list = r && r.kind === "ok" ? r.value : [];
+      if (!r || r.kind !== "ok") deps.log("[group-satei] propose list-failed");
+      for (const { tid, tk } of gathering) {
+        const nt = list.find((x) => x.tid === tid);
+        if (nt) {
+          await deliverProposal(tid, tk, nt, to, deps, kv);
+          continue;
+        }
+        if (!tk.prep!.lateNotified && tk.prepAt && deps.now() - tk.prepAt >= GS_LATE_MS) {
+          const st = await deps.push(to, textMsg(msgGsPrepLate(tk.no)), `late:${tid}`).catch(() => null);
+          await saveGsTicket(kv, tid, { ...tk, prep: { ...tk.prep!, lateNotified: true } });
+          deps.log(`[group-satei] prep late ${receiptOf(tk.no)}${sentOk(st) ? "" : " push-failed"}`);
+        }
+      }
+    }
+    for (const { tid, tk } of live) {
+      if (tk.state !== "waiting-cases") continue;
+      const p = tk.prep!;
+      if (p.reminded || p.groupPushes >= GS_GROUP_PUSH_MAX) {
+        await kv.srem(GS_STAGE2_SET, tid);
+        continue;
+      }
+      if (p.deadline && deps.now() >= p.deadline) await remind(tid, tk, to, staff, deps, kv);
+    }
+  } catch {
+    deps.log("[group-satei] s2-sweep skip:exception");
+  }
+}
+
+/**
+ * グループに PDF が貼られたら（段1の控えの道から呼ぶ）、そのグループの事例待ちの票に控える（D8）。
+ * 依頼の時刻より後の PDF だけ。待ちの票が2件以上で区別がつかなければ全部に足す（催促しない側）。取り出し・保存は 2e
+ */
+export async function markGsCasePdf(row: GsMedia, groupId: string, deps: { env?: Record<string, string | undefined>; kv: SweepKv | null; log(l: string): void }): Promise<void> {
+  const env = deps.env ?? process.env;
+  if (row.kind !== "pdf" || !groupSateiPrepOn(env) || !deps.kv) return;
+  const kv = deps.kv;
+  try {
+    const tids = (await kv.smembers(gsWaitKey(groupId))).filter((x): x is string => typeof x === "string");
+    for (const tid of tids) {
+      const tk = asTicket(await kv.get(gsTicketKey(tid)));
+      if (!tk || tk.state !== "waiting-cases") {
+        await kv.srem(gsWaitKey(groupId), tid);
+        continue;
+      }
+      if (row.at < (tk.prep?.requestedAt ?? Number.POSITIVE_INFINITY)) continue;
+      await kv.sadd(gsCasesKey(tid), row.messageId);
+      await kv.expire(gsCasesKey(tid), GS_CASES_TTL);
+      const count = (await kv.smembers(gsCasesKey(tid))).length;
+      deps.log(`[group-satei] cases marked ${receiptOf(tk.no)} ${count}`);
+    }
+  } catch {
+    deps.log("[group-satei] cases skip:exception");
+  }
 }
