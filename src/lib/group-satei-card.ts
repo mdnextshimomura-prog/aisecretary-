@@ -3,7 +3,8 @@
  * お客様の名前・本文は入れない。依頼者は名簿の正式氏名だけ（呼ぶ側が渡す）。
  */
 import {
-  encodeGsList, encodeGsManual, encodeGsNone, encodeGsPick, GS_PAGE, GS_SURE, receiptOf, type GsRead,
+  encodeGsKind, encodeGsList, encodeGsManual, encodeGsNone, encodeGsPick, GS_PAGE, GS_REQ_KINDS, GS_SURE, receiptOf,
+  type GsRead, type GsReqKind,
 } from "./group-satei-data";
 import type { DealRef } from "./task-record";
 import { ALT_TEXT_MAX, FLEX_LABEL_MAX, POSTBACK_TEXT_MAX, pressedText, type FlexMessage } from "./task-card";
@@ -76,7 +77,57 @@ export interface GsCandidate {
   kind: string | null;
 }
 
-export function gsCard(tid: string, ver: number, cands: GsCandidate[], dealsFailed: boolean, no?: number): FlexMessage {
+/** 段2：AI の見立てのボタンの色（ほかのボタンと見分ける） */
+export const GS_GUESS_COLOR = "#1565C0";
+
+/** 段2：「何の依頼？」の並び。見立てを先頭に、残りは設計 3 の順 */
+export function gsKindOrder(guess: GsReqKind): Array<{ code: GsReqKind; label: string }> {
+  return [...GS_REQ_KINDS.filter((k) => k.code === guess), ...GS_REQ_KINDS.filter((k) => k.code !== guess)];
+}
+
+function kindButton(tid: string, ver: number, subject: string | null, k: { code: GsReqKind; label: string }, guess: boolean) {
+  return {
+    type: "button",
+    style: guess ? "primary" : "secondary",
+    ...(guess ? { color: GS_GUESS_COLOR } : {}),
+    height: "sm",
+    flex: 1,
+    action: {
+      type: "postback",
+      label: cut(k.label, FLEX_LABEL_MAX),
+      data: encodeGsKind(tid, ver, k.code),
+      displayText: cut(pressedText(k.label, subject), POSTBACK_TEXT_MAX),
+    },
+  };
+}
+
+/** 段2：カードの上の段。見立ては1段まるごと（色つき）、残り7つは2つずつ並べる */
+export function gsKindSection(tid: string, ver: number, no: number | undefined, guess: GsReqKind): Array<Record<string, unknown>> {
+  const subj = no !== undefined ? `受付 ${receiptOf(no)}` : null;
+  const [head, ...rest] = gsKindOrder(guess);
+  const rows: Array<Record<string, unknown>> = [
+    { type: "box", layout: "horizontal", contents: [kindButton(tid, ver, subj, head, true)] },
+  ];
+  for (let i = 0; i < rest.length; i += 2) {
+    rows.push({
+      type: "box",
+      layout: "horizontal",
+      spacing: "sm",
+      contents: rest.slice(i, i + 2).map((k) => kindButton(tid, ver, subj, k, false)),
+    });
+  }
+  return [small("何の依頼ですか？", "#333333"), ...rows, { type: "separator", margin: "md" }];
+}
+
+/** opt.guess があるときだけ（段2）上の段に「何の依頼？」の8つを足す。無ければ段1と同じ JSON */
+export function gsCard(
+  tid: string,
+  ver: number,
+  cands: GsCandidate[],
+  dealsFailed: boolean,
+  no?: number,
+  opt?: { guess?: GsReqKind },
+): FlexMessage {
   const subj = no !== undefined ? `受付 ${receiptOf(no)}` : null;
   const guide =
     cands.length > 0
@@ -89,7 +140,12 @@ export function gsCard(tid: string, ver: number, cands: GsCandidate[], dealsFail
     altText: cut("査定の依頼：どの案件か選んでください", ALT_TEXT_MAX),
     contents: {
       type: "bubble",
-      body: { type: "box", layout: "vertical", spacing: "sm", contents: [small(guide, "#333333")] },
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [...(opt?.guess ? gsKindSection(tid, ver, no, opt.guess) : []), small(guide, "#333333")],
+      },
       footer: {
         type: "box",
         layout: "vertical",
@@ -134,6 +190,32 @@ export function gsListCard(tid: string, ver: number, no: number, deals: DealRef[
   }
   return { type: "flex", altText: cut(`どの案件ですか（${receiptOf(no)}）`, ALT_TEXT_MAX), contents: { type: "carousel", contents: bubbles } };
 }
+
+/** 段2：［査定］を押したあとのカード（案件を選ぶ道。候補は前のカードのボタンがそのまま使える） */
+export function gsSateiNextCard(tid: string, ver: number, no: number): FlexMessage {
+  const subj = `受付 ${receiptOf(no)}`;
+  return {
+    type: "flex",
+    altText: cut(`査定で進めます：どの案件か選んでください（${receiptOf(no)}）`, ALT_TEXT_MAX),
+    contents: {
+      type: "bubble",
+      body: { type: "box", layout: "vertical", spacing: "sm", contents: [small("前のカードの候補から選ぶか、一覧から選んでください", "#333333")] },
+      footer: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [
+          button("一覧から選ぶ", encodeGsList(tid, ver, 0), subj, true),
+          button("案件がまだ無い（手作業で査定）", encodeGsManual(tid, ver), subj),
+        ],
+      },
+    },
+  };
+}
+
+export const msgGsKindSatei = (no: number) => `査定で進めます。どの案件か選んでください（受付 ${receiptOf(no)}）`;
+export const msgGsKindRecorded = (no: number, label: string) =>
+  `${label}として控えました。中身は手作業でお願いします（受付 ${receiptOf(no)}）`;
 
 export const MSG_GS_PAUSED = "いまは止めています";
 export const MSG_GS_FORBIDDEN = "いまは下村さんだけが使えます";
