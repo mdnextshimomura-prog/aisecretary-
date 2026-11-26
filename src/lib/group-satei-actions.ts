@@ -5,10 +5,12 @@
  * 例外は投げない。ログは符号・受付番号・J番号だけ。
  */
 import {
-  GS_TICKET_TTL, groupSateiActive, groupSateiOn, groupSateiStage2On, gsDecKey, gsEventId, gsOpenKey, gsReqLabel, gsTicketKey,
+  GS_TICKET_TTL, groupSateiActive, groupSateiOn, groupSateiPrepOn, groupSateiStage2On, gsDecKey, gsEventId, gsOpenKey, gsReqLabel, gsTicketKey,
   receiptOf, asTicket,
-  type GsAction, type GsEnv, type GsTicket,
+  type GsAction, type GsEnv, type GsPrepKind, type GsTicket,
 } from "./group-satei-data";
+import type { GsPrepPortal } from "./group-satei-prep-portal";
+import { startGsPrep } from "./group-satei-propose";
 import type { GsKv } from "./group-satei-open";
 import {
   gsListCard, gsSateiNextCard, msgGsKindRecorded, msgGsKindSatei, MSG_GS_BUSY, MSG_GS_LIST_END, MSG_GS_DEALS_FAILED, MSG_GS_EXPIRED, MSG_GS_FORBIDDEN, MSG_GS_NO_FOLDER, MSG_GS_NOT_ACTIVE,
@@ -32,14 +34,20 @@ export interface GsActionDeps {
   complete(key: string): Promise<void>;
   reply(replyToken: string, text: string, card?: FlexMessage): Promise<unknown>;
   log(line: string): void;
+  /** 段2d：portal の準備の依頼箱（無ければ 2d は動かない＝2a のまま） */
+  prep?: GsPrepPortal | null;
+  /** 段2d：retry key つきの push（HTTP の状態番号。結果不明は null）。key は uuidv5 にする前の名前 */
+  push?(to: string, messages: unknown[], key: string): Promise<number | null>;
+  now?(): number;
 }
 
-interface Outcome {
+export interface GsOutcome {
   text: string;
   code: string;
   settled: boolean;
   card?: FlexMessage;
 }
+type Outcome = GsOutcome;
 
 type Kv = NonNullable<GsActionDeps["kv"]>;
 
@@ -89,6 +97,11 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
       ? `\n${msgGsKindMismatch(tk.read.kind)}`
       : "";
   const env = deps.env ?? process.env;
+  // 段2d：案件が決まったら portal の準備へ（マンション・戸建・土地）。PREP_DISABLED なら下の 2a の道へ（計画 D6）
+  if (groupSateiPrepOn(env) && deps.prep && (kind === "マンション" || kind === "戸建" || kind === "土地")) {
+    const o = await startGsPrep(a, tk, got.deal, kind as GsPrepKind, userId, deps, kv);
+    if (o) return { ...o, text: o.text + warn };
+  }
   if (kind === SATEI_KIND && !sateiActive(env)) {
     // TASK_SATEI off：portal へは進まない。印を取らず受付票も asking のまま（on に戻せば同じカードで押し直せる）
     return { text: msgGsManual(no, kind) + warn, code: "manual satei-off", settled: true };

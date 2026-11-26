@@ -20,6 +20,8 @@ import {
 } from "./group-satei-open";
 import type { GsActionDeps } from "./group-satei-actions";
 import { capByTotalBytes, readGsMaterials, type GsCreate } from "./group-satei-read";
+import { sateiPrepDecide, sateiPrepIntake, sateiPrepNotices, type GsPrepPortal } from "./group-satei-prep-portal";
+import { SATEI_PORTAL_TIMEOUT_MS, sateiPortalConfig } from "./satei-portal";
 import { pushMessagesWithRetryKey } from "./line";
 import { loadMembers } from "./members";
 import { normNotionId } from "./satei-deal";
@@ -185,6 +187,21 @@ export function groupSateiActionDeps(): Omit<GsActionDeps, "reserve" | "complete
     intake: s.intake,
     loadDeals: async () =>
       (await within(loadActiveDeals(crm()), CRM_TIMEOUT_MS)).map((d) => ({ ...d, id: normNotionId(d.id) })),
+    prep: gsPrepPortalReal(),
+    push: (to, messages, key) => pushMessagesWithRetryKey(to, messages, uuidv5(key, GS_RETRY_NAMESPACE)),
+    now: () => Date.now(),
+  };
+}
+
+/** portal の準備の口（PORTAL_BASE_URL と JOB_API_TOKEN があるときだけ） */
+export function gsPrepPortalReal(): GsPrepPortal | null {
+  const c = sateiPortalConfig();
+  if (!c) return null;
+  const opts = { fetchImpl: fetch, baseUrl: c.baseUrl, token: c.token, timeoutMs: SATEI_PORTAL_TIMEOUT_MS };
+  return {
+    intake: (req) => sateiPrepIntake(req, opts),
+    notices: () => sateiPrepNotices(opts),
+    decide: (tid, req) => sateiPrepDecide(tid, req, opts),
   };
 }
 

@@ -52,7 +52,8 @@ export function gsBuildingOf(read: GsRead | null): string | null {
   let s = name;
   const room = read?.facts?.roomNo?.normalize("NFKC").trim();
   if (room) s = s.split(room).join("");
-  s = s.replace(/\s*[0-9]+\s*(号室|号|室)?\s*$/, "").trim();
+  // 号室の番号を抜いたあとに残る「号室」も落とす（「パークハウス天満 1203号室」で roomNo が 1203 のとき）
+  s = s.replace(/\s*(?:[0-9]+\s*(?:号室|号|室)?|号室)\s*$/, "").trim();
   return s && gsSafeText(s) ? cut(s, BUILDING_MAX) : null;
 }
 
