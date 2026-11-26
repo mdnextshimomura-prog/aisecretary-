@@ -19,6 +19,59 @@ export function groupSateiOn(groupId: string | undefined, env: GsEnv = process.e
 /** 段2（設計 2026-11-25 の 12）。GROUP_SATEI も on のときだけ。off なら段1のまま */
 export const groupSateiStage2On = (env: GsEnv = process.env) => groupSateiActive(env) && env.GROUP_SATEI_STAGE2 === "1";
 
+/** 段2d：山口さん（事例を取る係）の LINE userId（env GROUP_SATEI_CASE_STAFF_ID。1人）。形が違えば null（＝2d は動かない） */
+const LINE_USER_RE = /^U[0-9a-f]{32}$/;
+export function gsCaseStaffId(env: GsEnv = process.env): string | null {
+  const v = (env.GROUP_SATEI_CASE_STAFF_ID ?? "").trim();
+  return LINE_USER_RE.test(v) ? v : null;
+}
+/** 段2d が動くか（計画 2026-11-26-group-satei-2d の D6）。off なら 2a のまま */
+export const groupSateiPrepOn = (env: GsEnv = process.env) => groupSateiStage2On(env) && gsCaseStaffId(env) !== null;
+
+/** 段2d の決まり（設計 6・10・14、計画 D8〜D16） */
+export const GS_FIX_MAX = 2;
+export const GS_PROPOSE_TRIES = 2;
+export const GS_GROUP_PUSH_MAX = 2;
+export const GS_LATE_MS = 30 * 60 * 1000;
+export const GS_FIX_TTL = 30 * 60;
+export const GS_CASES_TTL = 14 * 24 * 60 * 60;
+/** 見回りが見る受付票（gathering・proposing・waiting-cases） */
+export const GS_STAGE2_SET = "gsatei:s2";
+/** そのグループで事例を待っている受付票 */
+export const gsWaitKey = (groupId: string) => `gsatei:wait:${groupId}`;
+/** 受付票ごとの、依頼のあとに貼られた PDF の messageId（リマインドを出すかの判定だけに使う。取り出しは 2e） */
+export const gsCasesKey = (tid: string) => `gsatei:cases:${tid}`;
+/** ［いいよ］は受付票ごとに最初の1回だけ */
+export const gsOkKey = (tid: string) => `gsatei:ok:${tid}`;
+/** リマインドは受付票ごとに1回だけ */
+export const gsRemindKey = (tid: string) => `gsatei:rem:${tid}`;
+/** ［直す］のあとの次の1通（30分） */
+export const gsFixKey = (userId: string) => `gsatei:fix:${userId}`;
+
+export type GsPrepKind = "マンション" | "戸建" | "土地";
+export const GS_PREP_KINDS: readonly GsPrepKind[] = ["マンション", "戸建", "土地"];
+export interface GsPrep {
+  kind: GsPrepKind;
+  /** 今の案の版（1＝Mac の最初の案。［直す］で +1。0＝まだ届いていない） */
+  rev: number;
+  lines: string[];
+  /** ［直す］で作り直した回数（GS_FIX_MAX まで） */
+  fixes: number;
+  /** 下村さんへ送れた版 */
+  sentRev: number;
+  /** 最初の案の push を試した回数（GS_PROPOSE_TRIES まで） */
+  tries: number;
+  /** グループへの push の数（依頼・リマインド。GS_GROUP_PUSH_MAX まで） */
+  groupPushes: number;
+  /** 事例の期日（ミリ秒。［いいよ］で決める） */
+  deadline?: number;
+  /** グループに依頼した時刻（これより後の PDF だけを事例の控えに数える） */
+  requestedAt?: number;
+  reminded?: boolean;
+  /** 30分の遅れの知らせを出した */
+  lateNotified?: boolean;
+}
+
 /** 段2：「何の依頼？」の8つ（設計 3。並びはこの順。AI の見立ては先頭に出す） */
 export type GsReqKind = "satei" | "doc" | "check" | "sched" | "survey" | "money" | "mail" | "other";
 export const GS_REQ_KINDS: ReadonlyArray<{ code: GsReqKind; label: string }> = [
@@ -132,7 +185,7 @@ export interface GsMedia {
   quoted?: string;
 }
 
-export type GsState = "asking" | "started" | "manual" | "dismissed";
+export type GsState = "asking" | "started" | "manual" | "dismissed" | "gathering" | "proposing" | "waiting-cases";
 
 export interface GsTicket {
   no: number;
@@ -164,9 +217,26 @@ export interface GsTicket {
   rereads?: number;
   /** 段2：押された「何の依頼？」の符号（GROUP_SATEI_STAGE2 on のときだけ書く） */
   requestKind?: GsReqKind;
+  /** 段2d：portal の準備を頼んだ時刻（ミリ秒。遅れの知らせに使う） */
+  prepAt?: number;
+  /** 段2d：事例の取り方の案と、グループへの依頼の控え */
+  prep?: GsPrep;
 }
 
-const STATES: readonly GsState[] = ["asking", "started", "manual", "dismissed"];
+const STATES: readonly GsState[] = ["asking", "started", "manual", "dismissed", "gathering", "proposing", "waiting-cases"];
+
+const isCount = (x: unknown) => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 99;
+function isGsPrep(v: unknown): v is GsPrep {
+  if (!v || typeof v !== "object") return false;
+  const p = v as Record<string, unknown>;
+  return (
+    GS_PREP_KINDS.includes(p.kind as GsPrepKind) &&
+    isCount(p.rev) && isCount(p.fixes) && isCount(p.sentRev) && isCount(p.tries) && isCount(p.groupPushes) &&
+    Array.isArray(p.lines) && p.lines.every((s) => typeof s === "string") &&
+    (p.deadline === undefined || typeof p.deadline === "number") &&
+    (p.requestedAt === undefined || typeof p.requestedAt === "number")
+  );
+}
 
 export function asTicket(raw: unknown): GsTicket | null {
   let v = raw;
@@ -185,6 +255,7 @@ export function asTicket(raw: unknown): GsTicket | null {
   if (!strs(r.triggerMsgIds) || !strs(r.mediaIds) || !STATES.includes(r.state as GsState)) return null;
   if (r.pushed !== undefined && typeof r.pushed !== "boolean") return null;
   if (r.requestKind !== undefined && !isGsReqKind(r.requestKind)) return null;
+  if (r.prep !== undefined && !isGsPrep(r.prep)) return null;
   return r as unknown as GsTicket;
 }
 
@@ -193,7 +264,9 @@ export type GsAction =
   | { op: "gl"; tid: string; ver: number; offset: number }
   | { op: "gm"; tid: string; ver: number }
   | { op: "gn"; tid: string; ver: number }
-  | { op: "gk"; tid: string; ver: number; code: GsReqKind };
+  | { op: "gk"; tid: string; ver: number; code: GsReqKind }
+  | { op: "gy"; tid: string; ver: number; rev: number }
+  | { op: "gf"; tid: string; ver: number; rev: number };
 
 const TID_RE = /^[0-9a-f]{16}$/;
 const VER_RE = /^[1-9][0-9]?$/;
@@ -204,6 +277,10 @@ export const encodeGsPick = (tid: string, ver: number, dealId: string) => `v1|gs
 export const encodeGsList = (tid: string, ver: number, offset: number) => `v1|gl|${tid}|${ver}|${offset}`;
 export const encodeGsManual = (tid: string, ver: number) => `v1|gm|${tid}|${ver}`;
 export const encodeGsNone = (tid: string, ver: number) => `v1|gn|${tid}|${ver}`;
+/** 段2d：事例の取り方の案の［いいよ］［直す］（rev＝案の版） */
+export const encodeGsYes = (tid: string, ver: number, rev: number) => `v1|gy|${tid}|${ver}|${rev}`;
+export const encodeGsFix = (tid: string, ver: number, rev: number) => `v1|gf|${tid}|${ver}|${rev}`;
+const REV_RE = /^[1-9]$/;
 
 /** このカードのボタンの data を読む。形が違えば null（ほかのボタンは読まない） */
 export function parseGsData(data: string): GsAction | null {
@@ -222,6 +299,9 @@ export function parseGsData(data: string): GsAction | null {
   if (p[1] === "gk") {
     const code = p[4];
     return p.length === 5 && isGsReqKind(code) ? { op: "gk", tid, ver, code } : null;
+  }
+  if (p[1] === "gy" || p[1] === "gf") {
+    return p.length === 5 && REV_RE.test(p[4]) ? { op: p[1], tid, ver, rev: Number(p[4]) } : null;
   }
   return null;
 }

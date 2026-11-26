@@ -157,6 +157,8 @@ async function chooseKind(a: Extract<GsAction, { op: "gk" }>, tk: GsTicket, deps
 }
 
 async function decide(a: Exclude<GsAction, { op: "gl" }>, tk: GsTicket, userId: string, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
+  // 段2d の［いいよ］［直す］は A5 で振り分ける。それまでは何もしない（下の gn に落とさない）
+  if (a.op === "gy" || a.op === "gf") return { text: MSG_GS_PAUSED, code: "paused", settled: true };
   const dec = await kv.get(gsDecKey(a.tid));
   if (dec) {
     return typeof dec === "string" && dec.startsWith(UNKNOWN_DEC)
