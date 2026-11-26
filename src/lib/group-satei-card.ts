@@ -240,7 +240,7 @@ export const MSG_GS_LIST_END = "これより後の案件はありません";
 export const MSG_GS_NO_FOLDER = "案件の Driveフォルダが未設定です。設定してから、もう一度押してください";
 
 /** 段2b-2（I1）：足りない項目を聞く文のあとの［このまま進める］ */
-export function gsInfoCard(tid: string, ver: number, no: number): FlexMessage {
+export function gsInfoCard(tid: string, ver: number, no: number, token: string): FlexMessage {
   const subj = `受付 ${receiptOf(no)}`;
   return {
     type: "flex",
@@ -248,7 +248,7 @@ export function gsInfoCard(tid: string, ver: number, no: number): FlexMessage {
     contents: {
       type: "bubble",
       body: { type: "box", layout: "vertical", spacing: "sm", contents: [small("分からなければ押してください。30分たつと、このまま進めます", "#333333")] },
-      footer: { type: "box", layout: "vertical", spacing: "sm", contents: [button("このまま進める", encodeGsInfoGo(tid, ver), subj, true)] },
+      footer: { type: "box", layout: "vertical", spacing: "sm", contents: [button("このまま進める", encodeGsInfoGo(tid, ver, token), subj, true)] },
     },
   };
 }

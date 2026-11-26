@@ -6,7 +6,7 @@
  */
 import { randomUUID } from "node:crypto";
 import {
-  GS_INFO_DEC, GS_INFO_SET, GS_INFO_TTL, gsFixKey, gsInfoGoKey, gsInfoKey,
+  GS_INFO_DEC, GS_INFO_GO_MS, GS_INFO_GO_TTL, GS_INFO_SET, GS_INFO_TTL, gsFixKey, gsInfoGoKey, gsInfoKey, gsInfoTok,
   GS_TICKET_TTL, groupSateiActive, groupSateiOn, groupSateiPrepOn, groupSateiStage2On, gsDecKey, gsOpenKey, gsReqLabel, gsTicketKey,
   receiptOf, asTicket,
   type GsAction, type GsEnv, type GsPrepKind, type GsTicket,
@@ -114,7 +114,7 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
     const asked = await maybeAskInfo(a, tk, got.deal, kind, userId, deps, kv);
     if (asked) return { ...asked, text: asked.text + warn };
   }
-  return proceedPick(a, tk, got, userId, deps, kv, warn, false);
+  return proceedPick(a, tk, got, userId, deps, kv, warn, null);
 }
 
 const isPrepKind = (k: string | null): k is GsPrepKind => k === "マンション" || k === "戸建" || k === "土地";
@@ -131,14 +131,16 @@ async function proceedPick(
   deps: GsPickDeps,
   kv: Kv,
   warn: string,
-  fromInfo: boolean,
+  /** 段2b-2 で聞いたあと（仮の印 info:<dealId> を持っている）ならその回の token。それ以外は null */
+  infoToken: string | null,
 ): Promise<Outcome> {
+  const fromInfo = infoToken !== null;
   const no = tk.no;
   const kind = got.kind;
   const env = deps.env ?? process.env;
   // 段2d：案件が決まったら portal の準備へ（マンション・戸建・土地）。PREP_DISABLED なら下の 2a の道へ（計画 D6）
   if (groupSateiPrepOn(env) && deps.prep && isPrepKind(kind)) {
-    const o = await startGsPrep(a, tk, got.deal, kind, userId, deps, kv, fromInfo ? { infoDec: `${GS_INFO_DEC}${a.dealId}` } : undefined);
+    const o = await startGsPrep(a, tk, got.deal, kind, userId, deps, kv, infoToken !== null ? { infoDec: `${GS_INFO_DEC}${a.dealId}`, infoToken } : undefined);
     if (o) return { ...o, text: o.text + warn };
   } else if (fromInfo) {
     await kv.del(gsDecKey(a.tid));
@@ -199,9 +201,12 @@ async function maybeAskInfo(
   if (keys.length === 0) return null;
   // 準備へ進めない案件（フォルダ無し等）は聞かずに、startGsPrep の今の返事へ
   if (!deps.dealsDbId || deal.gone || deal.parentDbId !== normNotionId(deps.dealsDbId) || !deal.folderId) return null;
+  const token = randomUUID();
+  // ほかの印（差し戻し理由・［直す］）があれば聞かない。答えを待つ印は SET NX で取る（同じ人の2票が同時でも上書きしない。点検 LOW-8）
   let busy: boolean;
   try {
-    busy = Boolean(await kv.get(sateiReasonKey(userId))) || Boolean(await kv.get(gsFixKey(userId))) || Boolean(await kv.get(gsInfoKey(userId)));
+    busy = Boolean(await kv.get(sateiReasonKey(userId))) || Boolean(await kv.get(gsFixKey(userId)));
+    if (!busy) busy = !(await kv.setNx(gsInfoKey(userId), { tid: a.tid, token }, GS_INFO_TTL));
   } catch {
     busy = true;
   }
@@ -209,8 +214,13 @@ async function maybeAskInfo(
     deps.log(`[group-satei] info skip:busy ${receiptOf(no)}`);
     return null;
   }
-  if (!(await kv.setNx(gsDecKey(a.tid), `${GS_INFO_DEC}${a.dealId}`, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
-  const token = randomUUID();
+  let decOk = false;
+  try {
+    decOk = await kv.setNx(gsDecKey(a.tid), `${GS_INFO_DEC}${a.dealId}`, GS_TICKET_TTL);
+  } finally {
+    if (!decOk) await quietKv(() => clearInfoMark(userId, token, kv), deps);
+  }
+  if (!decOk) return { text: msgGsAlready(no), code: "already", settled: true };
   const now = (deps.now ?? Date.now)();
   const next: GsTicket = {
     ...tk, state: "asking-info", provisional: false, dealId: a.dealId, requestKind: "satei",
@@ -219,7 +229,6 @@ async function maybeAskInfo(
   try {
     await save(kv, a.tid, next);
     await kv.sadd(GS_INFO_SET, a.tid);
-    await kv.set(gsInfoKey(userId), { tid: a.tid, token }, GS_INFO_TTL);
   } catch {
     // 聞けないときは今どおり準備へ（票を戻し、仮の印を外す）
     deps.log(`[group-satei] info ask-failed ${receiptOf(no)}`);
@@ -227,18 +236,35 @@ async function maybeAskInfo(
       await kv.set(gsTicketKey(a.tid), tk, GS_TICKET_TTL);
       if (tk.state === "asking" || tk.provisional) await kv.sadd(gsOpenKey(tk.groupId), a.tid);
       await kv.srem(GS_INFO_SET, a.tid);
-      await kv.del(gsInfoKey(userId));
+      await clearInfoMark(userId, token, kv);
       await kv.del(gsDecKey(a.tid));
     }, deps);
     return null;
   }
   deps.log(`[group-satei] info asked ${receiptOf(no)} ${keys.length}`);
-  return { text: gsInfoAskText(no, keys), code: `info-asked ${receiptOf(no)}`, settled: true, card: gsInfoCard(a.tid, tk.ver, no) };
+  return { text: gsInfoAskText(no, keys), code: `info-asked ${receiptOf(no)}`, settled: true, card: gsInfoCard(a.tid, tk.ver, no, token) };
 }
 
-/** 段2b-2：この回の聞き方を進めるのは最初の1つだけ（［このまま進める］・答え・30分）。true＝自分が進める */
-export async function gsClaimInfo(tid: string, token: string, kv: Kv): Promise<boolean> {
-  return kv.setNx(gsInfoGoKey(tid, token), 1, GS_TICKET_TTL);
+/**
+ * 段2b-2：この回の聞き方を進めるのは最初の1つだけ（［このまま進める］・答え・30分）。true＝自分が進める。
+ * 値は {at}・期限3分。印が無いか3分より古ければ取り直せる（取ったあとに落ちた票を凍らせない。点検 MED-2）
+ */
+export async function gsClaimInfo(tid: string, token: string, kv: Kv, now: number): Promise<boolean> {
+  const key = gsInfoGoKey(tid, token);
+  if (await kv.setNx(key, { at: now }, GS_INFO_GO_TTL)) return true;
+  const v = await kv.get(key);
+  const at = v && typeof v === "object" ? (v as { at?: unknown }).at : undefined;
+  if (typeof at === "number" && now - at < GS_INFO_GO_MS) return false;
+  await kv.set(key, { at: now }, GS_INFO_GO_TTL);
+  return true;
+}
+
+/** 段2b-2（点検 MED-1 (a)・LOW-9）：取り込まなかった答えのあと、進める権を返し、答えを待つ印を置き直す（新しい印があれば上書きしない） */
+export async function gsReleaseInfo(tid: string, tk: GsTicket, kv: Kv, now: number): Promise<void> {
+  const info = tk.info!;
+  await kv.del(gsInfoGoKey(tid, info.token));
+  const left = Math.ceil((info.at + GS_INFO_TTL * 1000 - now) / 1000);
+  if (left > 0) await kv.setNx(gsInfoKey(info.by), { tid, token: info.token }, left);
 }
 
 /** 答えを待つ印を、この回の token のときだけ消す */
@@ -271,7 +297,7 @@ export async function gsResumeInfo(tid: string, tk: GsTicket, deps: GsPickDeps, 
   if (!got || got.deal.gone) o = { text: MSG_SATEI_DEAL_NOT_FOUND, code: got ? "not-found" : "read-failed", settled: true };
   else {
     try {
-      o = await proceedPick({ tid, dealId }, tk, got, info.by, deps, kv, "", true);
+      o = await proceedPick({ tid, dealId }, tk, got, info.by, deps, kv, "", info.token);
     } catch {
       o = { text: MSG_GS_BUSY, code: "kv-failed", settled: true };
     }
@@ -296,7 +322,9 @@ export async function gsResumeInfo(tid: string, tk: GsTicket, deps: GsPickDeps, 
 async function skipInfo(a: Extract<GsAction, { op: "gi" }>, tk: GsTicket, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
   const no = tk.no;
   if (tk.state !== "asking-info" || !tk.info || !tk.dealId) return { text: msgGsInfoDone(no), code: "info-closed", settled: true };
-  if (!(await gsClaimInfo(a.tid, tk.info.token, kv))) return { text: msgGsInfoDone(no), code: "info-already", settled: true };
+  // 前の回（聞き直す前）のカードの［このまま進める］では進めない
+  if (gsInfoTok(tk.info.token) !== a.tok) return { text: MSG_GS_STALE, code: "info-stale", settled: true };
+  if (!(await gsClaimInfo(a.tid, tk.info.token, kv, (deps.now ?? Date.now)()))) return { text: msgGsInfoDone(no), code: "info-already", settled: true };
   deps.log(`[group-satei] info skipped ${receiptOf(no)}`);
   return gsResumeInfo(a.tid, tk, deps, kv);
 }

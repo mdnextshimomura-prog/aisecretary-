@@ -62,8 +62,20 @@ export function gsAnswerFact(key: GsFactKey, text: string): string | number | nu
   if (key === "builtYm") return normYm(v);
   if (key === "roomNo") return normRoom(v);
   const s = scrubNames(v);
-  return s ? Array.from(s).slice(0, 80).join("") : null;
+  if (!s) return null;
+  // 段2b-2（点検 MED-3）：敬称の無い人の名前を通さない。所在は地名らしい語、物件名は建物らしい語があるときだけ
+  const n = s.normalize("NFKC");
+  if (key === "address" && !ADDRESS_RE.test(n)) return null;
+  if (key === "propertyName" && !(KANA_LATIN_RE.test(n) || BUILDING_WORD_RE.test(n))) return null;
+  return Array.from(s).slice(0, 80).join("");
 }
+
+/** 所在らしい語（市区町村・郡・都道府県・丁目・番・号・地番） */
+const ADDRESS_RE = /[都道府県市区町村郡]|丁目|番|号|地番/;
+/** カタカナ・英字 */
+const KANA_LATIN_RE = /[ァ-ヺー]|[A-Za-z]/;
+/** 建物の語（漢字だけの物件名はこれを含むときだけ受ける） */
+const BUILDING_WORD_RE = /マンション|ハイツ|コーポ|レジデンス|ハイム|荘|館|ビル|タワー|ヒルズ|パレス|コート|ガーデン|プラザ|メゾン|シティ|パーク|住宅|団地|寮|棟/;
 
 /** 段2b-2（計画 I1・Global）：まとめて聞く項目（号室は聞かない＝準備に使わない・グループに出さない） */
 export function gsInfoKeys(kind: string | null, read: GsRead | null): GsFactKey[] {
@@ -84,7 +96,14 @@ export function gsInfoAskText(no: number, keys: GsFactKey[]): string {
 /** 段2b-2（I3）：「受け取りました（専有面積・築年月）。事例の相談の案を作ります」 */
 export const gsInfoLabels = (keys: GsFactKey[]) => keys.map((k) => GS_FACT_LABEL[k]).join("・");
 export const msgGsInfoFilled = (keys: GsFactKey[]) => `受け取りました（${gsInfoLabels(keys)}）。事例の相談の案を作ります`;
-export const MSG_GS_INFO_UNREAD = "読み取れなかったので、このまま進めます";
+/** 点検 LOW-5：印を読めたのに消せなかった */
+export const MSG_GS_INFO_NOT_SAVED = "記録できませんでした。もう一度送ってください";
+/** 点検 LOW-9：受付票が読めない・進める権が取れない（印は置き直す） */
+export const msgGsInfoRetry = (no: number) => `いま受け取れませんでした。少し待ってからもう一度送ってください（受付 ${receiptOf(no)}）`;
+export const MSG_GS_INFO_RETRY = "いま受け取れませんでした。少し待ってからもう一度送ってください";
+/** 点検 LOW-2：30分の見回りで準備へ進めなかった知らせの送り直しの文（控えから作り直す） */
+export const msgGsInfoNotStarted = (no: number) =>
+  `足りない項目を待ったあと、事例の案づくりへ進められませんでした。もう一度案件を選んでください（受付 ${receiptOf(no)}）`;
 export const msgGsInfoDone = (no: number) => `この受付はもう進めています（受付 ${receiptOf(no)}）`;
 
 /**
@@ -96,8 +115,23 @@ export function gsInfoSystem(keys: GsFactKey[]): string {
     "あなたは不動産会社の査定の手伝いです。担当者が送ってきた1通から、聞いた項目の値だけを取り出します。",
     `聞いた項目：${keys.map((k) => GS_FACT_LABEL[k]).join("、")}`,
     `答えは JSON だけ：{${keys.map((k) => `"${GS_FACT_LABEL[k]}":"…"`).join(",")}}。書かれていない項目は null。`,
-    "値は書かれたままの言葉を写す（単位・和暦もそのまま。坪を㎡に直すなどの換算はしない。数字を作らない）。人の名前は書かない。",
+    "値は書かれたままの言葉を写す（単位・和暦もそのまま。坪を㎡に直すなどの換算はしない。数字を作らない）。",
+    "面積に㎡と坪が両方書かれていれば、㎡の数字だけを写す（坪の数字は書かない）。",
+    "人の名前らしい値（「山田太郎」「山田さんのところ」など）は null にする。物件名はマンション・建物の名前だけ。",
   ].join("\n");
+}
+
+/**
+ * 段2b-2（点検 MED-1 (b)）：Claude を呼ぶ前の安い確かめ。答えらしい手がかり（数字・年・㎡・平米・m2・聞いた項目の言葉・
+ * 所在らしい語、物件名を聞いたならカタカナ・英字・建物の語）が1つも無ければ、答えではないとみなす（今の流れへ渡す）
+ */
+export function gsInfoLooksLikeAnswer(keys: GsFactKey[], text: string): boolean {
+  const t = text.normalize("NFKC");
+  if (/[0-9]|年|㎡|平米|m2|m²/i.test(t)) return true;
+  if (keys.some((k) => t.includes(GS_FACT_LABEL[k]))) return true;
+  if (/[市区町村郡]|丁目|番地?/.test(t)) return true;
+  if (keys.includes("propertyName") && (KANA_LATIN_RE.test(t) || BUILDING_WORD_RE.test(t))) return true;
+  return false;
 }
 
 /** Claude の答え（JSON）を、聞いた項目ごとに検査して通った値だけにする */

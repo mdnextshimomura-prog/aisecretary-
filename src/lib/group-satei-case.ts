@@ -83,8 +83,20 @@ export function gsBuildingOf(read: GsRead | null): string | null {
   const room = read?.facts?.roomNo?.normalize("NFKC").trim();
   if (room) s = s.split(room).join("");
   // 号室の番号を抜いたあとに残る「号室」も落とす（「パークハウス天満 1203号室」で roomNo が 1203 のとき）
-  s = s.replace(/\s*(?:[0-9]+\s*(?:号室|号|室)?|号室)\s*$/, "").trim();
+  s = dropRoomTail(s);
+  // 段2b-2（点検 LOW-4）：「N階」も落とす（グループに階を出さない）。「第N」「N番館」は建物名の一部なので残す
+  s = s.replace(/\s*[0-9]+\s*階\s*$/, "").trim();
+  s = dropRoomTail(s);
   return s && gsSafeText(s) ? cut(s, BUILDING_MAX) : null;
+}
+
+/** 末尾の号室（数字＋号室・号・室、または「号室」だけ）を落とす。「第2」のように「第」に続く数字だけのときは残す */
+function dropRoomTail(s: string): string {
+  const m = /\s*(?:([0-9]+)\s*(号室|号|室)?|号室)\s*$/.exec(s);
+  if (!m) return s.trim();
+  const before = s.slice(0, m.index).trimEnd();
+  if (m[1] && !m[2] && before.endsWith("第")) return s.trim();
+  return before.trim();
 }
 
 /** グループのカードの「物件：」。マンションは町名・建物名、戸建・土地は町名だけ。どちらも無ければ null */

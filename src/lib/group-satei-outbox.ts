@@ -13,9 +13,10 @@ import {
   msgGsCasesStarted, msgGsCasesUnsaved, msgGsPrepLate, msgGsRemindFailed, msgGsRemindMe, msgGsRemindUnknown,
 } from "./group-satei-case";
 import { gsDeadlineLabel } from "./group-satei-deadline";
+import { msgGsInfoNotStarted } from "./group-satei-facts";
 
-export type GsObKind = "prop-late" | "remind-note" | "cases" | "cases-late" | "ambig";
-export const GS_OB_KINDS: readonly GsObKind[] = ["prop-late", "remind-note", "cases", "cases-late", "ambig"];
+export type GsObKind = "prop-late" | "remind-note" | "cases" | "cases-late" | "ambig" | "info-to";
+export const GS_OB_KINDS: readonly GsObKind[] = ["prop-late", "remind-note", "cases", "cases-late", "ambig", "info-to"];
 export const GS_OUTBOX_SET = "gsatei:outbox";
 export const gsObKey = (kind: GsObKind, id: string) => `gsatei:ob:${kind}:${id}`;
 export const GS_OB_TTL = 24 * 60 * 60;
@@ -46,13 +47,15 @@ export interface GsObKv {
 const TID_RE = /^[0-9a-f]{16}$/;
 /** ambig の id は `<groupId>:<JST の日>:<tid>,<tid>…`（gsAmbigKey の頭の gsatei:ambig: を除いたもの） */
 const AMBIG_RE = /^[A-Za-z0-9]{1,64}:\d{4}-\d{2}-\d{2}:[0-9a-f]{16}(,[0-9a-f]{16})*$/;
+/** 段2b-2（info-to）の id は `<tid>:<聞き方の token の頭8字>` */
+const INFO_TO_RE = /^[0-9a-f]{16}:[0-9a-f]{8}$/;
 
 function parseMember(v: unknown): { kind: GsObKind; id: string } | null {
   if (typeof v !== "string") return null;
   const k = GS_OB_KINDS.find((x) => v.startsWith(`${x}:`));
   if (!k) return null;
   const id = v.slice(k.length + 1);
-  if (k === "ambig" ? !AMBIG_RE.test(id) : !TID_RE.test(id)) return null;
+  if (!(k === "ambig" ? AMBIG_RE : k === "info-to" ? INFO_TO_RE : TID_RE).test(id)) return null;
   return { kind: k, id };
 }
 
@@ -92,6 +95,7 @@ export function gsObRetryKey(kind: GsObKind, id: string): string {
   if (kind === "remind-note") return `remind-me:${id}`;
   if (kind === "cases") return `cases:${id}`;
   if (kind === "cases-late") return `cases-late:${id}`;
+  if (kind === "info-to") return `info-to:${id}`;
   return `ambig:${id}`;
 }
 
@@ -123,6 +127,11 @@ async function rebuild(kind: GsObKind, id: string, kv: GsObKv): Promise<{ text: 
       nos.push(t.no);
     }
     return { text: msgGsCasesAmbig(nos), receipt: [...nos].sort((a, b) => a - b).map(receiptOf).join(",") };
+  }
+  if (kind === "info-to") {
+    // 段2b-2：30分の見回りで準備へ進めず asking に戻した票。まだ asking のときだけ（押し直したあとは古い）
+    const t = asTicket(await kv.get(gsTicketKey(id.split(":")[0])));
+    return t && t.state === "asking" ? { text: msgGsInfoNotStarted(t.no), receipt: receiptOf(t.no) } : null;
   }
   const t = asTicket(await kv.get(gsTicketKey(id)));
   if (!t || !t.prep) return null;

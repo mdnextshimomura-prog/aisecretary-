@@ -62,12 +62,21 @@ export const gsInfoKey = (userId: string) => `gsatei:info:${userId}`;
 export const GS_INFO_TTL = 30 * 60;
 export const GS_INFO_MS = GS_INFO_TTL * 1000;
 export const GS_INFO_SET = "gsatei:info";
-/** 進めるのは受付票の1回の聞き方ごとに1回だけ（［このまま進める］・答え・30分のどれか最初の1つ） */
+/**
+ * 進めるのは受付票の1回の聞き方ごとに1回だけ（［このまま進める］・答え・30分のどれか最初の1つ）。値は {at}、期限は3分
+ * （点検 MED-2：取ったあとに落ちても、3分たてば取り直せる。再開が二度走っても startGsPrep の印 gsInfoPrepKey で重ならない）
+ */
 export const gsInfoGoKey = (tid: string, token: string) => `gsatei:infogo:${tid}:${token}`;
+export const GS_INFO_GO_TTL = 3 * 60;
+export const GS_INFO_GO_MS = GS_INFO_GO_TTL * 1000;
+/** 仮の印（info:）を prep: に書き換えてよいのは1回の聞き方ごとに1回だけ */
+export const gsInfoPrepKey = (tid: string, token: string) => `gsatei:infoprep:${tid}:${token}`;
 /** 聞いているあいだの仮の決定の印の値の頭（gsatei:dec:<tid> = info:<dealId>） */
 export const GS_INFO_DEC = "info:";
 /** ［このまま進める］ */
-export const encodeGsInfoGo = (tid: string, ver: number) => `v1|gi|${tid}|${ver}`;
+export const encodeGsInfoGo = (tid: string, ver: number, token: string) => `v1|gi|${tid}|${ver}|${gsInfoTok(token)}`;
+/** data に入れる token の頭8字（前の回のカードで、聞き直した回を進めない。点検 LOW-7） */
+export const gsInfoTok = (token: string) => token.slice(0, 8);
 
 /** 段2e（計画 2026-11-26-group-satei-2e）：受付票に結びついた事例の PDF（JSON の配列 [{m: messageId, at}]。結びついた順。14日・10件まで） */
 export const gsCaseItemsKey = (tid: string) => `gsatei:caseitems:${tid}`;
@@ -424,7 +433,7 @@ export type GsAction =
   | { op: "gk"; tid: string; ver: number; code: GsReqKind }
   | { op: "gy"; tid: string; ver: number; rev: number }
   | { op: "gf"; tid: string; ver: number; rev: number }
-  | { op: "gi"; tid: string; ver: number };
+  | { op: "gi"; tid: string; ver: number; tok: string };
 
 const TID_RE = /^[0-9a-f]{16}$/;
 const VER_RE = /^[1-9][0-9]?$/;
@@ -454,7 +463,7 @@ export function parseGsData(data: string): GsAction | null {
   }
   if (p[1] === "gm" && p.length === 4) return { op: "gm", tid, ver };
   if (p[1] === "gn" && p.length === 4) return { op: "gn", tid, ver };
-  if (p[1] === "gi" && p.length === 4) return { op: "gi", tid, ver };
+  if (p[1] === "gi") return p.length === 5 && /^[0-9a-f]{8}$/.test(p[4]) ? { op: "gi", tid, ver, tok: p[4] } : null;
   if (p[1] === "gk") {
     const code = p[4];
     return p.length === 5 && isGsReqKind(code) ? { op: "gk", tid, ver, code } : null;

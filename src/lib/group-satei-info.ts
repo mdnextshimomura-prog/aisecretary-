@@ -5,11 +5,15 @@
  * ログ・KV には ID・時刻・項目の名前・件数・符号だけ（値は受付票の read にだけ）。
  */
 import {
-  GS_INFO_MS, GS_INFO_SET, GS_SWEEP_BUDGET_MS, GS_TICKET_TTL, asTicket, groupSateiPrepOn, gsInfoKey, gsTicketKey, receiptOf,
+  GS_INFO_MS, GS_INFO_SET, GS_SWEEP_BUDGET_MS, GS_TICKET_TTL, asTicket, groupSateiPrepOn, gsInfoKey, gsInfoTok, gsTicketKey, receiptOf,
   type GsKind, type GsTicket,
 } from "./group-satei-data";
-import { gsClaimInfo, gsResumeInfo, type GsOutcome, type GsPickDeps } from "./group-satei-actions";
-import { gsApplyInfo, gsInfoParse, isGsFactKey, msgGsInfoDone, msgGsInfoFilled, MSG_GS_INFO_UNREAD, type GsFactKey } from "./group-satei-facts";
+import { gsClaimInfo, gsReleaseInfo, gsResumeInfo, type GsOutcome, type GsPickDeps } from "./group-satei-actions";
+import {
+  gsApplyInfo, gsInfoLooksLikeAnswer, gsInfoParse, isGsFactKey, msgGsInfoDone, msgGsInfoFilled, msgGsInfoRetry, MSG_GS_INFO_NOT_SAVED, MSG_GS_INFO_RETRY,
+  type GsFactKey,
+} from "./group-satei-facts";
+import { gsOutboxAdd } from "./group-satei-outbox";
 import { MSG_GS_EXPIRED } from "./group-satei-card";
 import type { GsKv } from "./group-satei-open";
 import { isSateiUser, sateiNotifyTarget } from "./satei-data";
@@ -38,6 +42,7 @@ export async function handleGsInfoText(m: { userId?: string; groupId?: string; t
   const text = Array.from((m.text ?? "").trim()).slice(0, INFO_TEXT_MAX).join("");
   if (!text) return false;
   const kv = deps.kv;
+  const now = () => (deps.now ?? Date.now)();
   const key = gsInfoKey(m.userId);
   let mark: { tid?: unknown; token?: unknown } | null;
   try {
@@ -50,13 +55,6 @@ export async function handleGsInfoText(m: { userId?: string; groupId?: string; t
   if (!mark || typeof mark.tid !== "string" || typeof mark.token !== "string") return false;
   const tid = mark.tid;
   const token = mark.token;
-  let mine = false;
-  try {
-    mine = await kv.delIfToken(key, token);
-  } catch {
-    deps.log("[group-satei] info clear-failed");
-  }
-  if (!mine) return false;
   const say = async (s: string) => {
     try {
       await deps.reply(m.replyToken, s);
@@ -64,30 +62,58 @@ export async function handleGsInfoText(m: { userId?: string; groupId?: string; t
       deps.log("[group-satei] reply-failed info");
     }
   };
-  const tk = asTicket(await kv.get(gsTicketKey(tid)).catch(() => null));
+  // 受付票は印を消す前に読む（読めなければ印を残したまま「もう一度送ってください」。点検 LOW-9）
+  let tk: GsTicket | null;
+  try {
+    tk = asTicket(await kv.get(gsTicketKey(tid)));
+  } catch {
+    deps.log("[group-satei] info ticket read-failed");
+    await say(MSG_GS_INFO_RETRY);
+    return true;
+  }
+  const live = tk && tk.state === "asking-info" && tk.info && tk.info.token === token && tk.dealId ? tk : null;
+  // 答えらしい手がかりが1つも無い1通は受けない（印は消さず今の流れへ。点検 MED-1 (b)）
+  if (live && !gsInfoLooksLikeAnswer(live.info!.keys.filter(isGsFactKey), text)) {
+    deps.log(`[group-satei] info not-answer ${receiptOf(live.no)}`);
+    return false;
+  }
+  let mine = false;
+  try {
+    mine = await kv.delIfToken(key, token);
+  } catch {
+    // 印を読めたのに消せない：答えは今の流れへ渡さず、もう一度送ってもらう（点検 LOW-5）
+    deps.log("[group-satei] info clear-failed");
+    await say(MSG_GS_INFO_NOT_SAVED);
+    return true;
+  }
+  if (!mine) return false;
   if (!tk) {
     deps.log("[group-satei] info stale");
     await say(MSG_GS_EXPIRED);
     return true;
   }
-  if (tk.state !== "asking-info" || !tk.info || tk.info.token !== token || !tk.dealId) {
+  if (!live) {
     deps.log(`[group-satei] info stale ${receiptOf(tk.no)}`);
     await say(msgGsInfoDone(tk.no));
     return true;
   }
+  const info = live.info!;
   // 進めるのは最初の1つだけ（Claude の前に取る＝読んでいるあいだに30分の見回りが進めない）
-  let won = false;
+  let won: boolean;
   try {
-    won = await gsClaimInfo(tid, token, kv);
+    won = await gsClaimInfo(tid, token, kv, now());
   } catch {
-    won = false;
-  }
-  if (!won) {
-    deps.log(`[group-satei] info already ${receiptOf(tk.no)}`);
-    await say(msgGsInfoDone(tk.no));
+    deps.log(`[group-satei] info claim-failed ${receiptOf(live.no)}`);
+    await quietRestore(() => kv.setNx(key, { tid, token }, leftSec(info.at, now())), deps);
+    await say(msgGsInfoRetry(live.no));
     return true;
   }
-  const keys = tk.info.keys.filter(isGsFactKey);
+  if (!won) {
+    deps.log(`[group-satei] info already ${receiptOf(live.no)}`);
+    await say(msgGsInfoDone(live.no));
+    return true;
+  }
+  const keys = info.keys.filter(isGsFactKey);
   let raw: string | null = null;
   try {
     raw = await deps.answer(keys, text);
@@ -96,28 +122,36 @@ export async function handleGsInfoText(m: { userId?: string; groupId?: string; t
   }
   const vals = raw ? gsInfoParse(keys, raw) : {};
   const filled = keys.filter((k) => vals[k] !== undefined);
-  let cur: GsTicket = tk;
-  if (filled.length > 0) {
-    const fresh = asTicket(await kv.get(gsTicketKey(tid)).catch(() => null));
-    if (fresh && fresh.state === "asking-info" && fresh.info?.token === token) {
-      cur = { ...fresh, read: gsApplyInfo(fresh.read, (fresh.read?.kind ?? fresh.info.kind) as GsKind, vals) };
-      try {
-        await kv.set(gsTicketKey(tid), cur, GS_TICKET_TTL);
-      } catch {
-        deps.log(`[group-satei] info save-failed ${receiptOf(tk.no)}`);
-      }
-    }
+  deps.log(`[group-satei] info filled ${receiptOf(live.no)} ${filled.length}/${keys.length}`);
+  if (filled.length === 0) {
+    // 読めた項目が0件：取り込まずに印と進める権を元に戻し、今の流れへ（［このまま進める］か30分に任せる。点検 MED-1 (a)）
+    await quietRestore(() => gsReleaseInfo(tid, live, kv, now()), deps);
+    return false;
   }
-  deps.log(`[group-satei] info filled ${receiptOf(tk.no)} ${filled.length}/${keys.length}`);
+  const cur: GsTicket = { ...live, read: gsApplyInfo(live.read, (live.read?.kind ?? info.kind) as GsKind, vals) };
+  try {
+    await kv.set(gsTicketKey(tid), cur, GS_TICKET_TTL);
+  } catch {
+    deps.log(`[group-satei] info save-failed ${receiptOf(live.no)}`);
+  }
   const o = await gsResumeInfo(tid, cur, deps, kv);
   deps.log(`[group-satei] info ${o.code}`);
-  const head = filled.length > 0 ? msgGsInfoFilled(filled) : MSG_GS_INFO_UNREAD;
+  const head = msgGsInfoFilled(filled);
   await say(sent(o) ? head : `${head}\n${o.text}`);
   return true;
 }
 
+const leftSec = (at: number, now: number) => Math.max(1, Math.ceil((at + GS_INFO_MS - now) / 1000));
+async function quietRestore(f: () => Promise<unknown>, deps: { log(l: string): void }): Promise<void> {
+  try {
+    await f();
+  } catch {
+    deps.log("[group-satei] info restore-failed");
+  }
+}
+
 export interface GsInfoSweepDeps extends GsPickDeps {
-  kv: (Kv & { smembers(key: string): Promise<unknown[]>; delIfToken?(key: string, token: string): Promise<boolean> }) | null;
+  kv: (Kv & { smembers(key: string): Promise<unknown[]>; srem(key: string, member: string): Promise<void>; delIfToken?(key: string, token: string): Promise<boolean> }) | null;
   push(to: string, messages: unknown[], key: string): Promise<number | null>;
   now(): number;
   startedAt?: number;
@@ -148,7 +182,7 @@ export async function sweepGsInfo(deps: GsInfoSweepDeps): Promise<void> {
         deps.log("[group-satei] info sweep budget");
         return;
       }
-      if (!(await gsClaimInfo(tid, tk.info.token, kv))) {
+      if (!(await gsClaimInfo(tid, tk.info.token, kv, deps.now()))) {
         // ［このまま進める］か答えが進めている最中
         continue;
       }
@@ -157,8 +191,14 @@ export async function sweepGsInfo(deps: GsInfoSweepDeps): Promise<void> {
       deps.log(`[group-satei] info ${o.code}`);
       const to = sateiNotifyTarget(env);
       if (!sent(o) && !o.code.startsWith("prep unknown") && to) {
-        const st = await deps.push(to, [{ type: "text", text: o.text }], `info-to:${tid}`).catch(() => null);
-        if (st === null || st < 200 || st >= 300) deps.log(`[group-satei] info timeout push-failed ${receiptOf(tk.no)}`);
+        // retry key に聞き方の token を入れる（押し直して聞き直した回の知らせを LINE が重複として捨てない。点検 LOW-1）
+        const id = `${tid}:${gsInfoTok(tk.info.token)}`;
+        const st = await deps.push(to, [{ type: "text", text: o.text }], `info-to:${id}`).catch(() => null);
+        if (st === null || !((st >= 200 && st < 300) || st === 409)) {
+          deps.log(`[group-satei] info timeout push-failed ${receiptOf(tk.no)}`);
+          // 2f の控えに積む（見回りが文を作り直して同じ retry key で送り直す。点検 LOW-2）
+          await gsOutboxAdd(kv, "info-to", id, deps.now(), deps.log, receiptOf(tk.no));
+        }
       }
       return;
     }

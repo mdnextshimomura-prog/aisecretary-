@@ -1,11 +1,13 @@
 /** 段2b-2：足りない項目を下村さんに聞く（group-satei-actions.ts の pick・gi／group-satei-info.ts。KV・portal・Claude は差し替え） */
 import assert from "node:assert/strict";
-import { handleGroupSateiPostback, type GsActionDeps } from "../src/lib/group-satei-actions";
+import { gsResumeInfo, handleGroupSateiPostback, type GsActionDeps } from "../src/lib/group-satei-actions";
+import { GS_OUTBOX_SET, gsOutboxRetry } from "../src/lib/group-satei-outbox";
+import { gsBuildingOf } from "../src/lib/group-satei-case";
 import {
-  asTicket, GS_INFO_MS, GS_INFO_SET, GS_STAGE2_SET, gsDecKey, gsFixKey, gsInfoKey, gsOpenKey, gsTicketKey, parseGsData, ticketIdOf, type GsRead, type GsTicket,
+  asTicket, GS_INFO_GO_MS, GS_INFO_MS, GS_INFO_SET, gsInfoGoKey, GS_STAGE2_SET, gsDecKey, gsFixKey, gsInfoKey, gsOpenKey, gsTicketKey, parseGsData, ticketIdOf, type GsRead, type GsTicket,
 } from "../src/lib/group-satei-data";
 import { handleGsInfoText, sweepGsInfo, type GsInfoDeps } from "../src/lib/group-satei-info";
-import { gsInfoParse } from "../src/lib/group-satei-facts";
+import { gsAnswerFact, gsInfoParse } from "../src/lib/group-satei-facts";
 import { MSG_GS_STALE, MSG_GS_PAUSED } from "../src/lib/group-satei-card";
 import type { SateiPrepIntakeReq } from "../src/lib/group-satei-prep-portal";
 import type { SateiDeal } from "../src/lib/satei-deal";
@@ -99,6 +101,8 @@ const pick = (x: X) => press(x, `v1|gs|${tid}|1|${DEAL}`);
 const answer = (x: X, text: string) => handleGsInfoText({ userId: SHIMO, text, replyToken: "r2" }, x.infoDeps);
 const ticket = (x: X) => asTicket(x.m.get(gsTicketKey(tid)))!;
 const lastText = (x: X) => x.replies[x.replies.length - 1].text;
+const tokOf = (x: X) => ticket(x).info?.token.slice(0, 8) ?? "abcdef01";
+const gi = (x: X, ver = 1) => `v1|gi|${tid}|${ver}|${tokOf(x)}`;
 
 const ASK = [
   "【受付 G7】資料から読めなかった項目があります。分かる分だけ1通で送ってください（喋ったままで大丈夫です）",
@@ -108,12 +112,13 @@ const ASK = [
 ].join("\n");
 
 (async () => {
+  const tk0 = (x: X) => tokOf(x);
   await t("足りない：準備へ進まず、1回にまとめて聞く（号室は聞かない）。仮の印・印・見回りの集合", async () => {
     const x = mk();
     await pick(x);
     assert.equal(x.preps.length, 0);
     assert.equal(x.replies[0].text, ASK);
-    assert.ok(JSON.stringify(x.replies[0].card).includes(`"data":"v1|gi|${tid}|1"`));
+    assert.ok(JSON.stringify(x.replies[0].card).includes(`"data":"v1|gi|${tid}|1|${tk0(x)}"`));
     assert.ok(JSON.stringify(x.replies[0].card).includes("このまま進める"));
     const tk = ticket(x);
     assert.equal(tk.state, "asking-info");
@@ -166,16 +171,53 @@ const ASK = [
     assert.equal(lastText(x), "受け取りました（築年月）。事例の相談の案を作ります");
     assert.ok(x.logs.includes("[group-satei] info filled G7 1/2"));
   });
-  await t("読めない（坪だけ・Claude の失敗）：もう一度は聞かずに進める", async () => {
+  await t("読めた項目が0件（坪だけ・Claude の失敗・答えでない）：取り込まずに今の流れへ。印と進める権を戻す", async () => {
     for (const ans of [async () => '{"専有面積":"20坪","築年月":null}', async () => { throw new Error("timeout"); }, async () => "わかりません"]) {
       const x = mk({ answer: ans });
       await pick(x);
-      await answer(x, "20坪くらい");
-      assert.equal(x.preps.length, 1);
-      assert.equal(x.preps[0].facts.exclusiveArea, null);
-      assert.equal(lastText(x), "読み取れなかったので、このまま進めます");
+      const token = ticket(x).info!.token;
+      assert.equal(await answer(x, "20坪くらい"), false);
+      assert.equal(x.preps.length, 0);
+      assert.equal(ticket(x).state, "asking-info");
+      assert.deepEqual(x.m.get(gsInfoKey(SHIMO)), { tid, token });
+      assert.equal(x.m.has(gsInfoGoKey(tid, token)), false);
       assert.ok(x.logs.includes("[group-satei] info filled G7 0/2"));
+      // あとの［このまま進める］で進められる
+      await press(x, gi(x));
+      assert.equal(x.preps.length, 1);
     }
+  });
+  await t("答えらしい手がかりの無い1通は Claude を呼ばず、印も消さずに今の流れへ", async () => {
+    const x = mk({ answer: async () => '{"専有面積":"65.3"}' });
+    await pick(x);
+    assert.equal(await answer(x, "送信してください"), false);
+    assert.equal(x.answers.length, 0);
+    assert.ok(x.m.has(gsInfoKey(SHIMO)));
+    assert.ok(x.logs.includes("[group-satei] info not-answer G7"));
+    assert.equal(await answer(x, "専有面積は六十五"), true, "聞いた項目の言葉があれば受ける");
+  });
+  await t("印は読めたのに消せない：「記録できませんでした」で受ける（今の流れへ渡さない）", async () => {
+    const x = mk({ answer: async () => '{"専有面積":"65.3"}' });
+    await pick(x);
+    const got = await handleGsInfoText({ userId: SHIMO, text: "65.3", replyToken: "r2" }, { ...x.infoDeps, kv: { ...x.kv, delIfToken: async () => { throw new Error("kv"); } } });
+    assert.equal(got, true);
+    assert.equal(lastText(x), "記録できませんでした。もう一度送ってください");
+    assert.equal(x.answers.length, 0);
+  });
+  await t("受付票が読めない・進める権が取れない：「もう一度送ってください」。印は残す", async () => {
+    const x = mk({ answer: async () => '{"専有面積":"65.3"}' });
+    await pick(x);
+    const get = x.kv.get;
+    const broken = { ...x.kv, get: async (k: string) => { if (k === gsTicketKey(tid)) throw new Error("kv"); return get(k); } };
+    assert.equal(await handleGsInfoText({ userId: SHIMO, text: "65.3", replyToken: "r2" }, { ...x.infoDeps, kv: broken }), true);
+    assert.ok(lastText(x).startsWith("いま受け取れませんでした"));
+    assert.ok(x.m.has(gsInfoKey(SHIMO)));
+    const noClaim = { ...x.kv, setNx: async (k: string, v: unknown) => { if (k.startsWith("gsatei:infogo:")) throw new Error("kv"); return x.kv.setNx(k, v); } };
+    assert.equal(await handleGsInfoText({ userId: SHIMO, text: "65.3", replyToken: "r2" }, { ...x.infoDeps, kv: noClaim }), true);
+    assert.equal(lastText(x), "いま受け取れませんでした。少し待ってからもう一度送ってください（受付 G7）");
+    assert.ok(x.m.has(gsInfoKey(SHIMO)), "印を置き直す");
+    assert.equal(await answer(x, "65.3"), true);
+    assert.equal(x.preps.length, 1);
   });
   await t("所在・物件名：名前らしい値は捨て、通った所在は read.address に", async () => {
     const read: GsRead = { ...FULL, address: null, propertyName: null };
@@ -198,7 +240,7 @@ const ASK = [
   await t("［このまま進める］：足りないまま準備へ。印を消す。答えの1通は今の流れへ", async () => {
     const x = mk();
     await pick(x);
-    await press(x, `v1|gi|${tid}|1`);
+    await press(x, gi(x));
     assert.equal(x.preps.length, 1);
     assert.equal(x.preps[0].facts.exclusiveArea, null);
     assert.equal(ticket(x).state, "gathering");
@@ -211,17 +253,17 @@ const ASK = [
   await t("二度押し・答えのあとの［このまま進める］：「もう進めています」。古い版：新しいカード", async () => {
     const x = mk({ answer: async () => '{"専有面積":"65.3"}' });
     await pick(x);
-    await press(x, `v1|gi|${tid}|1`);
-    await press(x, `v1|gi|${tid}|1`);
+    await press(x, gi(x));
+    await press(x, gi(x));
     assert.equal(lastText(x), "この受付はもう進めています（受付 G7）");
     assert.equal(x.preps.length, 1);
     const y = mk({ answer: async () => '{"専有面積":"65.3"}' });
     await pick(y);
     await answer(y, "65.3");
-    await press(y, `v1|gi|${tid}|1`);
+    await press(y, gi(y));
     assert.equal(lastText(y), "この受付はもう進めています（受付 G7）");
     assert.equal(y.preps.length, 1);
-    await press(y, `v1|gi|${tid}|2`);
+    await press(y, gi(y, 2));
     assert.equal(lastText(y), MSG_GS_STALE);
   });
   await t("聞いているあいだに同じカードの案件・gm・gn・gk：選択済み（I5）", async () => {
@@ -264,7 +306,7 @@ const ASK = [
   await t("進めたら portal が断った：票を asking に戻し、仮の印を外す（押し直せる）", async () => {
     const x = mk({ prepIntake: { kind: "rejected", status: 400, code: "INVALID_REQUEST" } });
     await pick(x);
-    await press(x, `v1|gi|${tid}|1`);
+    await press(x, gi(x));
     assert.equal(ticket(x).state, "asking");
     assert.equal(ticket(x).info, undefined);
     assert.equal(x.m.has(gsDecKey(tid)), false);
@@ -274,7 +316,7 @@ const ASK = [
   await t("進めたら PREP_DISABLED：2a の道（マンションは今の受付）", async () => {
     const x = mk({ prepIntake: { kind: "rejected", status: 503, code: "PREP_DISABLED" } });
     await pick(x);
-    await press(x, `v1|gi|${tid}|1`);
+    await press(x, gi(x));
     assert.equal(x.intakes.length, 1);
     assert.equal(ticket(x).state, "started");
     assert.equal(x.m.get(gsDecKey(tid)), `gs:${DEAL}`);
@@ -282,10 +324,11 @@ const ASK = [
   await t("30分の見回りで準備へ進めなかったら、その文を下村さんへ1通（0通にしない）", async () => {
     const x = mk({ prepIntake: { kind: "rejected", status: 400, code: "INVALID_REQUEST" } });
     await pick(x);
+    const tok = tokOf(x);
     x.setNow(NOW + GS_INFO_MS);
     await x.sweep();
     assert.equal(x.pushes.length, 1);
-    assert.equal((x.pushes[0] as unknown[])[2], `info-to:${tid}`);
+    assert.equal((x.pushes[0] as unknown[])[2], `info-to:${tid}:${tok}`);
   });
   await t("答えの取り込み：印が無い・グループ・ほかの人・off は false（off は KV も読まない）", async () => {
     const x = mk();
@@ -310,7 +353,7 @@ const ASK = [
     assert.equal(ticket(x).info, undefined);
     assert.equal(JSON.stringify(x.logs).includes("info"), false);
     const y = mk({ env });
-    await press(y, `v1|gi|${tid}|1`);
+    await press(y, gi(y));
     assert.equal(lastText(y), MSG_GS_PAUSED);
     const z = mk({ env });
     await z.sweep();
@@ -319,14 +362,74 @@ const ASK = [
   await t("押せるのは TASK_SATEI_USER_IDS の人だけ", async () => {
     const x = mk();
     await pick(x);
-    await press(x, `v1|gi|${tid}|1`, "U" + "e".repeat(32));
+    await press(x, gi(x), "U" + "e".repeat(32));
     assert.equal(lastText(x), "いまは下村さんだけが使えます");
     assert.equal(ticket(x).state, "asking-info");
   });
-  await t("data の形：v1|gi|<tid>|<ver> だけ", async () => {
-    assert.deepEqual(parseGsData(`v1|gi|${tid}|3`), { op: "gi", tid, ver: 3 });
+  await t("data の形：v1|gi|<tid>|<ver>|<token の頭8字> だけ", async () => {
+    assert.deepEqual(parseGsData(`v1|gi|${tid}|3|abcdef01`), { op: "gi", tid, ver: 3, tok: "abcdef01" });
+    assert.equal(parseGsData(`v1|gi|${tid}|3`), null);
     assert.equal(parseGsData(`v1|gi|${tid}|3|x`), null);
-    assert.equal(parseGsData(`v1|gi|xyz|3`), null);
+    assert.equal(parseGsData(`v1|gi|xyz|3|abcdef01`), null);
+  });
+  await t("前の回のカードの［このまま進める］は、聞き直した回を進めない", async () => {
+    const x = mk();
+    await pick(x);
+    await press(x, `v1|gi|${tid}|1|00000000`);
+    assert.equal(lastText(x), MSG_GS_STALE);
+    assert.equal(ticket(x).state, "asking-info");
+  });
+  await t("進める権：取ったあとに落ちても3分たてば取り直せる。新しい権があるうちは取れない", async () => {
+    const x = mk();
+    await pick(x);
+    const token = ticket(x).info!.token;
+    x.m.set(gsInfoGoKey(tid, token), { at: NOW });
+    await press(x, gi(x));
+    assert.equal(lastText(x), "この受付はもう進めています（受付 G7）");
+    x.setNow(NOW + GS_INFO_GO_MS);
+    await press(x, gi(x));
+    assert.equal(x.preps.length, 1);
+    assert.equal(ticket(x).state, "gathering");
+  });
+  await t("再開が二度走っても準備は1回（startGsPrep の印）", async () => {
+    const x = mk();
+    await pick(x);
+    const tk = ticket(x);
+    const [a, b] = await Promise.all([gsResumeInfo(tid, tk, x.deps, x.kv), gsResumeInfo(tid, tk, x.deps, x.kv)]);
+    assert.equal(x.preps.length, 1);
+    assert.equal(ticket(x).state, "gathering");
+    assert.ok([a.code, b.code].includes("already"));
+  });
+  await t("答えの所在・物件名：地名らしい語・建物らしい語が無ければ捨てる", async () => {
+    const read: GsRead = { ...FULL, address: null, propertyName: null };
+    const x = mk({ read, answer: async () => '{"所在":"天満","物件名":"山田太郎"}' });
+    await pick(x);
+    assert.equal(await answer(x, "天満の山田太郎"), false, "0件なので今の流れへ");
+    for (const [k, v, want] of [
+      ["propertyName", "山田太郎", null], ["propertyName", "天満荘", "天満荘"], ["propertyName", "ジオ西宮", "ジオ西宮"], ["propertyName", "グランドメゾン", "グランドメゾン"],
+      ["address", "天満", null], ["address", "大阪市北区天満2丁目", "大阪市北区天満2丁目"], ["address", "甲子園町1番", "甲子園町1番"],
+    ] as const) assert.equal(gsAnswerFact(k, v), want, v);
+  });
+  await t("建物名：「第N」「N番館」は残し、「N階」は落とす", async () => {
+    const b = (name: string) => gsBuildingOf({ ...FULL, propertyName: name, facts: { ...FULL.facts!, roomNo: null } });
+    assert.equal(b("ライオンズ第2"), "ライオンズ第2");
+    assert.equal(b("ブランズ2番館 305"), "ブランズ2番館");
+    assert.equal(b("パークハウス 12階 1203号"), "パークハウス");
+    assert.equal(b("ジオ西宮606号室"), "ジオ西宮");
+  });
+  await t("30分の見回りの知らせが送れない：2f の控えに積み、asking のあいだだけ文を作り直して送る", async () => {
+    const x = mk({ prepIntake: { kind: "rejected", status: 400, code: "INVALID_REQUEST" } });
+    await pick(x);
+    const tok = tokOf(x);
+    x.setNow(NOW + GS_INFO_MS);
+    await sweepGsInfo({ ...x.infoDeps, kv: x.kv, push: async () => 500, now: () => NOW + GS_INFO_MS, startedAt: NOW + GS_INFO_MS });
+    assert.ok(x.sets.get(GS_OUTBOX_SET)?.has(`info-to:${tid}:${tok}`));
+    const sentMsgs: unknown[][] = [];
+    const later = NOW + GS_INFO_MS + 3 * 60_000;
+    await gsOutboxRetry({ kv: x.kv, to: SHIMO, push: async (...a) => { sentMsgs.push(a); return 200; }, now: () => later, startedAt: later, log: () => undefined });
+    assert.equal(sentMsgs.length, 1);
+    assert.equal(sentMsgs[0][2], `info-to:${tid}:${tok}`);
+    assert.equal((sentMsgs[0][1] as Array<{ text: string }>)[0].text, "足りない項目を待ったあと、事例の案づくりへ進められませんでした。もう一度案件を選んでください（受付 G7）");
   });
   await t("gsInfoParse：聞いていない項目は読まない", async () => {
     assert.deepEqual(gsInfoParse(["builtYm"], '{"専有面積":"65.3","築年月":"R2.4"}'), { builtYm: "2020-04" });
