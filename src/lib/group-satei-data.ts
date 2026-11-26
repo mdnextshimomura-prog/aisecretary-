@@ -172,7 +172,8 @@ export type GsAction =
   | { op: "gs"; tid: string; ver: number; dealId: string }
   | { op: "gl"; tid: string; ver: number; offset: number }
   | { op: "gm"; tid: string; ver: number }
-  | { op: "gn"; tid: string; ver: number };
+  | { op: "gn"; tid: string; ver: number }
+  | { op: "gk"; tid: string; ver: number; code: GsReqKind };
 
 const TID_RE = /^[0-9a-f]{16}$/;
 const VER_RE = /^[1-9][0-9]?$/;
@@ -198,5 +199,9 @@ export function parseGsData(data: string): GsAction | null {
   }
   if (p[1] === "gm" && p.length === 4) return { op: "gm", tid, ver };
   if (p[1] === "gn" && p.length === 4) return { op: "gn", tid, ver };
+  if (p[1] === "gk") {
+    const code = p[4];
+    return p.length === 5 && isGsReqKind(code) ? { op: "gk", tid, ver, code } : null;
+  }
   return null;
 }

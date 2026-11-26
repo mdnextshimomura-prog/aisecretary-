@@ -5,12 +5,13 @@
  * 例外は投げない。ログは符号・受付番号・J番号だけ。
  */
 import {
-  GS_TICKET_TTL, groupSateiActive, groupSateiOn, gsDecKey, gsEventId, gsOpenKey, gsTicketKey, receiptOf, asTicket,
+  GS_TICKET_TTL, groupSateiActive, groupSateiOn, groupSateiStage2On, gsDecKey, gsEventId, gsOpenKey, gsReqLabel, gsTicketKey,
+  receiptOf, asTicket,
   type GsAction, type GsEnv, type GsTicket,
 } from "./group-satei-data";
 import type { GsKv } from "./group-satei-open";
 import {
-  gsListCard, MSG_GS_BUSY, MSG_GS_LIST_END, MSG_GS_DEALS_FAILED, MSG_GS_EXPIRED, MSG_GS_FORBIDDEN, MSG_GS_NO_FOLDER, MSG_GS_NOT_ACTIVE,
+  gsListCard, gsSateiNextCard, msgGsKindRecorded, msgGsKindSatei, MSG_GS_BUSY, MSG_GS_LIST_END, MSG_GS_DEALS_FAILED, MSG_GS_EXPIRED, MSG_GS_FORBIDDEN, MSG_GS_NO_FOLDER, MSG_GS_NOT_ACTIVE,
   MSG_GS_PAUSED, MSG_GS_STALE, MSG_GS_UNKNOWN, msgGsAlready, msgGsDismissed, msgGsKindMismatch, msgGsManual, msgGsNoDeal,
 } from "./group-satei-card";
 import { isSateiUser, sateiActive } from "./satei-data";
@@ -37,6 +38,7 @@ interface Outcome {
   text: string;
   code: string;
   settled: boolean;
+  card?: FlexMessage;
 }
 
 type Kv = NonNullable<GsActionDeps["kv"]>;
@@ -56,6 +58,8 @@ async function save(kv: Kv, tid: string, tk: GsTicket): Promise<void> {
 }
 
 const MISMATCH_KINDS = ["マンション", "戸建", "土地"];
+/** 段2：案件を選んだ受付票に「査定」の印を残す（off のあいだは何も足さない＝段1と同じ票） */
+const sateiKind = (env: GsEnv): Partial<GsTicket> => (groupSateiStage2On(env) ? { requestKind: "satei" } : {});
 /** 印（gsatei:dec）の値の頭。portal の受付の結果が分からないとき */
 const UNKNOWN_DEC = "unknown:";
 
@@ -107,14 +111,14 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
     const quiet = (f: () => Promise<void>) => quietKv(f, deps);
     if (r.kind === "ok") {
       const jobNo = r.value.no;
-      await quiet(() => save(kv, a.tid, { ...tk, state: "started", provisional: false, dealId: a.dealId, jobNo }));
+      await quiet(() => save(kv, a.tid, { ...tk, ...sateiKind(env), state: "started", provisional: false, dealId: a.dealId, jobNo }));
       const text = r.value.created ? msgSateiAccepted(jobNo) : msgSateiInProgress(jobNo);
       return { text: text + warn, code: `started ${receiptOf(no)} #J${jobNo}`, settled: true };
     }
     if (r.kind === "unknown") {
       // 結果不明は印の値で覚える（押し直しは portal を呼ばずに「確かめられませんでした」）
       await quiet(() => kv.set(gsDecKey(a.tid), `${UNKNOWN_DEC}${a.dealId}`, GS_TICKET_TTL));
-      await quiet(() => save(kv, a.tid, { ...tk, state: "started", provisional: false, dealId: a.dealId, unknown: true }));
+      await quiet(() => save(kv, a.tid, { ...tk, ...sateiKind(env), state: "started", provisional: false, dealId: a.dealId, unknown: true }));
       return { text: MSG_GS_UNKNOWN, code: "unknown", settled: true };
     }
     await quiet(() => kv.del(gsDecKey(a.tid)));
@@ -123,8 +127,25 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
       : { text: MSG_SATEI_FAILED, code: "rejected", settled: true };
   }
   if (!(await kv.setNx(gsDecKey(a.tid), `gs:${a.dealId}`, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
-  await quietKv(() => save(kv, a.tid, { ...tk, state: "manual", provisional: false, dealId: a.dealId }), deps);
+  await quietKv(() => save(kv, a.tid, { ...tk, ...sateiKind(env), state: "manual", provisional: false, dealId: a.dealId }), deps);
   return { text: msgGsManual(no, kind) + warn, code: `manual ${kind === "戸建" ? "house" : kind === "土地" ? "land" : "unknown-kind"}`, settled: true };
+}
+
+/**
+ * 段2：「何の依頼？」。［査定］は印（gsatei:dec）を取らない（取ると、このあとの案件選び gs が「選択済み」になる）。
+ * ほかの7つは記録だけ：印を gk:<符号> で取り、受付票を manual にして閉じる（中身の自動化は別の設計）。
+ */
+async function chooseKind(a: Extract<GsAction, { op: "gk" }>, tk: GsTicket, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
+  const no = tk.no;
+  if (a.code === "satei") {
+    if (tk.state === "asking" && tk.requestKind !== "satei") {
+      await quietKv(() => save(kv, a.tid, { ...tk, requestKind: "satei" }), deps);
+    }
+    return { text: msgGsKindSatei(no), code: `kind satei ${receiptOf(no)}`, settled: true, card: gsSateiNextCard(a.tid, tk.ver, no) };
+  }
+  if (!(await kv.setNx(gsDecKey(a.tid), `gk:${a.code}`, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
+  await quietKv(() => save(kv, a.tid, { ...tk, state: "manual", provisional: false, requestKind: a.code }), deps);
+  return { text: msgGsKindRecorded(no, gsReqLabel(a.code)), code: `kind ${a.code} ${receiptOf(no)}`, settled: true };
 }
 
 async function decide(a: Exclude<GsAction, { op: "gl" }>, tk: GsTicket, userId: string, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
@@ -134,6 +155,7 @@ async function decide(a: Exclude<GsAction, { op: "gl" }>, tk: GsTicket, userId: 
       ? { text: MSG_GS_UNKNOWN, code: "unknown-again", settled: true }
       : { text: msgGsAlready(tk.no), code: "already", settled: true };
   }
+  if (a.op === "gk") return chooseKind(a, tk, deps, kv);
   if (a.op === "gs") return pick(a, tk, userId, deps, kv);
   if (a.op === "gm") {
     // 連打で7日を延ばさない
@@ -163,6 +185,11 @@ export async function handleGroupSateiPostback(
   };
   if (!groupSateiActive(env)) {
     deps.log(`[group-satei] ${action.op} paused`);
+    return say(MSG_GS_PAUSED, "paused");
+  }
+  // 段2のボタン（gk）は GROUP_SATEI_STAGE2 off なら何もしない（on のあいだに出したカードを off のあとに押された）
+  if (action.op === "gk" && !groupSateiStage2On(env)) {
+    deps.log("[group-satei] gk paused stage2");
     return say(MSG_GS_PAUSED, "paused");
   }
   const userId = ev.source.userId;
@@ -233,7 +260,7 @@ export async function handleGroupSateiPostback(
     }
     settled = r.settled;
     deps.log(`[group-satei] ${action.op} ${r.code}`);
-    await say(r.text, r.code);
+    await say(r.text, r.code, r.card);
   } finally {
     if (settled) await deps.complete(rkey).catch(() => deps.log(`[group-satei] mark-failed ${action.op}`));
   }
