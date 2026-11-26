@@ -194,6 +194,8 @@ export const GS_LOCK_WAIT_MS = 20 * 1000;
 /** 知らせが出ていない受付票の控え（見回りの掃除が拾う）と、掃除するまでの猶予 */
 export const GS_PENDING_SET = "gsatei:pending";
 export const GS_SWEEP_AFTER_MS = 3 * 60 * 1000;
+/** 段2f（F2）：掃除が最初の知らせを送り直す回数の上限（毎分1回＝約10分以上）。超えたら掃除の対象から外す */
+export const GS_TICKET_PUSH_TRIES = 10;
 /** あとから届いた資料の控え（受付票ごとの集合。要素は "image:<id>" か "pdf:<id>"。足すのは原子的な sadd だけ） */
 export const gsLateKey = (tid: string) => `gsatei:late:${tid}`;
 /** 読み直す時刻（受付票とは別に置く＝資料が届くたびに受付票を書き戻さない） */
@@ -279,6 +281,8 @@ export interface GsTicket {
   unknown?: boolean;
   /** 下村さんへの知らせの push が通った（false のまま＝届いていないかもしれない。再送は段2） */
   pushed?: boolean;
+  /** 段2f（F2）：掃除が最初の知らせを送ろうとした回数（GS_TICKET_PUSH_TRIES まで） */
+  pushTries?: number;
   /** 束ねた資料の数（知らせの「資料：」の行。読み直しのとき控えが消えていても数えられるように） */
   materials?: { images: number; pdfs: number };
   /** 最初の知らせを、資料を待つために遅らせている */
@@ -334,6 +338,7 @@ export function asTicket(raw: unknown): GsTicket | null {
   if (typeof r.requesterId !== "string" || typeof r.at !== "number") return null;
   if (!strs(r.triggerMsgIds) || !strs(r.mediaIds) || !STATES.includes(r.state as GsState)) return null;
   if (r.pushed !== undefined && typeof r.pushed !== "boolean") return null;
+  if (r.pushTries !== undefined && !isCount(r.pushTries)) return null;
   if (r.requestKind !== undefined && !isGsReqKind(r.requestKind)) return null;
   if (r.prep !== undefined && !isGsPrep(r.prep)) return null;
   return r as unknown as GsTicket;

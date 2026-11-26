@@ -197,7 +197,7 @@ on のとき、対象グループの画像・ファイルを `gsatei:media:<grou
 種別は CRM_物件 の `種別` が正：マンション＋フォルダあり → portal の受付（依頼 ID は `gs<受付票の ID>`）、戸建・土地・不明 → 「手作業の査定に回します」。
 ログは `[group-satei] ticket G7 opened A read ok asked 3`・`[group-satei] gs started G7 #J12`・`gs manual house` の形（符号だけ）。設計 `docs/superpowers/specs/2026-11-24-group-satei-intake-design.md`、計画 `docs/superpowers/plans/2026-11-24-group-satei-intake-stage1.md`。
 案件カードの絞り込みは `DEAL_CARD_ONLY_IDS`（未設定なら今の2件、`all` で全件、カンマ区切りの ID）。on にする・env を足すのは下村さんの承認後（値を画面に出さない方法で入れる）。
-- 実装の補足（段1の作りどおり）：マンションで portal の受付へ進むのは `TASK_SATEI=1` のときだけ（off なら印を取らず「手作業の査定に回します」。on に戻せば同じカードで押し直せる）。知らせの push が通ったかは受付票の `pushed` に残す（送り直しは段2）。
+- 実装の補足（段1の作りどおり）：マンションで portal の受付へ進むのは `TASK_SATEI=1` のときだけ（off なら印を取らず「手作業の査定に回します」。on に戻せば同じカードで押し直せる）。知らせの push が通ったかは受付票の `pushed` に残す（送り直しは下の掃除。段2f から回数に上限）。
 - 時間：資料の取得（1件8秒）から Claude の答えまで合わせて40秒、入口 B の判定も40秒、控えの KV は3秒。webhook の `maxDuration` は変えていない。入口は3つとも例外を投げず、off・対象外なら KV・AI・Notion を1回も呼ばない（`tests/group-satei-webhook.test.ts`）。入口 A・B はその場では始めるだけで待たず（今の返事・同じ束の後ろのイベントを遅らせない）、POST が返す直前にまとめて待つ（`gsJobs`。`tests/group-satei-webhook-route.test.ts`）。控えだけは画像・ファイルの処理の前に待つ（3秒まで）。
 - 同じグループで `PHOTO_MENTION_ASK` と `GROUP_SATEI` を両方 on にしてよい（段2f から。画像のあとの「@下村」は、グループ査定が受け持つ依頼なら photo-ask が譲る＝下村さんへの push は1通）。譲るのは言葉と受付票で決めるので、入口 B の AI が「査定でない」とした名指しは、どちらからも知らせが出ない（photo-ask も査定らしさで出すので、ほぼ同じ結果）。
 - 対象グループは送り主の制限（`SECRETARY_ALLOWED_GROUP_IDS` か `LINE_GROUP_ID`）も通ること。下村さんの1対1のボタンも送り主の制限を通るので、`SECRETARY_ALLOWED_USER_IDS`（空なら `TASK_BUTTONS_ADMIN_IDS`）に入っていること。
@@ -207,7 +207,7 @@ on のとき、対象グループの画像・ファイルを `gsatei:media:<grou
   - あとから貼られた画像・PDF（本人の30分以内・受付票を引用したもの・開いている票が1件だけなら下村さん以外の2時間以内）は `gsatei:late:<tid>` に sadd するだけで、受付票は書き換えない。読み直す時刻は `gsatei:rat:<tid>`（最後の資料から1分）。
   - 読み直すのは webhook の中の係（`runRereadWorker`。`gsJobs` で POST の返す前に待つ）。受付票ごとに1つ（`gsatei:rlock:<tid>`、280秒）。残り時間は webhook の開始時刻から数えて250秒で打ち切り、1周に75秒残らなければ始めない。印が取れない画像の係は20秒で諦める。最初の知らせは版1のまま、知らせたあとの読み直しは版を上げて出し直す（2回まで。前のカードは古い版になる）。資料は取れた分だけで読む（全部取れなければ読めなかった扱い）。
   - 読む前後で状態・版・`gsatei:dec:<tid>` を確かめ、押されたあとの票は書かない・知らせない。pushed の印も押されていないときだけ書く。
-  - 掃除：毎分の見回り（`/api/obi/cloud-tick`）の最後に `sweepGroupSatei`。前段が30秒未満のときだけ、`gsatei:pending` から「asking・未決定・pushed でない・係の印なし・読み直す時刻か依頼から3分」の票を1件、AI を呼ばずに知らせる（同じ版の retry key）。
+  - 掃除：毎分の見回り（`/api/obi/cloud-tick`）の最後に `sweepGroupSatei`。前段が30秒未満のときだけ、`gsatei:pending` から「asking・未決定・pushed でない・係の印なし・読み直す時刻か依頼から3分」の票を1件、AI を呼ばずに知らせる（同じ版の retry key）。段2f から、送ろうとした回数を受付票の `pushTries` に数え、10回（約10分以上）だめなら `gsatei:pending` から外してログ `[group-satei] ticket G7 push gave-up`（前は受付票の7日のあいだ毎分送り続けた）。
   - ログは `[group-satei] ticket G7 opened B deferred`・`late-media`・`reread read ok first|v2`・`reread stale`・`reread out-of-time`・`swept` の形（符号だけ）。テスト `tests/group-satei-reread.test.ts`。
   - 画像が続くと、その webhook の応答は係の待ち（最後の資料から1分＋読み取り）のあいだ止まる。LINE の再送は無効なので二重にはならない。
 

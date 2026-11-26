@@ -8,7 +8,7 @@ import { normalizeProperty } from "./property";
 import { sateiNotifyTarget } from "./satei-data";
 import {
   GS_CANDIDATES_MAX, GS_DEFER_MS, GS_MATERIALS_MAX, GS_MEDIA_MAX, GS_MEDIA_TTL, GS_QUIET_MS, GS_READS_PER_DAY,
-  GS_LOCK_TTL_S, GS_LOCK_WAIT_MS, GS_PENDING_SET, GS_POLL_MS, GS_SWEEP_AFTER_MS, GS_REREAD_MAX, GS_ROUND_MS, GS_SEQ_KEY, GS_TICKET_TTL, GS_WORKER_DEADLINE_MS,
+  GS_LOCK_TTL_S, GS_LOCK_WAIT_MS, GS_PENDING_SET, GS_POLL_MS, GS_SWEEP_AFTER_MS, GS_TICKET_PUSH_TRIES, GS_REREAD_MAX, GS_ROUND_MS, GS_SEQ_KEY, GS_TICKET_TTL, GS_WORKER_DEADLINE_MS,
   asTicket, groupSateiActive, groupSateiOn, groupSateiStage2On, gsDecKey, gsLateKey, gsMediaKey, gsMsgKey, gsOpenKey, gsReadsKey, gsRereadAtKey,
   gsRereadLockKey, gsTicketKey, receiptOf, ticketIdOf,
   type GsEnv, type GsMedia, type GsRead, type GsTicket,
@@ -471,6 +471,7 @@ async function rereadOne(tid: string, deps: GsOpenDeps, kv: GsRereadKv): Promise
 /**
  * 毎分の見回りの掃除（11/25 再レビュー 2）：知らせが出ていない受付票を、読み直さずに知らせる。
  * 対象は「asking・決定の印なし・pushed でない・係の印なし・読み直す時刻（無ければ依頼の時刻）から3分」。
+ * 段2f（F2）：送ろうとした回数を受付票の pushTries に数え、GS_TICKET_PUSH_TRIES 回だめなら対象から外す（push gave-up）。
  * AI は呼ばない（見回りの時間の上限があるため）。1回に1件。例外は投げない。
  */
 export async function sweepGroupSatei(deps: GsOpenDeps & { kv: GsRereadKv | null }): Promise<void> {
@@ -489,6 +490,12 @@ export async function sweepGroupSatei(deps: GsOpenDeps & { kv: GsRereadKv | null
       const rat = Number(await kv.get(gsRereadAtKey(tid)));
       const since = Math.max(t.at, Number.isFinite(rat) ? rat : 0);
       if (deps.now() - since < GS_SWEEP_AFTER_MS) continue;
+      // 段2f（F2）：送り直しは GS_TICKET_PUSH_TRIES 回まで（受付票の7日のあいだ毎分送り続けない）
+      if ((t.pushTries ?? 0) >= GS_TICKET_PUSH_TRIES) {
+        await kv.srem(GS_PENDING_SET, tid);
+        deps.log(`[group-satei] ticket ${receiptOf(t.no)} push gave-up`);
+        continue;
+      }
       if (!(await kv.setNx(gsRereadLockKey(tid), 1, 60))) continue;
       try {
         const late = (await kv.smembers(gsLateKey(tid))).map(parseLate).filter((x): x is { kind: "image" | "pdf"; id: string } => x !== null && !t.mediaIds.includes(x.id));
@@ -496,6 +503,7 @@ export async function sweepGroupSatei(deps: GsOpenDeps & { kv: GsRereadKv | null
         const next: GsTicket = {
           ...t,
           deferred: false,
+          pushTries: (t.pushTries ?? 0) + 1,
           materials: {
             images: base.images + late.filter((l) => l.kind === "image").length,
             pdfs: base.pdfs + late.filter((l) => l.kind === "pdf").length,
@@ -508,6 +516,10 @@ export async function sweepGroupSatei(deps: GsOpenDeps & { kv: GsRereadKv | null
         await kv.set(gsTicketKey(tid), next, GS_TICKET_TTL);
         const { sent } = await notifyTicket(tid, next, deps, kv, false);
         deps.log(`[group-satei] ticket ${receiptOf(t.no)} swept${sent ? "" : " push-failed"}`);
+        if (!sent && (next.pushTries ?? 0) >= GS_TICKET_PUSH_TRIES) {
+          await kv.srem(GS_PENDING_SET, tid);
+          deps.log(`[group-satei] ticket ${receiptOf(t.no)} push gave-up`);
+        }
       } finally {
         await kv.del(gsRereadLockKey(tid)).catch(() => undefined);
       }
