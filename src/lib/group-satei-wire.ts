@@ -21,12 +21,14 @@ import {
 import type { GsActionDeps } from "./group-satei-actions";
 import { capByTotalBytes, readGsMaterials, type GsCreate } from "./group-satei-read";
 import { sateiPrepDecide, sateiPrepIntake, sateiPrepNotices, type GsPrepPortal } from "./group-satei-prep-portal";
+import { gsFixRequest, gsParseFix } from "./group-satei-case";
+import { handleGsFixText, type GsFixDeps } from "./group-satei-propose";
 import { SATEI_PORTAL_TIMEOUT_MS, sateiPortalConfig } from "./satei-portal";
-import { pushMessagesWithRetryKey } from "./line";
+import { pushMessagesWithRetryKey, replyTextAndCard, sendLineMessage } from "./line";
 import { loadMembers } from "./members";
 import { normNotionId } from "./satei-deal";
 import { uuidv5 } from "./satei-notify";
-import { makeSateiNotion, readSateiDealReal, sateiActionDeps } from "./satei-wire";
+import { makeSateiNotion, readSateiDealReal, sateiActionDeps, sateiReasonKv } from "./satei-wire";
 import { loadActiveDeals } from "./task-record-wire";
 
 const log = (l: string) => console.log(l);
@@ -323,3 +325,19 @@ export async function maybeOpenGroupSateiB(
     log("[group-satei] skip:exception B");
   }
 }
+
+const FIX_TIMEOUT_MS = 25_000;
+
+/** ［直す］の次の1通（1対1）。KV は受付票の KV に、印を消す delIfToken（Upstash の EVAL）を足したもの */
+export function groupSateiFixDeps(): GsFixDeps {
+  const base = groupSateiKv();
+  const mark = sateiReasonKv();
+  return {
+    kv: base && mark ? { ...base, delIfToken: mark.delIfToken } : null,
+    revise: async (lines, text, kind) => gsParseFix(await within(create(gsFixRequest(lines, text, kind)), FIX_TIMEOUT_MS)),
+    reply: (token, text, card) => (card ? replyTextAndCard(token, text, card) : sendLineMessage(token, text)),
+    now: () => Date.now(),
+    log,
+  };
+}
+export { handleGsFixText };

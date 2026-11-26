@@ -133,6 +133,8 @@ import { dealWordEntry } from "@/lib/deal-card";
 import { maybeAskPhotoMention } from "@/lib/photo-ask";
 import { photoAskDeps } from "@/lib/photo-ask-wire";
 import {
+  groupSateiFixDeps,
+  handleGsFixText,
   maybeOpenGroupSateiA,
   maybeOpenGroupSateiB,
   recordGroupSateiMediaEvent,
@@ -890,6 +892,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           replyToken,
         },
         sateiReasonDeps(),
+      )
+    ) {
+      markCommitted();
+      continue;
+    }
+
+    // 段2d：［直す］のあとの次の1通（1対1・下村さん・印 gsatei:fix:<userId> があるときだけ）。無ければ false で今の流れへ
+    if (
+      await handleGsFixText(
+        { userId: source.userId, groupId: source.groupId, text: event.message.text, replyToken },
+        groupSateiFixDeps(),
       )
     ) {
       markCommitted();
