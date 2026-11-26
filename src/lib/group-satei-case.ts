@@ -225,5 +225,9 @@ export const msgGsFixUnsafe = (no: number) =>
 export const msgGsFixFailed = (no: number) => `うまく作り直せませんでした。［直す］をもう一度押すか、山口さんへは手で頼んでください（${R(no)}）`;
 export const msgGsRemindMe = (no: number, label: string) =>
   `${R(no)} の事例がまだ届いていないので、グループで山口さんに1回だけ声をかけました（期日 ${label}）`;
+export const msgGsRemindUnknown = (no: number) =>
+  `${R(no)} の事例がまだ届いていないので、グループで山口さんに声をかけましたが、届いたか確かめられませんでした。グループを見て、出ていなければ手で声をかけてください`;
+export const msgGsRemindFailed = (no: number) =>
+  `${R(no)} の事例がまだ届いていないので、グループで山口さんに声をかけようとしましたが、送れませんでした。手で声をかけてください`;
 export const msgGsAlreadyRequested = (no: number) => `山口さんへはもう頼んであります（${R(no)}）`;
 export const MSG_GS_PROPOSAL_STALE = "新しい案が届いています。そちらから選んでください";

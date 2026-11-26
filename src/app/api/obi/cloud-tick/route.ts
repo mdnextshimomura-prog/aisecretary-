@@ -28,8 +28,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // CRM 8秒＋名前3秒＋送信の程度）。上の処理で 30 秒を使っていたら、この回は飛ばす（次の回に回す）
     if (Date.now() - t0 < 30_000) await sweepGroupSateiOnTick();
     // 段2d：事例の相談の案の配達・遅れの知らせ・山口さんへのリマインド（groupSateiPrepOn のときだけ。対象の票が無ければ KV を1回読むだけ）。
-    // 前段で 40 秒を使っていたら、この回は飛ばす
-    if (Date.now() - t0 < 40_000) await sweepGroupSateiStage2OnTick();
+    // 前段で 40 秒を使っていたら、この回は飛ばす。中でも t0 から50秒の予算で、残り12秒を切ったら新しい票に手を付けない
+    if (Date.now() - t0 < 40_000) await sweepGroupSateiStage2OnTick(t0);
   }
   return NextResponse.json(r.body, { status: r.status, headers: NO_STORE });
 }

@@ -258,7 +258,7 @@ export async function sweepGroupSateiOnTick(): Promise<void> {
 }
 
 /** 毎分の見回り（/api/obi/cloud-tick）の段2d：案の配達・失敗・遅れ・リマインド。例外は投げない */
-export async function sweepGroupSateiStage2OnTick(): Promise<void> {
+export async function sweepGroupSateiStage2OnTick(startedAt?: number): Promise<void> {
   try {
     if (!groupSateiPrepOn()) return;
     await sweepGsStage2({
@@ -266,6 +266,7 @@ export async function sweepGroupSateiStage2OnTick(): Promise<void> {
       prep: gsPrepPortalReal(),
       push: (to, messages, key) => pushMessagesWithRetryKey(to, messages, uuidv5(key, GS_RETRY_NAMESPACE)),
       now: () => Date.now(),
+      startedAt,
       log,
     });
   } catch {

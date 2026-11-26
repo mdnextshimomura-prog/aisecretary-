@@ -33,6 +33,11 @@ export const GS_FIX_MAX = 2;
 export const GS_PROPOSE_TRIES = 2;
 export const GS_GROUP_PUSH_MAX = 2;
 export const GS_LATE_MS = 30 * 60 * 1000;
+/** リマインドの push がはっきり失敗したとき、毎分の見回りで試す回数の上限 */
+export const GS_REMIND_TRIES = 3;
+/** 毎分の見回り（段2d）の時間の予算：開始から50秒のうち、残りが12秒を切ったら新しい票に手を付けない */
+export const GS_SWEEP_BUDGET_MS = 50_000;
+export const GS_SWEEP_MARGIN_MS = 12_000;
 export const GS_FIX_TTL = 30 * 60;
 export const GS_CASES_TTL = 14 * 24 * 60 * 60;
 /** 見回りが見る受付票（gathering・proposing・waiting-cases） */
@@ -72,6 +77,8 @@ export interface GsPrep {
   /** グループに依頼した時刻（これより後の PDF だけを事例の控えに数える） */
   requestedAt?: number;
   reminded?: boolean;
+  /** リマインドの push がはっきり失敗した回数（GS_REMIND_TRIES であきらめる） */
+  remindFails?: number;
   /** 30分の遅れの知らせを出した */
   lateNotified?: boolean;
 }
@@ -238,7 +245,8 @@ function isGsPrep(v: unknown): v is GsPrep {
     isCount(p.rev) && isCount(p.fixes) && isCount(p.sentRev) && isCount(p.tries) && isCount(p.groupPushes) &&
     Array.isArray(p.lines) && p.lines.every((s) => typeof s === "string") &&
     (p.deadline === undefined || typeof p.deadline === "number") &&
-    (p.requestedAt === undefined || typeof p.requestedAt === "number")
+    (p.requestedAt === undefined || typeof p.requestedAt === "number") &&
+    (p.remindFails === undefined || isCount(p.remindFails))
   );
 }
 
