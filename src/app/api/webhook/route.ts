@@ -135,6 +135,8 @@ import { photoAskDeps } from "@/lib/photo-ask-wire";
 import {
   groupSateiFixDeps,
   handleGsFixText,
+  handleGsInfoText,
+  groupSateiInfoDeps,
   maybeOpenGroupSateiA,
   maybeOpenGroupSateiB,
   type GsEntryOutcome,
@@ -904,6 +906,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       await handleGsFixText(
         { userId: source.userId, groupId: source.groupId, text: event.message.text, replyToken },
         groupSateiFixDeps(),
+      )
+    ) {
+      markCommitted();
+      continue;
+    }
+
+    // 段2b-2：足りない項目の答え（1対1・下村さん・印 gsatei:info:<userId> があるときだけ）。無ければ false で今の流れへ
+    if (
+      await handleGsInfoText(
+        { userId: source.userId, groupId: source.groupId, text: event.message.text, replyToken },
+        groupSateiInfoDeps(),
       )
     ) {
       markCommitted();

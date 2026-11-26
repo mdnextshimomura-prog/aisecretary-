@@ -218,7 +218,7 @@ on のとき、対象グループの画像・ファイルを `gsatei:media:<grou
 - スイッチ off のあいだに前のカードの gk を押されたら「いまは止めています」だけ（`[group-satei] gk paused stage2`）。
 - ログは `[group-satei] gk kind doc G7`・`gk kind satei G7` の形（符号と受付番号だけ）。
 - 事例の期日の関数 `src/lib/group-satei-deadline.ts`（17時より前は当日18時、17時以降・火水は次の営業日の18時。土日は営業日。祝日は扱わない）は 2d で使う。まだどこからも呼ばない。
-- （段2b の前半・2026-11-26）`GROUP_SATEI_STAGE2=1` のとき、資料の読み取り（1日20回・1回の呼び出しは同じ）が別の指示文 `GS_READ_PROMPT_V2` で、号室・専有面積・土地面積・建物面積・築年月・間取り・階・総戸数・構造も読み、受付票の `read.facts` に入れる（物件名は段1と同じ「マンション名と号室」）。名前らしい値は捨てる。off なら段1の指示文と形のまま。足りない項目の決まり `src/lib/group-satei-facts.ts`（マンション＝所在・物件名・号室・専有面積・築年月／戸建＝所在・土地面積・建物面積・築年月／土地＝所在・土地面積）は、まだどこからも呼ばない（聞く仕組みは 2d と一緒）。
+- （段2b の前半・2026-11-26）`GROUP_SATEI_STAGE2=1` のとき、資料の読み取り（1日20回・1回の呼び出しは同じ）が別の指示文 `GS_READ_PROMPT_V2` で、号室・専有面積・土地面積・建物面積・築年月・間取り・階・総戸数・構造も読み、受付票の `read.facts` に入れる（物件名は段1と同じ「マンション名と号室」）。名前らしい値は捨てる。off なら段1の指示文と形のまま。足りない項目の決まり `src/lib/group-satei-facts.ts`（マンション＝所在・物件名・号室・専有面積・築年月／戸建＝所在・土地面積・建物面積・築年月／土地＝所在・土地面積）は段2b-2 が使う（号室は聞かない）。
 
 （普通のグループの査定依頼・段2d・2026-11-26）`GROUP_SATEI_STAGE2=1` かつ `GROUP_SATEI_CASE_STAFF_ID`（山口さんの LINE userId。`U`＋32桁）のときだけ動く（`groupSateiPrepOn`）。どちらか無ければ 2a のまま。計画 `docs/superpowers/plans/2026-11-26-group-satei-2d.md`。
 - 案件を選ぶ（gs）と、マンション・戸建・土地とも portal の準備（`POST /api/jobs/satei/prep`。portal の `SATEI_PREP`）へ。受付票は `gathering`。portal が `PREP_DISABLED` なら 2a の道（マンションは今の受付）。案件名は portal に渡さない。
@@ -230,7 +230,15 @@ on のとき、対象グループの画像・ファイルを `gsatei:media:<grou
 - PDF の取り出し・保存は 2e（まだ無い）。2d だけのあいだは、貼られた PDF を人が 02 に入れて［査定書を作る］を押す。
 - ログは `[group-satei] gs prep sent G7`・`propose sent G7 r1`・`gy case-request posted G7`・`gf asked G7`・`fix revised G7 r2`・`remind sent G7`・`cases marked G7 1`（符号と受付番号だけ）。
 - ファイル：`src/lib/group-satei-case.ts`（文・カード・検査）／`group-satei-propose.ts`（流れ）／`group-satei-prep-portal.ts`（portal の口）。
-- 足りない項目を聞く仕組み（2b 後半）は 2d に入れず、別の計画（2b-2）にした（計画 D7）。欠けた面積・築年は案の行に出し、下村さんが［直す］で足せる。
+- 足りない項目を聞く仕組み（2b 後半）は 2d に入れず、別の計画（2b-2）で作った（下の段2b-2 の節）。聞いても分からなかった面積・築年は今どおり案の行に出し、下村さんが［直す］で足せる。
+
+（普通のグループの査定依頼・段2b-2・2026-11-26）足りない項目を下村さんに聞く。スイッチは増やさない（2d と同じ `groupSateiPrepOn`。off なら 2d と1バイトも変わらない）。計画 `docs/superpowers/plans/2026-11-26-group-satei-2b2.md`（決めたこと I1〜I6）。
+- 聞く：案件を選んだ（gs）とき、portal の準備（`startGsPrep`）の前に、資料から読めなかった項目（`gsMissingFacts` から号室を除いたもの＝マンション：所在・物件名・専有面積・築年月／戸建：所在・土地面積・建物面積・築年月／土地：所在・土地面積）を1回にまとめて、押した場所への返事（reply。送信枠を使わない）で聞く。文は「【受付 G7】資料から読めなかった項目があります。分かる分だけ1通で送ってください（喋ったままで大丈夫です）」＋項目ごとの「・専有面積（例：65.3）」＋「分からなければ［このまま進める］を押してください。30分たつと、このまま進めます」。ボタン［このまま進める］`v1|gi|<tid>|<ver>`（押せるのは `TASK_SATEI_USER_IDS` の人だけ。2d が off なら「いまは止めています」）。足りていれば今どおり準備へ。フォルダが無いなど準備へ進めない案件は聞かずに今の返事。
+- 聞くあいだ：受付票を `asking-info`（`info = {by, kind, keys, at, token}`。値は入れない。`dealId`・`requestKind: "satei"` もここで書く。開いている票の集合からは外れる）、仮の印 `gsatei:dec:<tid>` = `info:<dealId>`（同じカードの別の案件・gm・gn・gk は「選択済み」）、答えを待つ印 `gsatei:info:<userId>` = `{tid, token}`（30分）、見回りの集合 `gsatei:info`。その人に `satei:reason:`・`gsatei:fix:`・`gsatei:info:` の印があるあいだは聞かずに進める（`info skip:busy`）。KV に書けなければ聞かずに進める（`info ask-failed`）。
+- 進める（どの道も `startGsPrep`。仮の印を受け入れて `prep:` に書き換える）：進めるのは1回の聞き方ごとに最初の1つだけ（`gsatei:infogo:<tid>:<token>` SET NX）。①答え：webhook の1対1の文字の判定で、［直す］の印（`gsatei:fix:`）の直後（`handleGsInfoText`）。印は読んだ token のときだけ消す（satei-wire の Lua と同じ）。Claude 1回（15秒。1日20回の読み取りの上限とは別に数えない）で聞いた項目だけを JSON で取り出し、各項目を `gsAnswerFact`（`numOrNull`・`normYm`・`scrubNames`。坪・人の名前らしい値は捨てる）で検査し、通った分を受付票の `read.facts`（所在・物件名は `read.address`・`read.propertyName`）に足す。返事は「受け取りました（専有面積・築年月）。事例の相談の案を作ります」、0件なら（Claude の失敗も）もう一度は聞かずに「読み取れなかったので、このまま進めます」。準備へ進めなかったときは、その返事の文を2行目に足す。②［このまま進める］：足りないまま進め、印を消す（返事は今の「査定で進めます…」）。③30分：毎分の見回り（cloud-tick の段2d の見回りの直前。`sweepGsInfo`、予算の残りが25秒以上のときだけ・1回に1件）が足りないまま進める。下村さんへは知らせない（このあと案のカードが届く）。準備へ進めなかったときだけ、その文を1通（retry key `info-to:<tid>`。0通にしない）。
+- 準備へ進めなかった（portal に断られた・案件が読めない・止めている）ら、票を `asking` に戻し、仮の印を外す（同じカードで押し直せる。押し直すとまた聞く）。portal が `PREP_DISABLED` なら 2a の道（マンションは今の受付）。
+- グループには何も送らない。ログは `[group-satei] info asked G7 2`・`info filled G7 2/2`・`info skipped G7`・`info timeout G7`・`info skip:busy G7`・`info reverted G7`（符号・受付番号・件数だけ）。
+- ファイル：`src/lib/group-satei-facts.ts`（聞く項目・文・答えの読み方）／`group-satei-actions.ts`（pick の聞く枝・gi・`gsResumeInfo`）／`group-satei-info.ts`（答えの取り込み・30分の見回り）／`group-satei-propose.ts`（`startGsPrep` が仮の印を受け入れる）／`group-satei-wire.ts`・`src/app/api/webhook/route.ts`（入口）。テスト `tests/group-satei-2b2.test.ts`。
 
 （普通のグループの査定依頼・段2e・2026-11-26）事例 PDF の取り出しと保存 → 下書きへ。スイッチは増やさない（2d と同じ `groupSateiPrepOn`。off なら 2d と1バイトも変わらない）。portal は `SATEI_PREP`、Mac は `SATEI_PREP`。計画 `docs/superpowers/plans/2026-11-26-group-satei-2e.md`。
 - 結びつけ：グループに貼られた依頼のあとの PDF は、待ちの受付票が1件だけか、2d の依頼カードの messageId（`prep.cardMsgId`。［いいよ］の push の応答から取れたときだけ）を引用したときだけ、その票の `gsatei:caseitems:<tid>`（結びついた順の `{m, at}`。14日・10件まで）に足す。決まらなければ下村さんへ「どの受付のものか決められません（受付 G7・G8）。02 に入れてください」。グループ・JST の日・候補の受付票の組ごとに1回にまとめる（`gsatei:ambig:<groupId>:<JSTの日付>:<候補の tid をソートして , で結んだもの>`・1日。retry key は頭の `gsatei:` を除いたもの）。鍵・ログに messageId は入れない。今は控えの行（`gsMediaRow`）に引用の ID を入れていない（LINE のファイルの発言には引用の ID が付かない）ので、引用の道は通らない（待ちの票が1件のときの道だけ）。

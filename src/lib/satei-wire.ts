@@ -108,7 +108,7 @@ export function sateiActionDeps(): SateiActionDeps {
  * 「GET して token を含めば DEL」を1回で行う。token は UUID なので、値が JSON で保存されていても部分一致で確かめられる
  * （@vercel/kv が文字列の引数を引用符つきで送っても `"uuid"` は保存した JSON の中にそのまま現れる）。
  */
-const DEL_IF_TOKEN_LUA =
+export const DEL_IF_TOKEN_LUA =
   'local v = redis.call("GET", KEYS[1]) if v and string.find(v, ARGV[1], 1, true) then return redis.call("DEL", KEYS[1]) end return 0';
 
 export function sateiReasonKv(): SateiReasonKv | null {

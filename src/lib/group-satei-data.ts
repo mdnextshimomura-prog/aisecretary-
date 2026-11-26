@@ -57,6 +57,18 @@ export const gsRemindKey = (tid: string) => `gsatei:rem:${tid}`;
 /** ［直す］のあとの次の1通（30分） */
 export const gsFixKey = (userId: string) => `gsatei:fix:${userId}`;
 
+/** 段2b-2：足りない項目の答えを待つ印（{tid, token}。30分）と、見回りが30分で進める票の集合 */
+export const gsInfoKey = (userId: string) => `gsatei:info:${userId}`;
+export const GS_INFO_TTL = 30 * 60;
+export const GS_INFO_MS = GS_INFO_TTL * 1000;
+export const GS_INFO_SET = "gsatei:info";
+/** 進めるのは受付票の1回の聞き方ごとに1回だけ（［このまま進める］・答え・30分のどれか最初の1つ） */
+export const gsInfoGoKey = (tid: string, token: string) => `gsatei:infogo:${tid}:${token}`;
+/** 聞いているあいだの仮の決定の印の値の頭（gsatei:dec:<tid> = info:<dealId>） */
+export const GS_INFO_DEC = "info:";
+/** ［このまま進める］ */
+export const encodeGsInfoGo = (tid: string, ver: number) => `v1|gi|${tid}|${ver}`;
+
 /** 段2e（計画 2026-11-26-group-satei-2e）：受付票に結びついた事例の PDF（JSON の配列 [{m: messageId, at}]。結びついた順。14日・10件まで） */
 export const gsCaseItemsKey = (tid: string) => `gsatei:caseitems:${tid}`;
 /** どの受付のものか決められない PDF の知らせは、グループ・JST の日・候補の受付票の組ごとに1回だけ（1日。messageId は鍵に入れない） */
@@ -281,7 +293,20 @@ export interface GsMedia {
   quoted?: string;
 }
 
-export type GsState = "asking" | "started" | "manual" | "dismissed" | "gathering" | "proposing" | "waiting-cases";
+export type GsState = "asking" | "started" | "manual" | "dismissed" | "gathering" | "proposing" | "waiting-cases" | "asking-info";
+
+/** 段2b-2（計画 2026-11-26-group-satei-2b2 の I1〜I6）：足りない項目を下村さんに聞いているあいだの控え（値は入れない） */
+export interface GsInfo {
+  /** 押した人（聞いた相手。印 gsatei:info:<by>） */
+  by: string;
+  kind: GsPrepKind;
+  /** 聞いた項目の名前（並びは聞いた順） */
+  keys: string[];
+  /** 聞いた時刻（ミリ秒。30分で見回りが進める） */
+  at: number;
+  /** 印と同じ token（この回の聞き方だけを進める） */
+  token: string;
+}
 
 export interface GsTicket {
   no: number;
@@ -319,9 +344,21 @@ export interface GsTicket {
   prepAt?: number;
   /** 段2d：事例の取り方の案と、グループへの依頼の控え */
   prep?: GsPrep;
+  /** 段2b-2：足りない項目を聞いている（state が asking-info のあいだ） */
+  info?: GsInfo;
 }
 
-const STATES: readonly GsState[] = ["asking", "started", "manual", "dismissed", "gathering", "proposing", "waiting-cases"];
+const STATES: readonly GsState[] = ["asking", "started", "manual", "dismissed", "gathering", "proposing", "waiting-cases", "asking-info"];
+
+function isGsInfo(v: unknown): v is GsInfo {
+  if (!v || typeof v !== "object") return false;
+  const i = v as Record<string, unknown>;
+  return (
+    typeof i.by === "string" && i.by.length > 0 && GS_PREP_KINDS.includes(i.kind as GsPrepKind) &&
+    Array.isArray(i.keys) && i.keys.length <= 10 && i.keys.every((k) => typeof k === "string") &&
+    typeof i.at === "number" && typeof i.token === "string" && i.token.length > 0
+  );
+}
 
 const isCount = (x: unknown) => typeof x === "number" && Number.isInteger(x) && x >= 0 && x <= 99;
 function isGsPrep(v: unknown): v is GsPrep {
@@ -374,6 +411,8 @@ export function asTicket(raw: unknown): GsTicket | null {
   if (r.pushTries !== undefined && !isCount(r.pushTries)) return null;
   if (r.requestKind !== undefined && !isGsReqKind(r.requestKind)) return null;
   if (r.prep !== undefined && !isGsPrep(r.prep)) return null;
+  if (r.info !== undefined && !isGsInfo(r.info)) return null;
+  if (r.state === "asking-info" && (r.info === undefined || typeof r.dealId !== "string")) return null;
   return r as unknown as GsTicket;
 }
 
@@ -384,7 +423,8 @@ export type GsAction =
   | { op: "gn"; tid: string; ver: number }
   | { op: "gk"; tid: string; ver: number; code: GsReqKind }
   | { op: "gy"; tid: string; ver: number; rev: number }
-  | { op: "gf"; tid: string; ver: number; rev: number };
+  | { op: "gf"; tid: string; ver: number; rev: number }
+  | { op: "gi"; tid: string; ver: number };
 
 const TID_RE = /^[0-9a-f]{16}$/;
 const VER_RE = /^[1-9][0-9]?$/;
@@ -414,6 +454,7 @@ export function parseGsData(data: string): GsAction | null {
   }
   if (p[1] === "gm" && p.length === 4) return { op: "gm", tid, ver };
   if (p[1] === "gn" && p.length === 4) return { op: "gn", tid, ver };
+  if (p[1] === "gi" && p.length === 4) return { op: "gi", tid, ver };
   if (p[1] === "gk") {
     const code = p[4];
     return p.length === 5 && isGsReqKind(code) ? { op: "gk", tid, ver, code } : null;

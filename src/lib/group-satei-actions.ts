@@ -4,7 +4,9 @@
  * → 版違い →「新しいカード」→ gl は一覧だけ（決めない）→ pb:<webhookEventId> の予約 → 決める（受付票ごとに最初の1回。gsatei:dec）。
  * 例外は投げない。ログは符号・受付番号・J番号だけ。
  */
+import { randomUUID } from "node:crypto";
 import {
+  GS_INFO_DEC, GS_INFO_SET, GS_INFO_TTL, gsFixKey, gsInfoGoKey, gsInfoKey,
   GS_TICKET_TTL, groupSateiActive, groupSateiOn, groupSateiPrepOn, groupSateiStage2On, gsDecKey, gsOpenKey, gsReqLabel, gsTicketKey,
   receiptOf, asTicket,
   type GsAction, type GsEnv, type GsPrepKind, type GsTicket,
@@ -17,7 +19,9 @@ import {
   gsListCard, gsSateiNextCard, msgGsKindRecorded, msgGsKindSatei, MSG_GS_BUSY, MSG_GS_LIST_END, MSG_GS_DEALS_FAILED, MSG_GS_EXPIRED, MSG_GS_FORBIDDEN, MSG_GS_NO_FOLDER, MSG_GS_NOT_ACTIVE,
   MSG_GS_PAUSED, MSG_GS_STALE, MSG_GS_UNKNOWN, msgGsAlready, msgGsDismissed, msgGsKindMismatch, msgGsManual, msgGsNoDeal,
 } from "./group-satei-card";
-import { isSateiUser, sateiActive } from "./satei-data";
+import { isSateiUser, sateiActive, sateiReasonKey } from "./satei-data";
+import { gsInfoAskText, gsInfoKeys, msgGsInfoDone } from "./group-satei-facts";
+import { gsInfoCard } from "./group-satei-card";
 import { judgeSateiDeal, normNotionId, SATEI_KIND, type SateiDeal } from "./satei-deal";
 import { SATEI_CODE_AWAITING_REASON, type SateiCall, type SateiIntakeOk, type SateiIntakeReq } from "./satei-portal";
 import { MSG_SATEI_AWAITING_REASON, MSG_SATEI_DEAL_NOT_FOUND, MSG_SATEI_FAILED, msgSateiAccepted, msgSateiInProgress } from "./satei-text";
@@ -44,6 +48,9 @@ export interface GsActionDeps {
   now?(): number;
 }
 
+/** 準備へ進める所（proceedPick・startGsPrep・段2b-2 の再開）が使う部品だけ */
+export type GsPickDeps = Pick<GsActionDeps, "env" | "dealsDbId" | "readDeal" | "intake" | "prep" | "now" | "log">;
+
 export interface GsOutcome {
   text: string;
   code: string;
@@ -53,9 +60,11 @@ export interface GsOutcome {
 type Outcome = GsOutcome;
 
 type Kv = NonNullable<GsActionDeps["kv"]>;
+/** 段2b-2：印を token つきで消す（Upstash の EVAL）。無い作りでは読んで比べてから消す */
+type InfoKv = Kv & { delIfToken?(key: string, token: string): Promise<boolean> };
 
 /** 決めたあとの KV の失敗は返事を変えない。ログは符号だけ */
-async function quietKv(f: () => Promise<void>, deps: GsActionDeps): Promise<void> {
+async function quietKv(f: () => Promise<void>, deps: { log(l: string): void }): Promise<void> {
   try {
     await f();
   } catch {
@@ -100,11 +109,41 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
       ? `\n${msgGsKindMismatch(tk.read.kind)}`
       : "";
   const env = deps.env ?? process.env;
-  // 段2d：案件が決まったら portal の準備へ（マンション・戸建・土地）。PREP_DISABLED なら下の 2a の道へ（計画 D6）
-  if (groupSateiPrepOn(env) && deps.prep && (kind === "マンション" || kind === "戸建" || kind === "土地")) {
-    const o = await startGsPrep(a, tk, got.deal, kind as GsPrepKind, userId, deps, kv);
-    if (o) return { ...o, text: o.text + warn };
+  // 段2b-2：準備へ渡す前に、資料から読めなかった項目を1回だけまとめて聞く（聞いたら、ここでは準備へ進まない）
+  if (groupSateiPrepOn(env) && deps.prep && isPrepKind(kind)) {
+    const asked = await maybeAskInfo(a, tk, got.deal, kind, userId, deps, kv);
+    if (asked) return { ...asked, text: asked.text + warn };
   }
+  return proceedPick(a, tk, got, userId, deps, kv, warn, false);
+}
+
+const isPrepKind = (k: string | null): k is GsPrepKind => k === "マンション" || k === "戸建" || k === "土地";
+
+/**
+ * 案件が決まった受付票を進める（段2d の準備、無ければ 2a の道）。fromInfo＝段2b-2 で聞いたあと（仮の印 info:<dealId> を持っている）。
+ * 2a の道へ行くときは仮の印を外してから（2a の道は印を取り直す）
+ */
+async function proceedPick(
+  a: { tid: string; dealId: string },
+  tk: GsTicket,
+  got: { deal: SateiDeal; kind: string | null },
+  userId: string,
+  deps: GsPickDeps,
+  kv: Kv,
+  warn: string,
+  fromInfo: boolean,
+): Promise<Outcome> {
+  const no = tk.no;
+  const kind = got.kind;
+  const env = deps.env ?? process.env;
+  // 段2d：案件が決まったら portal の準備へ（マンション・戸建・土地）。PREP_DISABLED なら下の 2a の道へ（計画 D6）
+  if (groupSateiPrepOn(env) && deps.prep && isPrepKind(kind)) {
+    const o = await startGsPrep(a, tk, got.deal, kind, userId, deps, kv, fromInfo ? { infoDec: `${GS_INFO_DEC}${a.dealId}` } : undefined);
+    if (o) return { ...o, text: o.text + warn };
+  } else if (fromInfo) {
+    await kv.del(gsDecKey(a.tid));
+  }
+  if (!deps.dealsDbId) return { text: MSG_SATEI_DEAL_NOT_FOUND, code: "config-missing", settled: true };
   if (kind === SATEI_KIND && !sateiActive(env)) {
     // TASK_SATEI off：portal へは進まない。印を取らず受付票も asking のまま（on に戻せば同じカードで押し直せる）
     return { text: msgGsManual(no, kind) + warn, code: "manual satei-off", settled: true };
@@ -143,6 +182,126 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
 }
 
 /**
+ * 段2b-2（I1・I2・I5）：足りない項目があれば、仮の印（gsatei:dec = info:<dealId>）を取り、受付票を asking-info にして聞く。
+ * null＝聞かない（足りている・ほかの印がある・案件の形が準備へ進めない・KV に書けない）＝今どおり準備へ
+ */
+async function maybeAskInfo(
+  a: { tid: string; dealId: string },
+  tk: GsTicket,
+  deal: SateiDeal,
+  kind: GsPrepKind,
+  userId: string,
+  deps: GsActionDeps,
+  kv: Kv,
+): Promise<Outcome | null> {
+  const no = tk.no;
+  const keys = gsInfoKeys(kind, tk.read);
+  if (keys.length === 0) return null;
+  // 準備へ進めない案件（フォルダ無し等）は聞かずに、startGsPrep の今の返事へ
+  if (!deps.dealsDbId || deal.gone || deal.parentDbId !== normNotionId(deps.dealsDbId) || !deal.folderId) return null;
+  let busy: boolean;
+  try {
+    busy = Boolean(await kv.get(sateiReasonKey(userId))) || Boolean(await kv.get(gsFixKey(userId))) || Boolean(await kv.get(gsInfoKey(userId)));
+  } catch {
+    busy = true;
+  }
+  if (busy) {
+    deps.log(`[group-satei] info skip:busy ${receiptOf(no)}`);
+    return null;
+  }
+  if (!(await kv.setNx(gsDecKey(a.tid), `${GS_INFO_DEC}${a.dealId}`, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
+  const token = randomUUID();
+  const now = (deps.now ?? Date.now)();
+  const next: GsTicket = {
+    ...tk, state: "asking-info", provisional: false, dealId: a.dealId, requestKind: "satei",
+    info: { by: userId, kind, keys, at: now, token },
+  };
+  try {
+    await save(kv, a.tid, next);
+    await kv.sadd(GS_INFO_SET, a.tid);
+    await kv.set(gsInfoKey(userId), { tid: a.tid, token }, GS_INFO_TTL);
+  } catch {
+    // 聞けないときは今どおり準備へ（票を戻し、仮の印を外す）
+    deps.log(`[group-satei] info ask-failed ${receiptOf(no)}`);
+    await quietKv(async () => {
+      await kv.set(gsTicketKey(a.tid), tk, GS_TICKET_TTL);
+      if (tk.state === "asking" || tk.provisional) await kv.sadd(gsOpenKey(tk.groupId), a.tid);
+      await kv.srem(GS_INFO_SET, a.tid);
+      await kv.del(gsInfoKey(userId));
+      await kv.del(gsDecKey(a.tid));
+    }, deps);
+    return null;
+  }
+  deps.log(`[group-satei] info asked ${receiptOf(no)} ${keys.length}`);
+  return { text: gsInfoAskText(no, keys), code: `info-asked ${receiptOf(no)}`, settled: true, card: gsInfoCard(a.tid, tk.ver, no) };
+}
+
+/** 段2b-2：この回の聞き方を進めるのは最初の1つだけ（［このまま進める］・答え・30分）。true＝自分が進める */
+export async function gsClaimInfo(tid: string, token: string, kv: Kv): Promise<boolean> {
+  return kv.setNx(gsInfoGoKey(tid, token), 1, GS_TICKET_TTL);
+}
+
+/** 答えを待つ印を、この回の token のときだけ消す */
+async function clearInfoMark(by: string, token: string, kv: InfoKv): Promise<void> {
+  const key = gsInfoKey(by);
+  if (kv.delIfToken) {
+    await kv.delIfToken(key, token);
+    return;
+  }
+  const v = await kv.get(key);
+  if (v && typeof v === "object" && (v as { token?: unknown }).token === token) await kv.del(key);
+}
+
+/**
+ * 段2b-2（I4）：asking-info の票を準備へ進める（gsClaimInfo で取ってから呼ぶ）。tk は足した facts を持つ票。
+ * 進められなかった（案件が読めない・止めている等）ら、票を asking に戻し、仮の印を外す（同じカードで押し直せる）
+ */
+export async function gsResumeInfo(tid: string, tk: GsTicket, deps: GsPickDeps, kv: InfoKv): Promise<Outcome> {
+  const info = tk.info!;
+  const dealId = tk.dealId!;
+  await quietKv(() => clearInfoMark(info.by, info.token, kv), deps);
+  await quietKv(() => kv.srem(GS_INFO_SET, tid), deps);
+  let got: { deal: SateiDeal; kind: string | null } | null = null;
+  try {
+    got = await deps.readDeal(dealId);
+  } catch {
+    got = null;
+  }
+  let o: Outcome;
+  if (!got || got.deal.gone) o = { text: MSG_SATEI_DEAL_NOT_FOUND, code: got ? "not-found" : "read-failed", settled: true };
+  else {
+    try {
+      o = await proceedPick({ tid, dealId }, tk, got, info.by, deps, kv, "", true);
+    } catch {
+      o = { text: MSG_GS_BUSY, code: "kv-failed", settled: true };
+    }
+  }
+  // まだ asking-info のまま（準備へ進めなかった）なら戻す
+  await quietKv(async () => {
+    const fresh = asTicket(await kv.get(gsTicketKey(tid)));
+    if (!fresh || fresh.state !== "asking-info" || fresh.info?.token !== info.token) return;
+    const { info: _i, dealId: _d, ...rest } = fresh;
+    void _i;
+    void _d;
+    await kv.set(gsTicketKey(tid), { ...rest, state: "asking" }, GS_TICKET_TTL);
+    await kv.sadd(gsOpenKey(fresh.groupId), tid);
+    const dec = await kv.get(gsDecKey(tid));
+    if (typeof dec === "string" && dec.startsWith(GS_INFO_DEC)) await kv.del(gsDecKey(tid));
+    deps.log(`[group-satei] info reverted ${receiptOf(tk.no)}`);
+  }, deps);
+  return o;
+}
+
+/** ［このまま進める］（gi） */
+async function skipInfo(a: Extract<GsAction, { op: "gi" }>, tk: GsTicket, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
+  const no = tk.no;
+  if (tk.state !== "asking-info" || !tk.info || !tk.dealId) return { text: msgGsInfoDone(no), code: "info-closed", settled: true };
+  if (!(await gsClaimInfo(a.tid, tk.info.token, kv))) return { text: msgGsInfoDone(no), code: "info-already", settled: true };
+  deps.log(`[group-satei] info skipped ${receiptOf(no)}`);
+  return gsResumeInfo(a.tid, tk, deps, kv);
+}
+
+/**
  * 段2：「何の依頼？」。［査定］は印（gsatei:dec）を取らない（取ると、このあとの案件選び gs が「選択済み」になる）。
  * ほかの7つは記録だけ：印を gk:<符号> で取り、受付票を manual にして閉じる（中身の自動化は別の設計）。
  */
@@ -170,6 +329,8 @@ async function chooseKind(a: Extract<GsAction, { op: "gk" }>, tk: GsTicket, deps
 async function decide(a: Exclude<GsAction, { op: "gl" }>, tk: GsTicket, userId: string, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
   // 段2d：案件はもう決まっている（印は prep:）。［いいよ］［直す］は印を見ずに、受付票の状態と版で決める
   if (a.op === "gy" || a.op === "gf") return answerGsProposal(a, tk, userId, deps, kv);
+  // 段2b-2：［このまま進める］は仮の印（info:）を持ったまま、受付票の状態と token で決める
+  if (a.op === "gi") return skipInfo(a, tk, deps, kv);
   const dec = await kv.get(gsDecKey(a.tid));
   if (dec) {
     return typeof dec === "string" && dec.startsWith(UNKNOWN_DEC)
@@ -214,7 +375,7 @@ export async function handleGroupSateiPostback(
     return say(MSG_GS_PAUSED, "paused");
   }
   // 段2d のボタン（gy・gf）は 2d が off（山口さんの ID が無い・STAGE2 off）なら何もしない
-  if ((action.op === "gy" || action.op === "gf") && !groupSateiPrepOn(env)) {
+  if ((action.op === "gy" || action.op === "gf" || action.op === "gi") && !groupSateiPrepOn(env)) {
     deps.log(`[group-satei] ${action.op} paused prep`);
     return say(MSG_GS_PAUSED, "paused");
   }

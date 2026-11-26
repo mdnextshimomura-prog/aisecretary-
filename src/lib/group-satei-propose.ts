@@ -8,7 +8,7 @@ import {
   asCaseItems, groupSateiPrepOn, gsAmbigKey, gsCaseItemsKey, gsCaseStaffId, gsCasesKey, gsDecKey, gsFixKey, gsOkKey, gsOkRetryKey, gsOpenKey, gsRemindKey, gsTicketKey, gsWaitKey, receiptOf,
   type GsAction, type GsCaseItem, type GsMedia, type GsPrepKind, type GsState, type GsTicket,
 } from "./group-satei-data";
-import type { GsActionDeps, GsOutcome } from "./group-satei-actions";
+import type { GsActionDeps, GsOutcome, GsPickDeps } from "./group-satei-actions";
 import type { GsKv } from "./group-satei-open";
 import { MSG_GS_BUSY, MSG_GS_NO_FOLDER, msgGsAlready } from "./group-satei-card";
 import {
@@ -51,14 +51,20 @@ export async function startGsPrep(
   deal: SateiDeal,
   kind: GsPrepKind,
   userId: string,
-  deps: GsActionDeps,
+  deps: GsPickDeps,
   kv: Kv,
+  /** 段2b-2：聞いたあとに進めるとき、仮の印（info:<dealId>）を受け入れて prep: に書き換える */
+  opts?: { infoDec?: string },
 ): Promise<GsOutcome | null> {
   const no = tk.no;
   if (!deps.prep) return null;
   if (!deps.dealsDbId || deal.gone || deal.parentDbId !== normNotionId(deps.dealsDbId)) return { text: MSG_SATEI_DEAL_NOT_FOUND, code: "not-found", settled: true };
   if (!deal.folderId) return { text: MSG_GS_NO_FOLDER, code: "no-folder", settled: true };
-  if (!(await kv.setNx(gsDecKey(a.tid), `prep:${a.dealId}`, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
+  if (!(await kv.setNx(gsDecKey(a.tid), `prep:${a.dealId}`, GS_TICKET_TTL))) {
+    // 仮の印を持っているのは gsClaimInfo を取った1つだけ（ほかのボタンは仮の印で「選択済み」）
+    if (!opts?.infoDec || (await kv.get(gsDecKey(a.tid))) !== opts.infoDec) return { text: msgGsAlready(no), code: "already", settled: true };
+    await kv.set(gsDecKey(a.tid), `prep:${a.dealId}`, GS_TICKET_TTL);
+  }
   const f = tk.read?.facts;
   let r;
   try {

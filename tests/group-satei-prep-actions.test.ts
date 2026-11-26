@@ -86,6 +86,8 @@ const ticket = (x: ReturnType<typeof mk>) => asTicket(x.m.get(gsTicketKey(tid)))
   await t("戸建・土地も準備へ（建物名は渡さない）", async () => {
     for (const kind of ["戸建", "土地"]) {
       const x = mk({ kind });
+      // 段2b-2：足りない項目があると先に聞くので、戸建・土地に要る面積を読めている票にする
+      x.m.set(gsTicketKey(tid), { ...base, read: { ...base.read!, facts: { ...base.read!.facts!, landArea: 120.5, buildingArea: 98.2 } } });
       await pick(x);
       assert.equal(x.preps[0].kind, kind);
       assert.equal(x.preps[0].building, null);

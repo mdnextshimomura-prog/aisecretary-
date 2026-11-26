@@ -29,7 +29,10 @@ import { pushMessagesWithRetryKey, pushMessagesWithRetryKeyIds, replyTextAndCard
 import { loadMembers } from "./members";
 import { normNotionId } from "./satei-deal";
 import { uuidv5 } from "./satei-notify";
-import { makeSateiNotion, readSateiDealReal, sateiActionDeps, sateiReasonKv } from "./satei-wire";
+import { DEL_IF_TOKEN_LUA, makeSateiNotion, readSateiDealReal, sateiActionDeps, sateiReasonKv } from "./satei-wire";
+import { handleGsInfoText, sweepGsInfo, type GsInfoDeps } from "./group-satei-info";
+import { gsInfoSystem } from "./group-satei-facts";
+import { GS_READ_MODEL } from "./group-satei-read";
 import { loadActiveDeals } from "./task-record-wire";
 
 const log = (l: string) => console.log(l);
@@ -45,7 +48,11 @@ const MAX_BYTES = 3.5 * 1024 * 1024;
 let crmClient: ReturnType<typeof makeSateiNotion> | null = null;
 const crm = () => (crmClient ??= makeSateiNotion());
 
-export type GroupSateiKv = GsRereadKv & { rpushCap(key: string, value: unknown, max: number, ex: number): Promise<void> };
+export type GroupSateiKv = GsRereadKv & {
+  rpushCap(key: string, value: unknown, max: number, ex: number): Promise<void>;
+  /** 段2b-2：今の値が token を含むときだけ消す（satei-wire の Lua と同じ） */
+  delIfToken(key: string, token: string): Promise<boolean>;
+};
 
 export function groupSateiKv(): GroupSateiKv | null {
   if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return null;
@@ -83,6 +90,7 @@ export function groupSateiKv(): GroupSateiKv | null {
       await kv.ltrim(k, 0, max - 1);
       await kv.expire(k, ex);
     },
+    delIfToken: async (k, token) => Number(await kv.eval(DEL_IF_TOKEN_LUA, [k], [token])) === 1,
   };
 }
 
@@ -274,6 +282,18 @@ export async function sweepGroupSateiStage2OnTick(startedAt?: number): Promise<v
   try {
     if (!groupSateiPrepOn()) return;
     const s = sateiActionDeps();
+    // 段2b-2：聞いてから30分たった票を1件、足りないまま進める（段2d の見回りの前）
+    await sweepGsInfo({
+      kv: groupSateiKv(),
+      dealsDbId: s.dealsDbId,
+      readDeal: (dealId) => within(s.readDeal(dealId), CRM_TIMEOUT_MS),
+      intake: s.intake,
+      prep: gsPrepPortalReal(),
+      push: (to, messages, key) => pushMessagesWithRetryKey(to, messages, uuidv5(key, GS_RETRY_NAMESPACE)),
+      now: () => Date.now(),
+      startedAt,
+      log,
+    });
     await sweepGsStage2({
       kv: groupSateiKv(),
       prep: gsPrepPortalReal(),
@@ -458,6 +478,31 @@ export function groupSateiFixDeps(): GsFixDeps {
   };
 }
 export { handleGsFixText };
+
+const INFO_TIMEOUT_MS = 15_000;
+
+/** 段2b-2：足りない項目の答え（1対1の次の1通）。Claude 1回・15秒（I6。1日20回の上限とは別に数えない） */
+export function groupSateiInfoDeps(): GsInfoDeps {
+  const s = groupSateiActionDeps();
+  return {
+    kv: groupSateiKv(),
+    dealsDbId: s.dealsDbId,
+    readDeal: s.readDeal,
+    intake: s.intake,
+    prep: s.prep,
+    answer: async (keys, text) => {
+      const out = await within(
+        create({ model: GS_READ_MODEL, max_tokens: 400, system: gsInfoSystem(keys), messages: [{ role: "user", content: [{ type: "text", text }] }] }),
+        INFO_TIMEOUT_MS,
+      );
+      return out.content.map((c) => (c.type === "text" ? c.text ?? "" : "")).join("");
+    },
+    reply: (token, text, card) => (card ? replyTextAndCard(token, text, card) : sendLineMessage(token, text)),
+    now: () => Date.now(),
+    log,
+  };
+}
+export { handleGsInfoText };
 
 const MEDIA_CONTENT_TIMEOUT_MS = 20_000;
 

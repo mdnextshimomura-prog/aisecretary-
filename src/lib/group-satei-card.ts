@@ -3,7 +3,7 @@
  * お客様の名前・本文は入れない。依頼者は名簿の正式氏名だけ（呼ぶ側が渡す）。
  */
 import {
-  encodeGsKind, encodeGsList, encodeGsManual, encodeGsNone, encodeGsPick, GS_PAGE, GS_REQ_KINDS, GS_SURE, receiptOf,
+  encodeGsInfoGo, encodeGsKind, encodeGsList, encodeGsManual, encodeGsNone, encodeGsPick, GS_PAGE, GS_REQ_KINDS, GS_SURE, receiptOf,
   type GsRead, type GsReqKind,
 } from "./group-satei-data";
 import type { DealRef } from "./task-record";
@@ -238,3 +238,17 @@ export const msgGsDismissed = (no: number) => `査定の依頼ではないとし
 export const msgGsKindMismatch = (readKind: string) => `資料からは${readKind}に見えます。CRM_物件 の種別を確かめてください`;
 export const MSG_GS_LIST_END = "これより後の案件はありません";
 export const MSG_GS_NO_FOLDER = "案件の Driveフォルダが未設定です。設定してから、もう一度押してください";
+
+/** 段2b-2（I1）：足りない項目を聞く文のあとの［このまま進める］ */
+export function gsInfoCard(tid: string, ver: number, no: number): FlexMessage {
+  const subj = `受付 ${receiptOf(no)}`;
+  return {
+    type: "flex",
+    altText: cut(`分からなければ［このまま進める］を押してください（${receiptOf(no)}）`, ALT_TEXT_MAX),
+    contents: {
+      type: "bubble",
+      body: { type: "box", layout: "vertical", spacing: "sm", contents: [small("分からなければ押してください。30分たつと、このまま進めます", "#333333")] },
+      footer: { type: "box", layout: "vertical", spacing: "sm", contents: [button("このまま進める", encodeGsInfoGo(tid, ver), subj, true)] },
+    },
+  };
+}
