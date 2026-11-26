@@ -211,6 +211,13 @@ export const GS_PENDING_SET = "gsatei:pending";
 export const GS_SWEEP_AFTER_MS = 3 * 60 * 1000;
 /** 段2f（F2）：掃除が最初の知らせを送り直す回数の上限（毎分1回＝約10分以上）。超えたら掃除の対象から外す */
 export const GS_TICKET_PUSH_TRIES = 10;
+/**
+ * 段2f（M2）：入口 A・B が受付票を開こうとしている印（送り主ごと。AI の判定のあいだ置き、開いた・開かなかったで消す）。
+ * photo-ask はこの印があるあいだ待つ（GS_PHOTO_WAIT_MS まで）
+ */
+export const gsClaimKey = (groupId: string, senderId: string) => `gsatei:claim:${groupId}:${senderId}`;
+export const GS_CLAIM_TTL = 5 * 60;
+export const GS_PHOTO_WAIT_MS = 45_000;
 /** あとから届いた資料の控え（受付票ごとの集合。要素は "image:<id>" か "pdf:<id>"。足すのは原子的な sadd だけ） */
 export const gsLateKey = (tid: string) => `gsatei:late:${tid}`;
 /** 読み直す時刻（受付票とは別に置く＝資料が届くたびに受付票を書き戻さない） */

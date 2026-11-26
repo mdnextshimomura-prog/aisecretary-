@@ -12,7 +12,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { kv } from "@vercel/kv";
 import { parseTaskFromMessage, type TaskAttachment } from "./claude";
-import { GS_MIN, GS_RETRY_NAMESPACE, groupSateiActive, groupSateiOn, groupSateiPrepOn, groupSateiStage2On, ticketIdOf } from "./group-satei-data";
+import { GS_CLAIM_TTL, GS_MIN, GS_RETRY_NAMESPACE, gsClaimKey, groupSateiActive, groupSateiOn, groupSateiPrepOn, groupSateiStage2On, ticketIdOf } from "./group-satei-data";
 import { gsEntryAOk, gsEntryBGate, gsMediaRow, looksLikeSateiWords } from "./group-satei-gate";
 import {
   attachLateMedia, openGroupSatei, recordGroupSateiMedia, runRereadWorker, sweepGroupSatei,
@@ -289,6 +289,49 @@ export async function sweepGroupSateiStage2OnTick(startedAt?: number): Promise<v
   }
 }
 
+/** 段2f（M1）：入口がこの発言で受付票を開いたか（photo-ask は opened のときだけ譲る） */
+export type GsEntryOutcome = "opened" | "skip" | "not-satei" | "failed" | "duplicate";
+
+const CLAIM_KV_TIMEOUT_MS = 3_000;
+/** 段2f（M2）：開こうとしている印を置く・消す（KV が無い・落ちていれば何もしない＝photo-ask は待たない） */
+async function setClaim(groupId: string, senderId: string): Promise<boolean> {
+  if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return false;
+  try {
+    await within(kv.set(gsClaimKey(groupId, senderId), 1, { ex: GS_CLAIM_TTL }), CLAIM_KV_TIMEOUT_MS);
+    return true;
+  } catch {
+    log("[group-satei] claim set-failed");
+    return false;
+  }
+}
+async function clearClaim(groupId: string, senderId: string): Promise<void> {
+  try {
+    await within(kv.del(gsClaimKey(groupId, senderId)), CLAIM_KV_TIMEOUT_MS);
+  } catch {
+    log("[group-satei] claim clear-failed");
+  }
+}
+/** photo-ask が読む：印があるか（読めなければ false＝待たない） */
+export async function gsClaimExists(groupId: string, senderId: string): Promise<boolean> {
+  if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return false;
+  return Boolean(await within(kv.get(gsClaimKey(groupId, senderId)), CLAIM_KV_TIMEOUT_MS));
+}
+
+/** 結果を1回だけ知らせる（呼ばれなければ最後に failed） */
+function outcomeOnce(onOutcome?: (o: GsEntryOutcome) => void) {
+  let done = false;
+  const report = (o: GsEntryOutcome) => {
+    if (done) return;
+    done = true;
+    try {
+      onOutcome?.(o);
+    } catch {
+      // 知らせの受け手の失敗は無視
+    }
+  };
+  return report;
+}
+
 /** 入口 A（@AI秘書 あてで査定書と判定された依頼。返事を送ったあとに呼ぶ）。例外は投げない */
 export async function maybeOpenGroupSateiA(
   p: {
@@ -304,10 +347,17 @@ export async function maybeOpenGroupSateiA(
   },
   today: string,
   startedAt?: number,
+  onOutcome?: (o: GsEntryOutcome) => void,
 ): Promise<void> {
+  const report = outcomeOnce(onOutcome);
+  let claimed = false;
   try {
-    if (!gsEntryAOk(p)) return;
-    await openGroupSatei(
+    if (!gsEntryAOk(p)) {
+      report("skip");
+      return;
+    }
+    claimed = await setClaim(p.groupId as string, p.senderId as string);
+    const r = await openGroupSatei(
       {
         messageId: p.messageId,
         groupId: p.groupId as string,
@@ -316,35 +366,59 @@ export async function maybeOpenGroupSateiA(
         text: p.text,
         entry: "A",
         quotedMessageId: p.quotedMessageId,
+        onOpened: () => report("opened"),
       },
       groupSateiOpenDeps(today),
     );
+    report(r === "duplicate" ? "duplicate" : r === "opened" ? "opened" : "failed");
+    if (claimed) await clearClaim(p.groupId as string, p.senderId as string);
+    claimed = false;
     // 文字だけで読めなかった・読むあいだに資料が増えた票は、ここで待って読み直す（ほかは何もせず戻る）
     await runRereadWorker(ticketIdOf(p.messageId), workerDeps(startedAt));
   } catch {
     log("[group-satei] skip:exception A");
+  } finally {
+    report("failed");
+    if (claimed) await clearClaim(p.groupId as string, p.senderId as string);
   }
 }
 
-/** 入口 B（メンションの無い、査定の言葉を含む依頼）。AI で査定書・0.5 以上のときだけ開く。例外は投げない */
+/**
+ * 入口 B（メンションの無い、査定の言葉を含む依頼）。AI で査定書・0.5 以上のときだけ開く。例外は投げない。
+ * 段2f：onOutcome に、この発言で受付票を開いたか（opened）を1回だけ渡す（photo-ask が待つ）。
+ * 言葉の判定が通ったら AI の前に開こうとしている印（gsatei:claim）を置き、開いた・開かなかったで消す
+ */
 export async function maybeOpenGroupSateiB(
   p: { messageId: string; groupId?: string; senderId?: string; at: number; text: string; quotedMessageId?: string },
   today: string,
   startedAt?: number,
+  onOutcome?: (o: GsEntryOutcome) => void,
 ): Promise<void> {
+  const report = outcomeOnce(onOutcome);
+  let claimed = false;
   try {
     const g = gsEntryBGate(p);
     if (!g.ok) {
+      report("skip");
       // off・言葉の無い発言は黙る（グループのふつうの発言ごとにログを出さない）
       if (g.reason !== "off" && g.reason !== "words" && looksLikeSateiWords(p.text)) log(`[group-satei] skip:${g.reason}`);
       return;
     }
-    const parsed = await within(parseTaskFromMessage(p.text, today), READ_TIMEOUT_MS);
+    claimed = await setClaim(p.groupId as string, p.senderId as string);
+    let parsed;
+    try {
+      parsed = await within(parseTaskFromMessage(p.text, today), READ_TIMEOUT_MS);
+    } catch {
+      report("failed");
+      log("[group-satei] skip:exception B");
+      return;
+    }
     if (!parsed.isTask || parsed.requestType !== "査定書" || parsed.confidence < GS_MIN) {
+      report("not-satei");
       log("[group-satei] skip:not-satei");
       return;
     }
-    await openGroupSatei(
+    const r = await openGroupSatei(
       {
         messageId: p.messageId,
         groupId: p.groupId as string,
@@ -353,12 +427,19 @@ export async function maybeOpenGroupSateiB(
         text: p.text,
         entry: "B",
         quotedMessageId: p.quotedMessageId,
+        onOpened: () => report("opened"),
       },
       groupSateiOpenDeps(today),
     );
+    report(r === "duplicate" ? "duplicate" : r === "opened" ? "opened" : "failed");
+    if (claimed) await clearClaim(p.groupId as string, p.senderId as string);
+    claimed = false;
     await runRereadWorker(ticketIdOf(p.messageId), workerDeps(startedAt));
   } catch {
     log("[group-satei] skip:exception B");
+  } finally {
+    report("failed");
+    if (claimed) await clearClaim(p.groupId as string, p.senderId as string);
   }
 }
 

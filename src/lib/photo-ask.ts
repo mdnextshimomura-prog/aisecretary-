@@ -18,8 +18,8 @@ import { encodeSateiStart, sateiActive, sateiNotifyTarget } from "./satei-data";
 import { parseAllowedUserIds } from "./webhook-source";
 import { matchDeals, type DealRef } from "./task-record";
 import { POSTBACK_TEXT_MAX, pressedText, type FlexMessage } from "./task-card";
-import { groupSateiOn } from "./group-satei-data";
-import { gsClaimsMessage, gsHasActiveTicket } from "./group-satei-gate";
+import { GS_PHOTO_WAIT_MS, groupSateiOn, type GsMedia } from "./group-satei-data";
+import { gsTicketsTakeImages } from "./group-satei-open";
 
 export type PhotoAskEnv = Record<string, string | undefined>;
 
@@ -131,10 +131,61 @@ export interface PhotoAskDeps {
   push(to: string, text: string, card: FlexMessage | undefined, key: string): Promise<boolean>;
   log(line: string): void;
   /**
-   * 段2f（F1(b)）：このグループの、動いているかもしれない受付票（gsatei:t の値の配列。形はそのまま）。
-   * GROUP_SATEI が on でそのグループが対象のときだけ呼ぶ。無ければ受付票では譲らない
+   * 段2f：以下はグループ査定へ譲るかの判定（GROUP_SATEI が on でそのグループが対象のときだけ使う。無ければ譲らない）。
+   * gsEntry：同じ発言の入口 B の結果（opened のときだけ譲る）。
+   * gsClaimed：送り主の「開こうとしている印」（gsatei:claim）があるか。あるあいだ待つ。
+   * listGsTickets：このグループの開いている・事例待ちの受付票（gsatei:t の値。形はそのまま）。
    */
+  gsEntry?: Promise<string>;
+  gsClaimed?(groupId: string, senderId: string): Promise<boolean>;
   listGsTickets?(groupId: string): Promise<unknown[]>;
+  /** 待つ上限の起点（webhook の開始の時刻）。無ければ呼ばれた時刻 */
+  startedAt?: number;
+  now?(): number;
+  sleep?(ms: number): Promise<void>;
+}
+
+/** 段2f：待つのは最大45秒。webhook の開始から190秒（あとの読み取り・送信の分を残す）を超えない */
+const GS_PHOTO_WEBHOOK_MS = 190_000;
+const GS_CLAIM_POLL_MS = 2_000;
+
+/** 段2f（F1・M1・M2・H1）：グループ査定へ譲るか。どちらか迷う道は譲らない（2通の側に倒す。0通を作らない） */
+async function yieldToGroupSatei(ev: PhotoAskEvent, groupId: string, senderId: string, imageIds: string[], media: PhotoAskMedia[], deps: PhotoAskDeps): Promise<boolean> {
+  const now = deps.now ?? Date.now;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const t0 = now();
+  const until = Math.min(t0 + GS_PHOTO_WAIT_MS, (deps.startedAt ?? t0) + GS_PHOTO_WEBHOOK_MS);
+  // 同じ発言で入口 B が受付票を開いたら譲る（開かなかった・失敗・時間切れは進める）
+  if (deps.gsEntry) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const o = await Promise.race([
+      deps.gsEntry.catch(() => "failed"),
+      new Promise<string>((r) => { timer = setTimeout(() => r("timeout"), Math.max(0, until - now())); }),
+    ]);
+    clearTimeout(timer);
+    if (o === "opened") return true;
+  }
+  if (imageIds.length === 0 || !deps.listGsTickets) return false;
+  // 別の発言の入口が開こうとしているあいだは待つ（票ができるか印が消えるまで）
+  if (deps.gsClaimed) {
+    try {
+      while (await deps.gsClaimed(groupId, senderId)) {
+        if (now() + GS_CLAIM_POLL_MS > until) break;
+        await sleep(GS_CLAIM_POLL_MS);
+      }
+    } catch {
+      deps.log("[photo-ask] gs-check-failed");
+    }
+  }
+  let tickets: unknown[];
+  try {
+    tickets = await deps.listGsTickets(groupId);
+  } catch {
+    deps.log("[photo-ask] gs-check-failed");
+    return false;
+  }
+  const rows: GsMedia[] = imageIds.map((id) => ({ messageId: id, kind: "image", senderId, at: media.find((m) => m.messageId === id)?.at ?? ev.timestamp }));
+  return gsTicketsTakeImages(tickets, rows, groupId, deps.env ?? process.env);
 }
 
 const NAME_MAX = 60;
@@ -230,27 +281,11 @@ export async function maybeAskPhotoMention(ev: PhotoAskEvent, deps: PhotoAskDeps
     deps.log("[photo-ask] skip:no-sender");
     return false;
   }
-  // 段2f（F1）：グループ査定が受け持つ依頼なら譲る（下村さんへ2通にしない）。予約は取らない。
-  // GROUP_SATEI が off・そのグループが対象外なら何も読まない（今のまま）
-  if (groupSateiOn(groupId, env)) {
-    const botMentioned = Boolean(ev.botUserId && ev.mentionees.some((m) => m.type === "user" && m.userId === ev.botUserId));
-    let yieldTo = gsClaimsMessage({ groupId, senderId, text: ev.text, botMentioned }, env);
-    if (!yieldTo && deps.listGsTickets) {
-      try {
-        yieldTo = gsHasActiveTicket(await deps.listGsTickets(groupId), { groupId, senderId, at: ev.timestamp }, env);
-      } catch {
-        // 読めなければ譲らない（黙るより、2通になりうる側に倒す）
-        deps.log("[photo-ask] gs-check-failed");
-      }
-    }
-    if (yieldTo) {
-      deps.log("[photo-ask] skip:group-satei");
-      return false;
-    }
-  }
   let picked: { ids: string[]; quoted: boolean };
+  let media: PhotoAskMedia[];
   try {
-    picked = pickPhotoAskImages(await deps.listMedia(groupId, senderId), ev);
+    media = await deps.listMedia(groupId, senderId);
+    picked = pickPhotoAskImages(media, ev);
   } catch {
     deps.log("[photo-ask] skip:kv-failed");
     return false;
@@ -258,6 +293,12 @@ export async function maybeAskPhotoMention(ev: PhotoAskEvent, deps: PhotoAskDeps
   // 引用でなく画像も無い＝ふつうの名指し。何もしない
   if (picked.ids.length === 0 && !picked.quoted) {
     deps.log("[photo-ask] skip:no-image");
+    return false;
+  }
+  // 段2f（F1）：グループ査定が受付票を開いて、この画像も扱うなら譲る（下村さんへ2通にしない）。予約は取らない。
+  // GROUP_SATEI が off・そのグループが対象外なら何も待たず読まない（今のまま）
+  if (groupSateiOn(groupId, env) && (await yieldToGroupSatei(ev, groupId, senderId, picked.ids, media, deps))) {
+    deps.log("[photo-ask] skip:group-satei");
     return false;
   }
   const key = picked.ids.length > 0 ? `img:${[...picked.ids].sort().join(",")}` : `msg:${ev.messageId}`;

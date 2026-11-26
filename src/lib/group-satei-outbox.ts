@@ -73,14 +73,16 @@ function asEntry(v: unknown): GsObEntry | null {
 }
 
 /** 元の知らせが送れなかったときに積む（同じものが積まれていれば数え直さない）。例外は投げない */
-export async function gsOutboxAdd(kv: GsObKv, kind: GsObKind, id: string, now: number, log: (l: string) => void, receipt = ""): Promise<void> {
+export async function gsOutboxAdd(kv: GsObKv, kind: GsObKind, id: string, now: number, log: (l: string) => void, receipt = ""): Promise<boolean> {
   try {
     const e: GsObEntry = { tries: 0, nextAt: now + GS_OB_STEP_MS, firstAt: now };
     await kv.setNx(gsObKey(kind, id), e, GS_OB_TTL);
     await kv.sadd(GS_OUTBOX_SET, `${kind}:${id}`);
     log(`[group-satei] outbox ${kind}${receipt ? ` ${receipt}` : ""} queued`);
+    return true;
   } catch {
     log(`[group-satei] outbox ${kind} queue-failed`);
+    return false;
   }
 }
 
@@ -116,7 +118,8 @@ async function rebuild(kind: GsObKind, id: string, kv: GsObKv): Promise<{ text: 
     const nos: number[] = [];
     for (const tid of tids) {
       const t = asTicket(await kv.get(gsTicketKey(tid)));
-      if (!t) return null;
+      // 候補の票がまだ事例待ちのときだけ（閉じた票の分は聞かない）
+      if (!t || t.state !== "waiting-cases" || t.prep?.casesDone) return null;
       nos.push(t.no);
     }
     return { text: msgGsCasesAmbig(nos), receipt: [...nos].sort((a, b) => a - b).map(receiptOf).join(",") };
@@ -125,9 +128,12 @@ async function rebuild(kind: GsObKind, id: string, kv: GsObKv): Promise<{ text: 
   if (!t || !t.prep) return null;
   const p = t.prep;
   const receipt = receiptOf(t.no);
-  if (kind === "prop-late") return t.state === "gathering" ? { text: msgGsPrepLate(t.no), receipt } : null;
+  // 案の配達をまだ試していない（＝案が来ていない）ときだけ
+  if (kind === "prop-late") return t.state === "gathering" && p.tries === 0 && p.sentRev === 0 ? { text: msgGsPrepLate(t.no), receipt } : null;
   if (kind === "cases-late") return t.state === "waiting-cases" && !p.casesDone ? { text: msgGsCasesSlow(t.no), receipt } : null;
   if (kind === "remind-note") {
+    // 事例を待っているあいだだけ（結果が来て閉じたら、催促の話は古い）
+    if (t.state !== "waiting-cases" || p.casesDone) return null;
     if (p.remindNote === "failed") return { text: msgGsRemindFailed(t.no), receipt };
     if (p.remindNote === "unknown") return { text: msgGsRemindUnknown(t.no), receipt };
     if (p.remindNote === "sent" && p.deadline) return { text: msgGsRemindMe(t.no, gsDeadlineLabel(p.deadline)), receipt };
@@ -155,10 +161,13 @@ export interface GsOutboxDeps {
  */
 export async function gsOutboxRetry(deps: GsOutboxDeps): Promise<void> {
   const { kv } = deps;
+  const enough = () => GS_SWEEP_BUDGET_MS - (deps.now() - deps.startedAt) >= GS_OB_MIN_LEFT_MS;
   try {
-    if (GS_SWEEP_BUDGET_MS - (deps.now() - deps.startedAt) < GS_OB_MIN_LEFT_MS) return;
+    if (!enough()) return;
     const members = await kv.smembers(GS_OUTBOX_SET);
     for (const raw of members) {
+      // 要素を読むあいだにも予算を確かめる（L3）
+      if (!enough()) return;
       const m = parseMember(raw);
       if (!m) {
         if (typeof raw === "string") await kv.srem(GS_OUTBOX_SET, raw);
@@ -182,7 +191,7 @@ export async function gsOutboxRetry(deps: GsOutboxDeps): Promise<void> {
         continue;
       }
       if (now < e.nextAt) continue;
-      if (!deps.to) return;
+      if (!deps.to || !enough()) return;
       const b = await rebuild(m.kind, m.id, kv);
       if (!b) {
         await drop();

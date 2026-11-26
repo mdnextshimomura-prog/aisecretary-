@@ -4,8 +4,8 @@
  * 引用の無い他人の資料（③）と、60分後までの後から来る資料は段2。
  */
 import {
-  GS_AFTER_MS, GS_BEFORE_MS, GS_LATE_ANY_MS, GS_LATE_OWN_MS, GS_MATERIALS_MAX, GS_MIN, asTicket, groupSateiOn,
-  type GsEnv, type GsMedia, type GsState,
+  GS_AFTER_MS, GS_BEFORE_MS, GS_LATE_ANY_MS, GS_LATE_OWN_MS, GS_MATERIALS_MAX, GS_MIN, groupSateiOn,
+  type GsEnv, type GsMedia,
 } from "./group-satei-data";
 import { sateiNotifyTarget } from "./satei-data";
 
@@ -39,40 +39,6 @@ export function gsEntryAOk(
   const target = sateiNotifyTarget(env);
   if (!target || !p.senderId || p.senderId === target) return false;
   return p.isTask && p.requestType === "査定書" && p.confidence >= GS_MIN;
-}
-
-/**
- * 段2f（計画 2026-11-26-group-satei-2f の F1(a)）：この発言をグループ査定が受け持つか（言葉だけで決める。通信はしない）。
- * 対象グループで GROUP_SATEI が on のときだけ。@AI秘書 あて（入口 A）か、入口 B の言葉の判定を通るとき true。
- * 入口 B の AI が「査定でない」とする発言も true になる（photo-ask も査定らしさで出すので、ほぼ同じ結果）。
- */
-export function gsClaimsMessage(
-  ev: { groupId?: string; senderId?: string; text: string; botMentioned: boolean },
-  env: GsEnv = process.env,
-): boolean {
-  if (!groupSateiOn(ev.groupId, env)) return false;
-  if (ev.botMentioned) {
-    const target = sateiNotifyTarget(env);
-    return Boolean(target && ev.senderId && ev.senderId !== target);
-  }
-  return gsEntryBGate(ev, env).ok;
-}
-
-/** 段2f（F1(b)）：送り主の、同じグループの受付票がまだ動いているとみなす状態と幅（依頼から2時間） */
-export const GS_YIELD_STATES: readonly GsState[] = ["asking", "gathering", "proposing", "waiting-cases"];
-export const GS_YIELD_MS = 2 * 60 * 60 * 1000;
-/** 1回に読む受付票の上限（photo-ask の判定を長くしない） */
-export const GS_YIELD_SCAN_MAX = 20;
-
-/** 段2f（F1(b)）：送り主に、同じグループで動いている受付票（依頼から2時間以内）があるか。形の違う票は数えない */
-export function gsHasActiveTicket(tickets: unknown[], ev: { groupId?: string; senderId?: string; at: number }, env: GsEnv = process.env): boolean {
-  if (!groupSateiOn(ev.groupId, env) || !ev.senderId) return false;
-  return tickets.some((raw) => {
-    const t = asTicket(raw);
-    return Boolean(
-      t && t.groupId === ev.groupId && t.requesterId === ev.senderId && GS_YIELD_STATES.includes(t.state) && ev.at - t.at <= GS_YIELD_MS,
-    );
-  });
 }
 
 export function gsMediaRow(m: {

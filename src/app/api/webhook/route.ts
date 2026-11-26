@@ -137,6 +137,7 @@ import {
   handleGsFixText,
   maybeOpenGroupSateiA,
   maybeOpenGroupSateiB,
+  type GsEntryOutcome,
   recordGroupSateiMediaEvent,
 } from "@/lib/group-satei-wire";
 import { recordAfterCreateWithPick } from "@/lib/deal-card-wire";
@@ -1616,6 +1617,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
       // 普通のグループの査定依頼・入口 B（GROUP_SATEI=1 かつ対象グループのときだけ。off なら何も呼ばない）。
       // グループには返さない（replyToken は使わない）。例外は投げない
+      // 段2f：入口 B がこの発言で受付票を開いたか（opened）を、下の photo-ask に渡す（opened のときだけ譲る）
+      let resolveGsB: (o: GsEntryOutcome) => void = () => undefined;
+      const gsBOutcome = new Promise<GsEntryOutcome>((r) => { resolveGsB = r; });
       gsJobs.push(maybeOpenGroupSateiB(
         {
           messageId: event.message.id,
@@ -1627,7 +1631,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         },
         todayLabel(jstNow()),
         startedAt,
-      ).catch(() => undefined));
+        resolveGsB,
+      ).catch(() => undefined).finally(() => resolveGsB("failed")));
       // 画像のあとの「@下村」だけの名指し（PHOTO_MENTION_ASK=1 のときだけ）：画像を読み、査定の依頼らしければ
       // 下村さんの1対1へ push で聞く。グループには返さない（replyToken は使わない）。失敗してもほかの流れは今のまま
       await maybeAskPhotoMention(
@@ -1641,7 +1646,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           timestamp: event.timestamp ?? Date.now(),
           quotedMessageId: event.message.quotedMessageId,
         },
-        photoAskDeps(todayLabel(jstNow())),
+        photoAskDeps(todayLabel(jstNow()), { gsEntry: gsBOutcome, startedAt }),
       );
       // 理由の符号だけログ。グループで「@秘書」を手打ちしただけのときは、一覧から選ぶよう返す
       await finishNoBotMention({

@@ -4,7 +4,7 @@
  */
 import { randomUUID } from "node:crypto";
 import {
-  GS_AMBIG_TTL, GS_CASE_ITEMS_RAW_MAX, GS_CASES_DRAFT_TRIES, GS_CASES_FINISH_MIN_MS, GS_CASES_LATE_MS, GS_CASES_QUIET_MS, GS_CASES_TTL, GS_FIX_MAX, GS_FIX_TTL, GS_GROUP_PUSH_MAX, GS_LATE_MS, GS_OK_STALE_MS, GS_PROPOSE_TRIES, GS_REMIND_TRIES, GS_STAGE2_SET, GS_SWEEP_BUDGET_MS, GS_SWEEP_MARGIN_MS, GS_TICKET_TTL, asTicket,
+  GS_AMBIG_TTL, GS_CASE_ITEMS_RAW_MAX, GS_CASES_DRAFT_TRIES, GS_CASES_FINISH_MIN_MS, GS_CASES_LATE_MS, GS_CASES_PUSH_TRIES, GS_CASES_QUIET_MS, GS_CASES_TTL, GS_FIX_MAX, GS_FIX_TTL, GS_GROUP_PUSH_MAX, GS_LATE_MS, GS_OK_STALE_MS, GS_PROPOSE_TRIES, GS_REMIND_TRIES, GS_STAGE2_SET, GS_SWEEP_BUDGET_MS, GS_SWEEP_MARGIN_MS, GS_TICKET_TTL, asTicket,
   asCaseItems, groupSateiPrepOn, gsAmbigKey, gsCaseItemsKey, gsCaseStaffId, gsCasesKey, gsDecKey, gsFixKey, gsOkKey, gsOkRetryKey, gsOpenKey, gsRemindKey, gsTicketKey, gsWaitKey, receiptOf,
   type GsAction, type GsCaseItem, type GsMedia, type GsPrepKind, type GsState, type GsTicket,
 } from "./group-satei-data";
@@ -301,9 +301,10 @@ export interface GsSweepDeps {
 const textMsg = (text: string) => [{ type: "text", text }];
 
 /** 段2f（F3）：下村さんあての1回きりの知らせが送れなかったら控えに積む（見回りが同じ retry key で送り直す） */
-async function toOutbox(st: number | null, kind: GsObKind, id: string, no: number | null, deps: { now?(): number; log(l: string): void }, kv: SweepKv): Promise<void> {
-  if (sentOk(st)) return;
-  await gsOutboxAdd(kv, kind, id, (deps.now ?? Date.now)(), deps.log, no === null ? "" : receiptOf(no));
+/** 送れた・積めたら true（積めなければ false＝閉じる知らせは閉じずにやり直す） */
+async function toOutbox(st: number | null, kind: GsObKind, id: string, no: number | null, deps: { now?(): number; log(l: string): void }, kv: SweepKv): Promise<boolean> {
+  if (sentOk(st)) return true;
+  return gsOutboxAdd(kv, kind, id, (deps.now ?? Date.now)(), deps.log, no === null ? "" : receiptOf(no));
 }
 
 /** 失敗・検査に通らない案・2回届かなかった案：下村さんに1回だけ知らせて手作業（グループには何も出さない。見回りから外す） */
@@ -531,12 +532,20 @@ async function handCases(tid: string, tk: GsTicket, n: number, to: string | null
   deps.log(`[group-satei] cases rejected ${R} ${r.code}`);
   if (!to) return false;
   const note: GsCasesNote = { contract: 0, listing: 0, failed: 0, unsaved: 0, draft: "failed" };
+  const fp = fresh.prep;
+  const tries = (fp.casesPushTries ?? 0) + 1;
+  // 控えの作り直しに要る数を先に書く
+  await quiet(() => saveGsTicket(kv, tid, { ...fresh, prep: { ...fp, casesNote: note } }), deps, "cases note-save-failed");
   const st = await deps.push(to, textMsg(msgGsCasesFailed(tk.no)), `cases:${tid}`).catch(() => null);
-  await saveGsTicket(kv, tid, { ...fresh, state: "manual", prep: { ...fresh.prep, casesHanded: n, casesHandedAt: deps.now(), casesDone: true, casesPushTries: 1, casesNote: note } });
+  if (!sentOk(st)) deps.log(`[group-satei] cases push-failed ${R}`);
+  // 段2f（L2）：控えに積めなければ閉じない（次の見回りで同じ retry key でやり直す。GS_CASES_PUSH_TRIES 回まで）
+  if (!(await toOutbox(st, "cases", tid, tk.no, deps, kv)) && tries < GS_CASES_PUSH_TRIES) {
+    await saveGsTicket(kv, tid, { ...fresh, prep: { ...fresh.prep, casesPushTries: tries, casesNote: note } });
+    return true;
+  }
+  await saveGsTicket(kv, tid, { ...fresh, state: "manual", prep: { ...fresh.prep, casesHanded: n, casesHandedAt: deps.now(), casesDone: true, casesPushTries: tries, casesNote: note } });
   await quiet(() => kv.srem(GS_STAGE2_SET, tid), deps, "cases s2-rem-failed");
   await quiet(() => kv.srem(gsWaitKey(tk.groupId), tid), deps, "cases wait-rem-failed");
-  if (!sentOk(st)) deps.log(`[group-satei] cases push-failed ${R}`);
-  await toOutbox(st, "cases", tid, tk.no, deps, kv);
   return true;
 }
 
@@ -629,7 +638,13 @@ async function finishCases(tid: string, tk: GsTicket, nt: SateiPrepNotice, seen:
   const st = await deps.push(to, textMsg(lines.join("\n")), `cases:${tid}`).catch(() => null);
   const fresh = asTicket(await kv.get(gsTicketKey(tid)));
   if (!fresh || fresh.state !== "waiting-cases" || !fresh.prep) return;
-  // 段2f（F4）：push は1回。だめなら票を閉じて控えへ（2回目の送り直しは控えに任せる。下書きの受付はやり直さない）
+  // 段2f（F4）：push は1回。だめなら控えへ積んでから閉じる（2回目の送り直しは控えに任せる。下書きの受付はやり直さない）。
+  // 積めなければ閉じない（L2。次の見回りで finishCases をやり直す・同じ retry key。GS_CASES_PUSH_TRIES 回まで）
+  if (!(await toOutbox(st, "cases", tid, tk.no, deps, kv)) && tries < GS_CASES_PUSH_TRIES) {
+    await saveGsTicket(kv, tid, { ...fresh, prep: { ...fresh.prep, casesPushTries: tries, casesNote: note } });
+    deps.log(`[group-satei] cases push-failed ${R} retry`);
+    return;
+  }
   await saveGsTicket(kv, tid, {
     ...fresh, state, ...(jobNo !== undefined ? { jobNo } : {}),
     prep: { ...fresh.prep, casesDone: true, casesPushTries: tries, casesNote: note },
@@ -641,7 +656,6 @@ async function finishCases(tid: string, tk: GsTicket, nt: SateiPrepNotice, seen:
     if (!a || a.kind !== "ok") deps.log(`[group-satei] cases ack-failed ${R}`);
   }
   deps.log(sentOk(st) ? `[group-satei] cases notified ${R}` : `[group-satei] cases push-failed ${R} outbox`);
-  await toOutbox(st, "cases", tid, tk.no, deps, kv);
 }
 
 /**

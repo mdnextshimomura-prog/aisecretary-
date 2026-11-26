@@ -38,6 +38,8 @@ export interface GsOpenEvent {
   text: string;
   entry: "A" | "B";
   quotedMessageId?: string;
+  /** 段2f：受付票を開いた（このあと必ず知らせを出す道に乗った）ときに1回呼ぶ。photo-ask が譲るかの判定に使う */
+  onOpened?: () => void;
 }
 
 export interface GsOpenDeps {
@@ -118,6 +120,11 @@ export async function openGroupSatei(ev: GsOpenEvent, deps: GsOpenDeps): Promise
   } catch {
     deps.log("[group-satei] skip:kv");
     return "skip";
+  }
+  try {
+    ev.onOpened?.();
+  } catch {
+    // 知らせの道は止めない
   }
   const receipt = receiptOf(ticket.no);
   let media: GsMedia[] = [];
@@ -296,6 +303,39 @@ function parseLate(v: unknown): { kind: "image" | "pdf"; id: string } | null {
   return (kind === "image" || kind === "pdf") && id ? { kind, id } : null;
 }
 
+/** あとから届いた資料を足す受付票を選ぶ（開いている asking の票のうち新しい順に、lateMediaMatches の通る最初の1件） */
+export function gsLateMatch<T extends { t: GsTicket }>(open: T[], row: GsMedia, admin: string | null | undefined): T | null {
+  const sorted = [...open].sort((a, b) => b.t.at - a.t.at);
+  for (const x of sorted) if (lateMediaMatches(x.t, row, open.length, admin)) return x;
+  return null;
+}
+/** その票が、あとの資料を受けて読み直せるか（受けられないと late-media over） */
+export const gsLateAccepts = (t: GsTicket) => Boolean(t.deferred) || ((t.rereads ?? 0) < GS_REREAD_MAX && t.mediaIds.length < GS_MATERIALS_MAX);
+/** 段2f（M4）：この票から知らせが出るか（届いた・まだ送り直しの上限に達していない） */
+export const gsTicketDeliverable = (t: GsTicket) => t.pushed === true || (t.pushTries ?? 0) < GS_TICKET_PUSH_TRIES;
+
+/**
+ * 段2f（F1(b)・H1・M4）：画像のあとの名指しの画像を、グループ査定の受付票がみな扱うか（扱えば photo-ask は譲る）。
+ * 扱う＝そのグループの送り主の asking の票で、知らせが出る（gsTicketDeliverable）ものが
+ *   ①その画像をもう束ねている、②依頼の資料として束ねる幅にある（pickMaterials。読んでいる最中の票）、
+ *   ③あとの資料として足す（gsLateMatch が選ぶ票が送り主の票で、gsLateAccepts が通る＝attachLateMedia と同じ決まり）。
+ * gathering 以降の票・形の違う票は数えない。1枚でも扱わない画像があれば false（2通になりうる側）
+ */
+export function gsTicketsTakeImages(raw: unknown[], rows: GsMedia[], groupId: string, env: GsEnv = process.env): boolean {
+  if (rows.length === 0 || !groupSateiOn(groupId, env)) return false;
+  const admin = sateiNotifyTarget(env);
+  const open = raw
+    .map((r) => asTicket(r))
+    .filter((t): t is GsTicket => t !== null && t.groupId === groupId && t.state === "asking")
+    .map((t) => ({ t }));
+  return rows.every((row) => {
+    const own = open.filter((x) => x.t.requesterId === row.senderId && gsTicketDeliverable(x.t));
+    if (own.some(({ t }) => t.mediaIds.includes(row.messageId) || pickMaterials([row], { requesterId: t.requesterId, at: t.at, triggerMsgIds: t.triggerMsgIds }).length > 0)) return true;
+    const m = gsLateMatch(open, row, admin);
+    return Boolean(m && m.t.requesterId === row.senderId && gsLateAccepts(m.t) && gsTicketDeliverable(m.t));
+  });
+}
+
 /**
  * あとから届いた画像・PDF を、そのグループの開いている受付票に足す（11/25）。
  * 受付票そのものは書き換えない（同時に届いた画像どうし・ボタンの処理と書き合いにならないよう、
@@ -318,12 +358,12 @@ export async function attachLateMedia(
       const t = asTicket(await kv.get(gsTicketKey(tid)));
       if (t && t.state === "asking") open.push({ tid, t });
     }
-    open.sort((a, b) => b.t.at - a.t.at);
     const admin = sateiNotifyTarget(env);
-    for (const { tid, t } of open) {
-      if (!lateMediaMatches(t, row, open.length, admin)) continue;
+    const hit = gsLateMatch(open, row, admin);
+    if (hit) {
+      const { tid, t } = hit;
       const receipt = receiptOf(t.no);
-      if (!t.deferred && ((t.rereads ?? 0) >= GS_REREAD_MAX || t.mediaIds.length >= GS_MATERIALS_MAX)) {
+      if (!gsLateAccepts(t)) {
         deps.log(`[group-satei] ticket ${receipt} late-media over`);
         return null;
       }

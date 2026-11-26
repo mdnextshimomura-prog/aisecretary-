@@ -245,6 +245,79 @@ const noText = (logs: string[]) => logs.every((l) => !l.includes("事例") && !l
     assert.ok(x.logs.includes("[group-satei] outbox ambig G7,G8 sent"));
     assert.ok(x.logs.every((l) => !l.includes("p1") && !l.includes(G)));
   });
+  await t("L1：もう要らない知らせは作り直さず消す（催促の1行は結果が来たら、遅れは案の配達を試したら、ambig は候補が閉じたら）", async () => {
+    const x = mk({ ticket: waiting(), push: [200, 500] });
+    await sweepGsStage2(x.deps);
+    assert.equal(x.queued(`remind-note:${tid}`), true);
+    x.m.set(gsTicketKey(tid), { ...base, ...waiting({ casesDone: true, remindNote: "sent" }), state: "started" });
+    x.at(2 * MIN);
+    await sweepGsStage2(x.deps);
+    assert.deepEqual([x.pushes.length, x.queued(`remind-note:${tid}`)], [2, false]);
+    // prop-late：案の配達を試した（tries>0）なら「案がまだできていません」は送らない
+    const y = mk();
+    y.sets.get(GS_STAGE2_SET)!.clear();
+    await gsOutboxAdd(y.kv, "prop-late", tid, NOW, () => undefined);
+    y.m.set(gsTicketKey(tid), { ...base, prep: { ...prep0, tries: 1 } });
+    y.at(2 * MIN);
+    await sweepGsStage2(y.deps);
+    assert.deepEqual([y.pushes.length, y.queued(`prop-late:${tid}`)], [0, false]);
+    // ambig：候補の票が1件でも waiting-cases でなくなったら送らない
+    const z = mk({ ticket: waiting(), push: [500] });
+    z.sets.get(GS_STAGE2_SET)!.clear();
+    z.m.set(gsTicketKey(tid2), { ...base, ...waiting(), no: 8, triggerMsgIds: ["m2"] });
+    z.sets.set(gsWaitKey(G), new Set([tid, tid2]));
+    await markGsCasePdf({ messageId: "p1", kind: "pdf", senderId: STAFF, at: NOW }, G, { env: ON, kv: z.kv, push: z.deps.push, now: z.deps.now, log: () => undefined });
+    z.m.set(gsTicketKey(tid2), { ...base, ...waiting(), no: 8, triggerMsgIds: ["m2"], state: "manual" });
+    z.at(2 * MIN);
+    await sweepGsStage2(z.deps);
+    assert.equal(z.pushes.length, 1);
+    assert.equal(z.sets.get(GS_OUTBOX_SET)!.size, 0);
+  });
+  await t("L2：控えに積めなければ閉じない（次の見回りで finishCases をやり直す・同じ retry key）", async () => {
+    const SAVED: SateiPrepNotice = { tid, no: 7, status: "事例保存済み", lines: [], areaDone: false, failReason: "", cases: { contract: 2, listing: 1, failed: 0 }, casesFailReason: "" };
+    const x = mk({ ticket: waiting({ casesHanded: 2, casesHandedAt: NOW, kind: "土地" }), notices: [SAVED], push: [500, 200] });
+    x.kv.lrange = async () => [JSON.stringify({ m: "p1", at: 1 }), JSON.stringify({ m: "p2", at: 2 })];
+    const sadd = x.kv.sadd;
+    x.kv.sadd = async (k: string, v: string) => { if (k === GS_OUTBOX_SET) throw new Error("kv"); return sadd(k, v); };
+    await sweepGsStage2(x.deps);
+    assert.deepEqual([x.pushes.length, ticket(x).state, ticket(x).prep!.casesDone, ticket(x).prep!.casesPushTries], [1, "waiting-cases", undefined, 1]);
+    assert.equal(x.sets.get(GS_STAGE2_SET)!.has(tid), true);
+    x.kv.sadd = sadd;
+    await sweepGsStage2(x.deps);
+    assert.deepEqual(x.pushes.map((p) => p.key), [`cases:${tid}`, `cases:${tid}`]);
+    assert.equal(x.pushes[1].text, x.pushes[0].text);
+    assert.deepEqual([ticket(x).state, ticket(x).prep!.casesDone], ["manual", true]);
+  });
+  await t("L2：portal に断られた知らせ（handCases）も、積めなければ閉じずにやり直す", async () => {
+    const x = mk({ ticket: waiting(), push: [500, 500] });
+    x.kv.lrange = async () => [JSON.stringify({ m: "p1", at: NOW - 3 * MIN })];
+    x.deps.prep!.cases = async () => ({ kind: "rejected", status: 409, code: "PREP_STALE" });
+    const sadd = x.kv.sadd;
+    x.kv.sadd = async (k: string, v: string) => { if (k === GS_OUTBOX_SET) throw new Error("kv"); return sadd(k, v); };
+    await sweepGsStage2(x.deps);
+    assert.deepEqual([x.pushes.length, ticket(x).state, ticket(x).prep!.casesHanded, ticket(x).prep!.casesPushTries], [1, "waiting-cases", undefined, 1]);
+    await sweepGsStage2(x.deps);
+    assert.deepEqual(x.pushes.map((p) => p.key), [`cases:${tid}`, `cases:${tid}`]);
+    // 2回目も積めなければ、そこで閉じる（毎分送り続けない）
+    assert.deepEqual([ticket(x).state, ticket(x).prep!.casesDone], ["manual", true]);
+  });
+  await t("L3：控えのループの中でも残り時間を確かめる（期限前の要素を読むあいだに予算が尽きたら送らない）", async () => {
+    const x = mk();
+    x.sets.get(GS_STAGE2_SET)!.clear();
+    x.m.set(gsTicketKey(tid2), { ...base, no: 8, triggerMsgIds: ["m2"] });
+    await gsOutboxAdd(x.kv, "prop-late", tid, NOW + 10 * MIN, () => undefined);
+    await gsOutboxAdd(x.kv, "prop-late", tid2, NOW, () => undefined);
+    x.at(2 * MIN);
+    x.deps.startedAt = NOW + 2 * MIN;
+    let clock = NOW + 2 * MIN;
+    x.deps.now = () => clock;
+    const get = x.kv.get;
+    // 1件目（期限前）を読むたびに時計を36秒進める
+    x.kv.get = async (k: string) => { if (k === gsObKey("prop-late", tid)) clock += 36_000; return get(k); };
+    await sweepGsStage2(x.deps);
+    assert.equal(x.pushes.length, 0);
+    assert.equal(x.queued(`prop-late:${tid2}`), true);
+  });
   await t("結果の知らせの文の作り直し（gsCasesNoteText）は finishCases と同じ", async () => {
     const c = { contract: 2, listing: 1 };
     assert.equal(gsCasesNoteText(7, { ...c, failed: 0, unsaved: 0, draft: "started", jobNo: 12 }), "事例を保存しました（成約 2件・売出 1件）。下書きを作ります（受付 G7・#J12）");
