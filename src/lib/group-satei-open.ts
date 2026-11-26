@@ -9,7 +9,7 @@ import { sateiNotifyTarget } from "./satei-data";
 import {
   GS_CANDIDATES_MAX, GS_DEFER_MS, GS_MATERIALS_MAX, GS_MEDIA_MAX, GS_MEDIA_TTL, GS_QUIET_MS, GS_READS_PER_DAY,
   GS_LOCK_TTL_S, GS_LOCK_WAIT_MS, GS_PENDING_SET, GS_POLL_MS, GS_SWEEP_AFTER_MS, GS_REREAD_MAX, GS_ROUND_MS, GS_SEQ_KEY, GS_TICKET_TTL, GS_WORKER_DEADLINE_MS,
-  asTicket, groupSateiActive, groupSateiOn, gsDecKey, gsLateKey, gsMediaKey, gsMsgKey, gsOpenKey, gsReadsKey, gsRereadAtKey,
+  asTicket, groupSateiActive, groupSateiOn, groupSateiStage2On, gsDecKey, gsLateKey, gsMediaKey, gsMsgKey, gsOpenKey, gsReadsKey, gsRereadAtKey,
   gsRereadLockKey, gsTicketKey, receiptOf, ticketIdOf,
   type GsEnv, type GsMedia, type GsRead, type GsTicket,
 } from "./group-satei-data";
@@ -251,7 +251,9 @@ async function notifyTicket(
     reread,
     canReread: (ticket.rereads ?? 0) < GS_REREAD_MAX && ticket.mediaIds.length < GS_MATERIALS_MAX,
   });
-  const card = gsCard(tid, ticket.ver, cands, dealsFailed, ticket.no);
+  // 段2：上の段に「何の依頼？」。入口は査定らしいものだけを拾うので、見立てはいつも［査定］（設計 3）
+  const stage2 = groupSateiStage2On(deps.env ?? process.env);
+  const card = gsCard(tid, ticket.ver, cands, dealsFailed, ticket.no, stage2 ? { guess: "satei" } : undefined);
   let sent = false;
   if (target) {
     try {
