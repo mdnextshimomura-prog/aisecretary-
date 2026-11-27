@@ -34,9 +34,9 @@ import { DEL_IF_TOKEN_LUA, makeSateiNotion, readSateiDealReal, sateiActionDeps, 
 import { handleGsInfoText, sweepGsInfo, type GsInfoDeps } from "./group-satei-info";
 import { gsInfoSystem } from "./group-satei-facts";
 import { GS_READ_MODEL } from "./group-satei-read";
-import { loadActiveDeals } from "./task-record-wire";
+import { forgetActiveDeals, loadActiveDeals } from "./task-record-wire";
 import { groupSateiAutoDealOn, gsPropsDbId } from "./group-satei-data";
-import { gsAutoNotion, type GsAutoNotion, type GsAutoNotionClient } from "./group-satei-auto-notion";
+import { gsAutoNotion, type GsAutoLinkResult, type GsAutoNotion, type GsAutoNotionClient } from "./group-satei-auto-notion";
 import { sweepGsAuto } from "./group-satei-auto";
 import { autoHooks } from "./group-satei-actions";
 
@@ -204,7 +204,7 @@ export function groupSateiOpenDeps(today: string): GsOpenDeps {
  * 案件の自動登録（計画 2026-11-27）：本物の Notion の口。スイッチが off・ID が無ければ null（＝自動登録しない。Client も作らない）。
  * 呼び出しは1回 CRM_TIMEOUT_MS まで。Client は makeSateiNotion（ログに ID・名前を出さない）
  */
-export function gsAutoNotionReal(): GsAutoNotion | null {
+export function gsAutoNotionReal(): (GsAutoNotion & { forgetDeals(): void }) | null {
   const propsDbId = gsPropsDbId();
   const dealsDbId = (process.env.CRM_DEALS_DB_ID ?? "").trim();
   if (!groupSateiAutoDealOn() || !propsDbId || !dealsDbId) return null;
@@ -215,7 +215,19 @@ export function gsAutoNotionReal(): GsAutoNotion | null {
     readDealNo: (id) => within(n.readDealNo(id), CRM_TIMEOUT_MS),
     propTitle: (id) => within(n.propTitle(id), CRM_TIMEOUT_MS),
     linkDealFolder: (dealId, folderId, mark) => within(n.linkDealFolder(dealId, folderId, mark), CRM_TIMEOUT_MS * 2),
+    forgetDeals: forgetActiveDeals,
   };
+}
+
+/**
+ * フォルダの URL を Notion に書く口だけは、スイッチに関わらず作る（途中で off にされても、auto のある票は終わらせる。点検 中3）。
+ * auto の無い票では呼ばれない（＝off で登録が1件も無ければ、Notion へは何も書かない）。CRM_DEALS_DB_ID が無ければ null
+ */
+export function gsAutoLinkReal(): ((dealId: string, folderId: string, mark: string) => Promise<GsAutoLinkResult>) | null {
+  const dealsDbId = (process.env.CRM_DEALS_DB_ID ?? "").trim();
+  if (!dealsDbId) return null;
+  return (dealId, folderId, mark) =>
+    within(gsAutoNotion(crm() as unknown as GsAutoNotionClient, { propsDbId: gsPropsDbId() ?? "", dealsDbId: normNotionId(dealsDbId) }).linkDealFolder(dealId, folderId, mark), CRM_TIMEOUT_MS * 2);
 }
 
 export function groupSateiActionDeps(): Omit<GsActionDeps, "reserve" | "complete" | "reply" | "log"> {
@@ -349,8 +361,8 @@ export async function sweepGroupSateiStage2OnTick(startedAt?: number): Promise<v
       startedAt,
       // 段2e：事例を保存したマンションの下書きの受付（段1の［案件を選ぶ］と同じ口）
       satei: { dealsDbId: s.dealsDbId, readDeal: (dealId) => within(s.readDeal(dealId), CRM_TIMEOUT_MS), intake: s.intake },
-      // 案件の自動登録：Mac が作ったフォルダの URL を Notion に書く（スイッチ off なら null＝今の見回りのまま）
-      autoLink: an ? an.linkDealFolder : null,
+      // 案件の自動登録：Mac が作ったフォルダの URL を Notion に書く（auto のある票だけ。スイッチ off でも、始めた分は終わらせる）
+      autoLink: gsAutoLinkReal(),
       log,
     });
   } catch {

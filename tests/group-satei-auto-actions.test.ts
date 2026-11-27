@@ -37,12 +37,18 @@ const ON = {
   TASK_SATEI: "1", TASK_SATEI_USER_IDS: SHIMO, GROUP_SATEI: "1", GROUP_SATEI_GROUP_IDS: G, GROUP_SATEI_STAGE2: "1", GROUP_SATEI_CASE_STAFF_ID: STAFF,
   CRM_DEALS_DB_ID: DB, CRM_PROPERTIES_DB_ID: PROPS_DB, GROUP_SATEI_AUTO_DEAL: "1",
 };
-const oldDeal: SateiDeal = { id: OLD, name: "売却｜山田｜パークハウス天満", dealNo: 12, folderId: "folder_abcdefghij", propertyIds: ["p"], gone: false, parentDbId: DB };
+const oldDeal: SateiDeal = { id: OLD, name: "売却｜山田｜パークハウス天満 1203", dealNo: 12, folderId: "folder_abcdefghij", propertyIds: ["p"], gone: false, parentDbId: DB };
 
 /** 文面（計画 A6。一字一句） */
-const M1 = "進行中の案件「売却｜山田｜パークハウス天満」に合ったので、この案件で進めます（受付 G7）";
+const M1 = "進行中の案件「売却｜山田｜パークハウス天満 1203」に合ったので、この案件で進めます（受付 G7）";
 const M2 = "案件 DEAL-0231 として登録しました（受付 G7）。フォルダを作って、事例の取り方の案を数分でお送りします。顧客と案件ソースは、あとで Notion に入れてください";
 const M3 = "合いそうな案件が複数あるので、選んでください（受付 G7）";
+const M3_PARTIAL = "似た名前の案件が見つかりました。同じ案件なら一覧から選び、違えば［案件がまだ無い］で登録してください（受付 G7）";
+const M3_BUY = "同じ物件の購入の案件が見つかりました。売却の査定として新しく登録するなら［案件がまだ無い］を押してください（受付 G7）";
+const M3_BUILDING = "同じ建物の案件が見つかりました。同じ部屋なら一覧から選び、違う部屋なら［案件がまだ無い］で登録してください（受付 G7）";
+const NO_FOLDER = "合う案件「売却｜山田｜パークハウス天満 1203」が見つかりましたが、Driveフォルダ が未設定のため進められません。Notion に入れてから一覧で選ぶか、［案件がまだ無い］で新しく登録してください（受付 G7）";
+const NO_KIND = "合う案件「売却｜山田｜パークハウス天満 1203」が見つかりましたが、物件の種別が未設定のため進められません。Notion に入れてから一覧で選ぶか、［案件がまだ無い］で新しく登録してください（受付 G7）";
+const PROP_KIND = "合う案件「パークハウス天満 1203」が見つかりましたが、物件の種別が未設定のため進められません。Notion に入れてから一覧で選ぶか、［案件がまだ無い］で新しく登録してください（受付 G7）";
 const M3_DUP = "同じ物件の進行中の案件が見つかりました。一覧から選んでください（受付 G7）";
 const M7 = "案件の自動登録が途中で止まりました（受付 G7）。カードの［一覧から選ぶ］で選ぶか、もう一度［査定］を押してください";
 const M7_DEAL = "案件の自動登録が途中で止まりました（受付 G7）。CRM_案件 DEAL-0231 はできています。カードの［一覧から選ぶ］で選ぶか、もう一度［査定］を押してください";
@@ -63,6 +69,11 @@ interface Opt {
   dealNo?: number | null;
   readNo?: number | null;
   noAuto?: boolean;
+  titleFail?: number;
+  readNewFail?: number;
+  badKind?: boolean;
+  oldFolder?: string | null;
+  oldKind?: string | null;
 }
 function mk(o: Opt = {}) {
   const m = new Map<string, unknown>();
@@ -77,6 +88,9 @@ function mk(o: Opt = {}) {
   const deals: GsAutoDealInput[] = [];
   let propFail = o.propFail ?? 0;
   let dealFail = o.dealFail ?? 0;
+  let titleFail = o.titleFail ?? 0;
+  let readNewFail = o.readNewFail ?? 0;
+  let forgot = 0;
   let ev = 0;
   const kv = {
     get: async (k: string) => m.get(k) ?? null,
@@ -98,9 +112,10 @@ function mk(o: Opt = {}) {
     dealsDbId: DB,
     readDeal: async (id) => {
       order.push(`readDeal ${id === NEW_DEAL ? "new" : "old"}`);
+      if (id === NEW_DEAL && readNewFail > 0) { readNewFail--; throw new Error("notion"); }
       return id === NEW_DEAL
         ? { deal: { id: NEW_DEAL, name: "査定｜顧客未定｜パークハウス天満 1203", dealNo: 231, folderId: null, propertyIds: [NEW_PROP], gone: false, parentDbId: DB }, kind: "マンション" }
-        : { deal: oldDeal, kind: "マンション" };
+        : { deal: { ...oldDeal, folderId: o.oldFolder === undefined ? oldDeal.folderId : o.oldFolder }, kind: o.oldKind === undefined ? "マンション" : o.oldKind };
     },
     intake: async (req) => { intakes.push(req); return { kind: "ok", value: { created: true, no: 12, status: "受付" } }; },
     loadDeals: async () => { order.push("loadDeals"); return o.deals ?? [{ id: "x1", name: "売却｜鈴木｜グランドメゾン梅田 501", phase: "【売】査定" }]; },
@@ -119,19 +134,21 @@ function mk(o: Opt = {}) {
       findOrCreateProperty: async (p) => {
         order.push("prop");
         if (propFail > 0) { propFail--; throw new Error("notion"); }
+        if (o.badKind && !p.force) return { badKind: true };
         props.push(p);
         return { id: NEW_PROP };
       },
       findOrCreateDeal: async (p) => {
         order.push("deal");
         if (dealFail > 0) { dealFail--; throw new Error("notion"); }
-        if (o.dup) return { kind: "dup" };
+        if (o.dup && !p.skipDup) return { kind: "dup" };
         deals.push(p);
         return { kind: "ok", id: NEW_DEAL, dealNo: o.dealNo === undefined ? 231 : o.dealNo };
       },
       readDealNo: async () => { order.push("readDealNo"); return o.readNo === undefined ? null : o.readNo; },
-      propTitle: async () => { order.push("propTitle"); return "パークハウス天満 1203"; },
+      propTitle: async () => { order.push("propTitle"); if (titleFail > 0) { titleFail--; throw new Error("notion"); } return "パークハウス天満 1203"; },
       sleep: async () => { order.push("sleep"); },
+      forgetDeals: () => { forgot++; },
     },
   };
   const press = (data: string) =>
@@ -145,9 +162,10 @@ function mk(o: Opt = {}) {
     dec: () => m.get(gsDecKey(tid)),
     q: () => Array.from(sets.get(GS_AUTO_SET) ?? []),
     last: () => replies[replies.length - 1],
+    forgot: () => forgot,
   };
 }
-const EXACT: DealRef[] = [{ id: OLD, name: "売却｜山田｜パークハウス天満", phase: "【売】査定" }];
+const EXACT: DealRef[] = [{ id: OLD, name: "売却｜山田｜パークハウス天満 1203", phase: "【売】査定" }];
 
 (async () => {
   await t("on でも Notion の口が無ければ今の返事（自動登録しない）", async () => {
@@ -201,6 +219,7 @@ const EXACT: DealRef[] = [{ id: OLD, name: "売却｜山田｜パークハウス
     assert.deepEqual(Array.from(x.sets.get(GS_STAGE2_SET) ?? []), [tid]);
     assert.equal(x.intakes.length, 0);
     assert.ok(x.logs.includes("[group-satei] auto registered G7 D231"));
+    assert.equal(x.forgot(), 1, "登録できたら進行中の案件の覚えを捨てる（点検 低3）");
   });
 
   await t("portal の口：newFolder の本文は計画 B1 の欄だけ（folderId を入れない）", async () => {
@@ -221,21 +240,71 @@ const EXACT: DealRef[] = [{ id: OLD, name: "売却｜山田｜パークハウス
     );
   });
 
-  await t("ask：部分一致だけ・完全一致が2件・【買】の案件 → 今のカード＋M3。Notion も portal も呼ばない", async () => {
-    for (const [deals, reason] of [
-      [[{ id: "p1", name: "相談｜田中｜パークハウス天満 1203 駐車場", phase: "【売】査定" }], "partial"],
-      [[...EXACT, { id: "p2", name: "購入｜田中｜パークハウス天満", phase: "【売】媒介" }], "exact2"],
-      [[{ id: OLD, name: "購入｜山田｜パークハウス天満", phase: "【買】内見" }], "buy"],
-    ] as Array<[DealRef[], string]>) {
+  await t("ask：決められないときは今のカード＋理由ごとの1行（M3）。Notion も portal も呼ばない", async () => {
+    for (const [deals, reason, head] of [
+      [[{ id: "p1", name: "相談｜田中｜パークハウス天満 1203 駐車場", phase: "【売】査定" }], "partial", M3_PARTIAL],
+      [[...EXACT, { id: "p2", name: "購入｜田中｜パークハウス天満1203", phase: "【売】媒介" }], "exact2", M3],
+      [[{ id: OLD, name: "購入｜山田｜パークハウス天満 1203", phase: "【買】内見" }], "buy", M3_BUY],
+      [[{ id: OLD, name: "売却｜山田｜パークハウス天満", phase: "【売】媒介" }], "building", M3_BUILDING],
+    ] as Array<[DealRef[], string, string]>) {
       const x = mk({ deals });
       await x.satei();
-      assert.equal(x.last().text, `${M3}\n${msgGsKindSatei(7)}`, reason);
+      assert.equal(x.last().text, `${head}\n${msgGsKindSatei(7)}`, reason);
       assert.deepEqual(x.last().card, gsSateiNextCard(tid, 1, 7));
       assert.deepEqual(x.order, ["loadDeals"]);
       assert.equal(x.dec(), undefined, "印を取らない（このあと一覧から選べる）");
       assert.equal(x.ticket().auto, undefined);
       assert.ok(x.logs.includes(`[group-satei] auto card G7 ${reason}`));
     }
+  });
+
+  await t("同じ建物の別の部屋の案件があっても、勝手に結びつけない。［案件がまだ無い］で新しく登録できる（点検 中2）", async () => {
+    const x = mk({ ticket: { requestKind: "satei" }, deals: [{ id: OLD, name: "売却｜山田｜パークハウス天満", phase: "【売】媒介" }] });
+    await x.satei();
+    assert.equal(x.preps.length, 0);
+    await x.gm();
+    assert.equal(x.last().text, M2);
+    assert.equal(x.preps[0].dealId, NEW_DEAL);
+  });
+
+  await t("合った案件が進められない（Driveフォルダ 無し・種別が3種以外）→ 行き止まりにも手作業にもせず、理由つきで今のカード。既存の案件には書かない（点検 中1）", async () => {
+    for (const [o, text, code] of [
+      [{ oldFolder: null }, NO_FOLDER, "no-folder"], [{ oldKind: null }, NO_KIND, "no-kind"], [{ oldKind: "収益" }, NO_KIND, "no-kind"],
+    ] as Array<[Opt, string, string]>) {
+      const x = mk({ deals: EXACT, ticket: { requestKind: "satei" }, ...o });
+      await x.satei();
+      assert.equal(x.last().text, `${text}\n${msgGsKindSatei(7)}`);
+      assert.deepEqual(x.last().card, gsSateiNextCard(tid, 1, 7));
+      assert.equal(x.dec(), undefined, "印を取らない");
+      assert.equal(x.ticket().state, "asking", "手作業に閉じない");
+      assert.deepEqual([x.props.length, x.deals.length, x.preps.length, x.intakes.length], [0, 0, 0, 0]);
+      assert.ok(x.logs.includes(`[group-satei] auto card G7 ${code}`));
+      // 何度押しても同じカード（行き止まりにならない）。［案件がまだ無い］で登録へ進める
+      await x.satei();
+      assert.deepEqual(x.last().card, gsSateiNextCard(tid, 1, 7));
+      await x.gm();
+      assert.equal(x.last().text, M2);
+      assert.equal(x.deals[0].skipDup, true);
+    }
+    // 合った案件を読めないときは、今の返事（カード）のまま
+    const y = mk({ deals: EXACT });
+    y.deps.readDeal = async () => { throw new Error("notion"); };
+    await y.satei();
+    assert.equal(y.last().text, msgGsKindSatei(7));
+    assert.equal(y.dec(), undefined);
+  });
+
+  await t("同じ物件名の CRM_物件 の種別が3種以外 → 使い回さず、理由つきでカード。［案件がまだ無い］なら新しく作る（点検 低10）", async () => {
+    const x = mk({ badKind: true, ticket: { requestKind: "satei" } });
+    await x.satei();
+    assert.equal(x.last().text, `${PROP_KIND}\n${msgGsKindSatei(7)}`);
+    assert.equal(x.dec(), undefined);
+    assert.equal(x.ticket().auto, undefined);
+    assert.deepEqual(x.q(), []);
+    assert.ok(x.logs.includes("[group-satei] auto card G7 prop-kind"));
+    await x.gm();
+    assert.equal(x.last().text, M2);
+    assert.equal(x.props[0].force, true);
   });
 
   await t("読み取りが無い・種別が不明・案件を読めない → 今の返事のまま（M3 も付けない）", async () => {
@@ -398,7 +467,7 @@ const EXACT: DealRef[] = [{ id: OLD, name: "売却｜山田｜パークハウス
     x.deps.prep!.intake = async (req) => { x.preps.push(req); return { kind: "ok", value: { created: true, status: "受付" } }; };
     x.deps.loadDeals = async () => [{ id: NEW_DEAL, name: "査定｜顧客未定｜パークハウス天満 1203", phase: "【売】査定" }];
     await x.satei();
-    assert.ok(x.last().text.endsWith(msgGsPrepStarted(7)), x.last().text);
+    assert.equal(x.last().text, M2);
     assert.deepEqual(x.preps[x.preps.length - 1].newFolder, { name: FOLDER_NAME });
     assert.equal(x.deals.length, 1, "案件は1件のまま");
     assert.equal(x.ticket().state, "gathering");
@@ -411,11 +480,74 @@ const EXACT: DealRef[] = [{ id: OLD, name: "売却｜山田｜パークハウス
     assert.equal(x.order.includes("loadDeals"), false, "照合しない");
     assert.equal(x.ticket().state, "gathering");
     assert.equal(x.ticket().provisional, false);
-    // 作る直前に同じ物件の案件が見つかれば一覧へ
+    assert.equal(x.ticket().auto?.force, true);
+    // 人が「無い」と言ったので、同じ物件名の進行中の案件があっても登録する（fresh-dup の検査を飛ばす。点検 低11）
     const y = mk({ ticket: { requestKind: "satei" }, dup: true });
     await y.gm();
-    assert.equal(y.last().text, `${M3_DUP}\n${msgGsKindSatei(7)}`);
-    assert.equal(y.ticket().state, "asking");
+    assert.equal(y.last().text, M2);
+    assert.equal(y.deals[0].skipDup, true);
+    assert.equal(y.ticket().state, "gathering");
+  });
+
+  await t("高1：「もう一度［査定］を」と返したどの道でも、印が外れていて、押し直すと続きから準備まで進む（物件・案件は作り直さない）", async () => {
+    for (const [name, o, why] of [
+      ["物件を作れない", { propFail: 1 }, "notion-prop"],
+      ["案件を作れない", { dealFail: 1 }, "notion-deal"],
+      ["案件を読めない", { readNewFail: 1 }, "notion-read"],
+      ["フォルダ名を作れない（物件名を読めない）", { titleFail: 1 }, "title"],
+    ] as Array<[string, Opt, string]>) {
+      const x = mk(o);
+      await x.satei();
+      assert.equal(x.last().text, M8, name);
+      assert.equal(x.dec(), undefined, `${name}：印が残っていない`);
+      assert.deepEqual(x.q(), [], name);
+      assert.equal(x.ticket().state, "asking", name);
+      assert.ok(x.logs.includes(`[group-satei] auto failed G7 ${why}`), `${name} ${x.logs.join("|")}`);
+      await x.satei();
+      assert.equal(x.last().text, M2, `${name}：押し直しが通る`);
+      assert.equal(x.preps.length, 1, name);
+      assert.deepEqual(x.preps[0].newFolder, { name: FOLDER_NAME });
+      assert.deepEqual([x.props.length, x.deals.length], [1, 1], `${name}：増やさない`);
+      assert.equal(x.ticket().state, "gathering");
+    }
+    // 番号が読めない → 押し直しで読めれば進む
+    const y = mk({ dealNo: null, readNo: null });
+    await y.satei();
+    assert.equal(y.last().text, M8);
+    assert.equal(y.dec(), undefined);
+    y.deps.autoDeal!.readDealNo = async () => 231;
+    await y.satei();
+    assert.equal(y.last().text, M2);
+    // 一覧から選び直す・［案件がまだ無い］も「選択済み」にならない
+    const z = mk({ titleFail: 1, ticket: { requestKind: "satei" } });
+    await z.satei();
+    await z.gm();
+    assert.equal(z.last().text, M2);
+  });
+
+  await t("高1：2b-2 の答えのあとでフォルダ名を作れなかったときも、票は asking に戻り印が外れ、押し直しが通る", async () => {
+    const x = mk({ ticket: { read: { ...base.read!, facts: { ...facts, builtYm: null } } }, titleFail: 1 });
+    await x.satei();
+    const tok = x.ticket().info!.token.slice(0, 8);
+    await x.press(`v1|gi|${tid}|1|${tok}`);
+    assert.equal(x.last().text, M8);
+    assert.equal(x.dec(), undefined);
+    assert.equal(x.ticket().state, "asking");
+    await x.satei();
+    assert.ok(x.last().text.startsWith(M2), x.last().text);
+    assert.equal(x.deals.length, 1);
+  });
+
+  await t("低5：見回りの集合には印より先に入れる（印を取った直後に落ちても、見回りが拾える）", async () => {
+    const x = mk();
+    const seen: string[] = [];
+    const sadd = x.kv.sadd;
+    const setNx = x.kv.setNx;
+    x.kv.sadd = async (k: string, v: string) => { if (k === GS_AUTO_SET) seen.push("autoq"); return sadd(k, v); };
+    x.kv.setNx = async (k: string, v: unknown) => { if (k === gsDecKey(tid)) { seen.push("dec"); throw new Error("ここで落ちた"); } return setNx(k, v); };
+    await x.satei();
+    assert.deepEqual(seen, ["autoq", "dec"]);
+    assert.deepEqual(x.q(), [tid]);
   });
 
   await t("gm：査定でない票・読み取りの無い票は今のまま（仮の決定）", async () => {

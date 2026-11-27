@@ -20,6 +20,11 @@ const crmNotion = new Client({
 const CACHE_TTL_MS = 5 * 60 * 1000;
 let cache: { at: number; deals: DealRef[] } | null = null;
 
+/** 覚え（5分）を捨てる。案件を新しく登録した直後に呼ぶ（次の照合が新しい案件を見るように。このインスタンスの分だけ） */
+export function forgetActiveDeals(): void {
+  cache = null;
+}
+
 /** 進行中（完了・失注以外）の案件の ID と名前。5 分だけ覚えておく。client はログを抑えた Client を渡すとき用（既定は今のまま） */
 export async function loadActiveDeals(client: Client = crmNotion): Promise<DealRef[]> {
   const dbId = process.env.CRM_DEALS_DB_ID;

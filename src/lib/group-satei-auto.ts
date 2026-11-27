@@ -9,10 +9,10 @@ import {
   type GsAuto, type GsEnv, type GsPrepKind, type GsRead, type GsTicket,
 } from "./group-satei-data";
 import {
-  gsBuildingOf, msgGsAutoAsk, msgGsAutoDup, msgGsAutoFailed, msgGsAutoMatched, msgGsAutoRegistered, msgGsAutoRegisteredHead, msgGsAutoStopped, msgGsPrepStopped,
+  gsBuildingOf, msgGsAutoAsk, msgGsAutoAskBuilding, msgGsAutoAskBuy, msgGsAutoAskPartial, msgGsAutoCannot, msgGsAutoDup, msgGsAutoFailed, msgGsAutoMatched, msgGsAutoRegistered, msgGsAutoRegisteredHead, msgGsAutoStopped, msgGsPrepStopped,
 } from "./group-satei-case";
 import { gsSateiNextCard, msgGsAlready, msgGsKindSatei, MSG_GS_BUSY } from "./group-satei-card";
-import type { GsAutoDealInput, GsAutoDealResult, GsAutoPropertyInput } from "./group-satei-auto-notion";
+import type { GsAutoDealInput, GsAutoDealResult, GsAutoPropertyInput, GsAutoPropertyResult } from "./group-satei-auto-notion";
 import type { GsOutcome } from "./group-satei-actions";
 import { normNotionId, type SateiDeal } from "./satei-deal";
 import { sateiNotifyTarget } from "./satei-data";
@@ -29,33 +29,45 @@ export const gsAutoNoteMark = (tid: string) => `票 ${gsAutoTid8(tid)}`;
 export type GsAutoMatch =
   | { kind: "none" }
   | { kind: "one"; deal: DealRef }
-  | { kind: "ask"; reason: "exact2" | "partial" | "buy" | "no-read" | "kind" | "no-key" };
+  | { kind: "ask"; reason: "exact2" | "partial" | "buy" | "building" | "no-read" | "kind" | "no-key" };
 
 const isPrepKind = (k: unknown): k is GsPrepKind => GS_PREP_KINDS.includes(k as GsPrepKind);
 
-/** 照合の鍵：物件名・建物名（号室を落としたもの）・所在（重なりは1つに） */
-export function gsAutoKeys(read: GsRead | null): string[] {
-  if (!read) return [];
-  const keys = [read.propertyName, gsBuildingOf(read), read.address].map((s) => normalizeProperty(s ?? "")).filter(Boolean);
-  return keys.filter((k, i) => keys.indexOf(k) === i);
+/**
+ * 照合の鍵（点検 中2・低1 のあと）。strong＝これが案件名の部分と完全一致すれば「同じ物件」と言える鍵／weak＝一致しても決められない鍵。
+ * マンション：strong は号室まで入った物件名だけ。建物名・所在・号室の無い物件名は weak（同じ建物の別の部屋かもしれない）。
+ * 戸建・土地：物件名・所在・自動登録の物件名（「<所在> 戸建」。次の依頼で当たるように）が strong
+ */
+export function gsAutoKeys(read: GsRead | null): { strong: string[]; weak: string[] } {
+  if (!read) return { strong: [], weak: [] };
+  const uniq = (xs: string[]) => xs.filter((k, i) => k && xs.indexOf(k) === i);
+  const nk = normalizeProperty(read.propertyName ?? "");
+  const bk = normalizeProperty(gsBuildingOf(read) ?? "");
+  const ak = normalizeProperty(read.address ?? "");
+  const tk = normalizeProperty(gsPropTitle(read) ?? "");
+  if (read.kind !== "マンション") return { strong: uniq([nk, ak, tk]), weak: [] };
+  const strong = nk && bk && nk !== bk ? [nk] : [];
+  return { strong, weak: uniq([nk, bk, ak, tk]).filter((k) => !strong.includes(k)) };
 }
 
 /**
- * 進行中の案件（完了・失注以外）に照らす（A2）。
- * none＝完全一致も部分一致も無い → 自動登録へ／one＝完全一致がちょうど1件（【買】でない）→ その案件で進める／
- * ask＝決められない（完全一致が2件以上・部分一致だけ・【買】の案件・読み取りや鍵が無い）→ 今のカード
+ * 進行中の案件（完了・失注以外）に照らす（A2。点検 中2 で変えた）。
+ * one＝strong の鍵の完全一致がちょうど1件（【買】でない）→ その案件で進める／none＝完全一致も部分一致も無い → 自動登録へ／
+ * ask＝決められない（strong の一致が2件以上＝exact2・【買】の案件＝buy・建物名や所在だけの一致＝building・部分一致だけ＝partial・読み取りや鍵が無い）→ 今のカード
  */
 export function gsAutoMatch(read: GsRead | null, deals: DealRef[]): GsAutoMatch {
   if (!read) return { kind: "ask", reason: "no-read" };
   if (!isPrepKind(read.kind)) return { kind: "ask", reason: "kind" };
-  const keys = gsAutoKeys(read);
-  if (keys.length === 0) return { kind: "ask", reason: "no-key" };
-  const exact = deals.filter((d) => dealKeys(d.name).some((k) => keys.includes(k)));
+  const { strong, weak } = gsAutoKeys(read);
+  if (strong.length + weak.length === 0) return { kind: "ask", reason: "no-key" };
+  const hit = (keys: string[]) => deals.filter((d) => dealKeys(d.name).some((k) => keys.includes(k)));
+  const exact = hit(strong);
   if (exact.length >= 2) return { kind: "ask", reason: "exact2" };
   if (exact.length === 1) {
     return (exact[0].phase ?? "").startsWith("【買】") ? { kind: "ask", reason: "buy" } : { kind: "one", deal: exact[0] };
   }
-  const partial = keys.some((k) => candidateDeals(k, deals, deals.length + 1).length > 0);
+  if (hit(weak).length > 0) return { kind: "ask", reason: "building" };
+  const partial = [...strong, ...weak].some((k) => candidateDeals(k, deals, deals.length + 1).length > 0);
   return partial ? { kind: "ask", reason: "partial" } : { kind: "none" };
 }
 
@@ -105,13 +117,15 @@ export function gsDealFolderName(dealNo: number, propTitle: string): string | nu
 
 /** Notion の口（本物は group-satei-auto-notion.ts。テストは差し替え）。無ければ自動登録しない */
 export interface GsAutoDealDeps {
-  findOrCreateProperty(p: GsAutoPropertyInput): Promise<{ id: string }>;
+  findOrCreateProperty(p: GsAutoPropertyInput): Promise<GsAutoPropertyResult>;
   findOrCreateDeal(p: GsAutoDealInput): Promise<GsAutoDealResult>;
   /** 作った直後に案件番号が読めなかったとき、1秒待って1回だけ読み直す */
   readDealNo(dealId: string): Promise<number | null>;
   /** CRM_物件 の物件名（フォルダ名を作る） */
   propTitle(propertyId: string): Promise<string | null>;
   sleep?(ms: number): Promise<void>;
+  /** 登録できたら、進行中の案件の覚え（5分）を捨てる（次の依頼の照合が新しい案件を見るように。点検 低3） */
+  forgetDeals?(): void;
 }
 
 type AutoKv = {
@@ -134,8 +148,8 @@ export interface GsAutoRunDeps {
 
 /** group-satei-actions.ts が渡す続き（actions → auto の向きだけで読み込むため、関数で受ける） */
 export interface GsAutoHooks {
-  /** ぴったり合った既存の案件で、［案件を選ぶ］と同じ道を進める。案件が読めなければ null */
-  existing(dealId: string, tk: GsTicket): Promise<GsOutcome | null>;
+  /** ぴったり合った既存の案件（読めた・フォルダあり・種別が3種）で、［案件を選ぶ］と同じ道を進める */
+  existing(got: { deal: SateiDeal; kind: string | null }, tk: GsTicket): Promise<GsOutcome>;
   /**
    * 登録した案件で、足りない項目を聞く（noAsk でなければ）→ 準備を頼む。held＝いま持っている印（auto:<tid8>）。
    * resume＝落ちた票の続き（印がもう prep: に書き換わっていても進める）。null＝準備の口が無い
@@ -152,7 +166,7 @@ function askCard(tid: string, tk: GsTicket, head: string, code: string): GsOutco
 }
 
 /**
- * ［査定］（mode match）と、査定の票の［案件がまだ無い］（mode force＝照合を飛ばす。裁定 R1）。
+ * ［査定］（mode match）と、査定の票の［案件がまだ無い］（mode force＝照合も、作る直前の「同じ物件の案件」の検査も飛ばす。裁定 R1・点検 低11）。
  * null＝自動では進めない（呼ぶ側は今の返事をそのまま返す）。呼ぶ側で groupSateiAutoDealOn を確かめる
  */
 export async function gsAutoDeal(
@@ -164,6 +178,7 @@ export async function gsAutoDeal(
   mode: "match" | "force",
 ): Promise<GsOutcome | null> {
   const R = receiptOf(tk.no);
+  const no = tk.no;
   const read = tk.read;
   if (tk.state !== "asking" || !read || !isPrepKind(read.kind)) return null;
   if (mode === "match") {
@@ -177,32 +192,58 @@ export async function gsAutoDeal(
     const m = gsAutoMatch(read, deals);
     if (m.kind === "ask") {
       deps.log(`[group-satei] auto card ${R} ${m.reason}`);
-      // 読み取り・鍵が無いのは「複数ある」ではないので、今の返事のまま
-      return m.reason === "exact2" || m.reason === "partial" || m.reason === "buy" ? askCard(a.tid, tk, msgGsAutoAsk(tk.no), `auto card ${R} ${m.reason}`) : null;
+      const head = m.reason === "exact2" ? msgGsAutoAsk(no) : m.reason === "partial" ? msgGsAutoAskPartial(no) : m.reason === "buy" ? msgGsAutoAskBuy(no) : m.reason === "building" ? msgGsAutoAskBuilding(no) : null;
+      // 読み取り・鍵が無いときは、今の返事のまま
+      return head ? askCard(a.tid, tk, head, `auto card ${R} ${m.reason}`) : null;
     }
-    if (m.kind === "one") {
-      const o = await hooks.existing(normNotionId(m.deal.id), tk);
-      if (!o) {
+    // 合ったのが、この受付票で前に登録した案件（フォルダはまだ無い）なら、下の登録の続きへ（作れた分は作り直さない）
+    if (m.kind === "one" && normNotionId(m.deal.id) !== tk.auto?.dealId) {
+      let got: { deal: SateiDeal; kind: string | null } | null;
+      try {
+        got = await deps.readDeal(normNotionId(m.deal.id));
+      } catch {
+        got = null;
+      }
+      if (!got || got.deal.gone) {
         deps.log(`[group-satei] auto card ${R} read-failed`);
         return null;
       }
+      // 進められない案件（フォルダ無し・種別が3種以外）に勝手に結びつけない・手作業にも閉じない：理由を添えて今のカード（点検 中1）。既存の案件には書かない
+      if (!got.deal.folderId) {
+        deps.log(`[group-satei] auto card ${R} no-folder`);
+        return askCard(a.tid, tk, msgGsAutoCannot(no, m.deal.name, "folder"), `auto card ${R} no-folder`);
+      }
+      if (!isPrepKind(got.kind)) {
+        deps.log(`[group-satei] auto card ${R} no-kind`);
+        return askCard(a.tid, tk, msgGsAutoCannot(no, m.deal.name, "kind"), `auto card ${R} no-kind`);
+      }
+      const o = await hooks.existing(got, tk);
       deps.log(`[group-satei] auto matched ${R}`);
       // Notion には何も書かない。返事の頭に M1
-      return { ...o, text: `${msgGsAutoMatched(tk.no, m.deal.name)}\n${o.text}` };
+      return { ...o, text: `${msgGsAutoMatched(no, m.deal.name)}\n${o.text}` };
     }
   }
   if (!gsPropTitle(read)) {
     deps.log(`[group-satei] auto card ${R} no-title`);
     return null;
   }
-  return gsAutoRun(a.tid, tk, deps, kv, hooks, false);
+  return gsAutoRun(a.tid, tk, deps, kv, hooks, { resume: false, force: mode === "force" });
 }
 
+const stepOf = (x: { propId?: string; dealId?: string; dealNo?: number }): GsAuto["step"] => (x.dealId && x.dealNo ? "prep" : x.propId ? "deal" : "prop");
+const idsOf = (prev: GsAuto | undefined) => ({
+  ...(prev?.propId ? { propId: prev.propId } : {}), ...(prev?.dealId ? { dealId: prev.dealId } : {}), ...(prev?.dealNo ? { dealNo: prev.dealNo } : {}),
+  ...(prev?.force ? { force: true } : {}),
+});
+
 /**
- * 登録の本体：印 → 物件 → 案件 → （足りない項目を聞く）→ 準備。resume＝毎分の見回りが落ちた票を続けるとき（印はもう持っている。返事はしない）。
- * 途中の段は受付票の auto に ID だけ残す（押し直し・見回りは続きから。Notion の側でも「票の印」で探すので増えない）
+ * 登録の本体：印 → 物件 → 案件 → （足りない項目を聞く）→ 準備。
+ * resume＝毎分の見回りが落ちた票を続けるとき（印はもう持っている。返事はしない。1回に1段だけ進める＝60秒に収める。点検 低6）。
+ * 途中の段は受付票の auto に ID だけ残す（押し直し・見回りは続きから。Notion の側でも「票の印」で探すので増えない）。
+ * 「もう一度［査定］を押してください」と返す道は、必ず印を外す（押し直しが通る。点検 高1）
  */
-export async function gsAutoRun(tid: string, tk: GsTicket, deps: GsAutoRunDeps, kv: AutoKv, hooks: GsAutoHooks, resume: boolean): Promise<GsOutcome> {
+export async function gsAutoRun(tid: string, tk: GsTicket, deps: GsAutoRunDeps, kv: AutoKv, hooks: GsAutoHooks, opts: { resume: boolean; force?: boolean }): Promise<GsOutcome> {
+  const resume = opts.resume;
   const no = tk.no;
   const R = receiptOf(no);
   const mark = gsAutoMark(tid);
@@ -218,14 +259,22 @@ export async function gsAutoRun(tid: string, tk: GsTicket, deps: GsAutoRunDeps, 
       deps.log(`[group-satei] auto save-failed ${R}`);
     }
   };
-  if (!resume && !(await kv.setNx(gsDecKey(tid), mark, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
+  if (!resume) {
+    // 見回りの集合に先に入れる（印を取った直後に落ちても、見回りが「印だけの票」として拾う。点検 低5）
+    try {
+      await kv.sadd(GS_AUTO_SET, tid);
+    } catch {
+      return { text: MSG_GS_BUSY, code: "kv-failed", settled: false };
+    }
+    if (!(await kv.setNx(gsDecKey(tid), mark, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
+  }
   // 前の回に作れた分の ID は使い回す（押し直しは続きから）
   const prev = tk.auto;
-  const ids = { ...(prev?.propId ? { propId: prev.propId } : {}), ...(prev?.dealId ? { dealId: prev.dealId } : {}), ...(prev?.dealNo ? { dealNo: prev.dealNo } : {}) };
-  const stepOf = (x: { propId?: string; dealId?: string; dealNo?: number }): GsAuto["step"] => (x.dealId && x.dealNo ? "prep" : x.propId ? "deal" : "prop");
+  const ids = idsOf(prev);
+  const force = Boolean(opts.force) || Boolean(prev?.force);
   let auto: GsAuto = resume && prev
     ? { ...prev, step: stepOf(ids), at: now() }
-    : { ...ids, step: stepOf(ids), at: now(), tries: (prev && prev.step !== "done" && prev.step !== "gave-up" ? prev.tries : 0) + 1 };
+    : { ...ids, ...(force ? { force: true } : {}), step: stepOf(ids), at: now(), tries: (prev && prev.step !== "done" && prev.step !== "gave-up" ? prev.tries : 0) + 1 };
   let cur: GsTicket = { ...tk, auto };
   const saveAuto = async (next: GsAuto) => {
     auto = next;
@@ -234,9 +283,11 @@ export async function gsAutoRun(tid: string, tk: GsTicket, deps: GsAutoRunDeps, 
   };
   try {
     await kv.set(gsTicketKey(tid), cur, GS_TICKET_TTL);
-    await kv.sadd(GS_AUTO_SET, tid);
   } catch {
-    if (!resume) await quiet(() => kv.del(gsDecKey(tid)));
+    if (!resume) {
+      await quiet(() => kv.del(gsDecKey(tid)));
+      await quiet(() => kv.srem(GS_AUTO_SET, tid));
+    }
     return { text: MSG_GS_BUSY, code: "kv-failed", settled: false };
   }
   /** その場の失敗（M8）：印を外す。auto の ID は残す。3回目は M7。見回りの続きでは印も集合もそのまま（次の回にもう一度） */
@@ -250,37 +301,51 @@ export async function gsAutoRun(tid: string, tk: GsTicket, deps: GsAutoRunDeps, 
     if (gaveUp) deps.log(`[group-satei] auto gave-up ${R}`);
     return { text: gaveUp ? msgGsAutoStopped(no, auto.dealNo) : msgGsAutoFailed(no), code: `auto failed ${R} ${why}`, settled: true };
   };
+  /** 作らずに今のカードへ戻す（印を外し、auto を消す） */
+  const backToCard = async (head: string, why: string): Promise<GsOutcome> => {
+    deps.log(`[group-satei] auto card ${R} ${why}`);
+    const { auto: _a, ...rest } = cur;
+    void _a;
+    await quiet(() => kv.set(gsTicketKey(tid), rest, GS_TICKET_TTL));
+    await quiet(() => kv.srem(GS_AUTO_SET, tid));
+    await quiet(() => kv.del(gsDecKey(tid)));
+    return askCard(tid, tk, head, `auto card ${R} ${why}`);
+  };
+  /** 見回りの続き：1段進んだら、その回はここまで（次の回にすぐ続ける。進んだ回は回数に数えない） */
+  const stepDone = async (): Promise<GsOutcome> => {
+    await saveAuto({ ...auto, at: now() - GS_AUTO_STALE_MS, tries: Math.max(0, auto.tries - 1) });
+    return { text: "", code: `auto step ${R}`, settled: true };
+  };
   try {
     if (!auto.propId) {
-      let propId: string;
+      let pr: GsAutoPropertyResult;
       try {
-        propId = normNotionId((await ad.findOrCreateProperty({
+        pr = await ad.findOrCreateProperty({
           title, kind, address: read.address ?? null, landArea: read.facts?.landArea ?? null, buildingArea: read.facts?.buildingArea ?? null,
-          remark: remarkOf(no, tid), mark: gsAutoNoteMark(tid),
-        })).id);
+          remark: remarkOf(no, tid), mark: gsAutoNoteMark(tid), ...(force ? { force: true } : {}),
+        });
       } catch {
         return fail("notion-prop");
       }
+      // 同じ物件名の CRM_物件 はあるが種別が3種でない：使い回さず、理由を添えてカードへ（点検 低10）
+      if ("badKind" in pr) return backToCard(msgGsAutoCannot(no, title, "kind"), "prop-kind");
+      const propId = normNotionId(pr.id);
       if (!NOTION_ID_RE.test(propId)) return fail("notion-prop");
       await saveAuto({ ...auto, propId, step: "deal", at: now() });
+      if (resume) return stepDone();
     }
     if (!auto.dealId || !auto.dealNo) {
       let r: GsAutoDealResult;
       try {
-        r = await ad.findOrCreateDeal({ name: gsDealName(title), propTitle: title, propertyId: auto.propId as string, remark: remarkOf(no, tid), mark: gsAutoNoteMark(tid) });
+        r = await ad.findOrCreateDeal({
+          name: gsDealName(title), propTitle: title, propertyId: auto.propId as string, remark: remarkOf(no, tid), mark: gsAutoNoteMark(tid),
+          ...(force ? { skipDup: true } : {}),
+        });
       } catch {
         return fail("notion-deal");
       }
-      if (r.kind === "dup") {
-        // 作る直前に同じ物件の進行中の案件が見つかった：作らずに今のカードへ（印を外し、auto を消す）
-        deps.log(`[group-satei] auto card ${R} fresh-dup`);
-        const { auto: _a, ...rest } = cur;
-        void _a;
-        await quiet(() => kv.set(gsTicketKey(tid), rest, GS_TICKET_TTL));
-        await quiet(() => kv.srem(GS_AUTO_SET, tid));
-        await quiet(() => kv.del(gsDecKey(tid)));
-        return askCard(tid, tk, msgGsAutoDup(no), `auto card ${R} fresh-dup`);
-      }
+      // 作る直前に同じ物件の進行中の案件が見つかった：作らずに今のカードへ
+      if (r.kind === "dup") return backToCard(msgGsAutoDup(no), "fresh-dup");
       const dealId = normNotionId(r.id);
       if (!NOTION_ID_RE.test(dealId)) return fail("notion-deal");
       await saveAuto({ ...auto, dealId, at: now() });
@@ -296,6 +361,12 @@ export async function gsAutoRun(tid: string, tk: GsTicket, deps: GsAutoRunDeps, 
       if (typeof dealNo !== "number" || !Number.isInteger(dealNo) || dealNo <= 0 || dealNo > 999_999) return fail("id");
       await saveAuto({ ...auto, dealNo, step: "prep", at: now() });
       deps.log(`[group-satei] auto registered ${R} ${gsDealCode(dealNo)}`);
+      try {
+        ad.forgetDeals?.();
+      } catch {
+        // 覚えを捨てられなくても登録は進める
+      }
+      if (resume) return stepDone();
     }
     const dealNo = auto.dealNo as number;
     let got: { deal: SateiDeal; kind: string | null } | null;
@@ -307,15 +378,22 @@ export async function gsAutoRun(tid: string, tk: GsTicket, deps: GsAutoRunDeps, 
     if (!got || got.deal.gone) return fail("notion-read");
     const o = await hooks.cont(cur, got, isPrepKind(got.kind) ? got.kind : kind, mark, { noAsk: resume, resume });
     if (resume) return o ?? { text: "", code: `auto retry ${R} no-portal`, settled: true };
-    await quiet(() => kv.srem(GS_AUTO_SET, tid));
     if (!o) {
       // 準備の口が無い：印を外して、止めていると返す（案件は残る。押し直せる）
+      await quiet(() => kv.srem(GS_AUTO_SET, tid));
       await quiet(() => kv.del(gsDecKey(tid)));
       return { text: `${msgGsAutoRegisteredHead(dealNo)}${msgGsPrepStopped(no)}`, code: `prep stopped ${R}`, settled: true };
     }
-    if (o.code.startsWith("prep sent")) return { ...o, text: msgGsAutoRegistered(no, dealNo) };
-    if (o.code.startsWith("info-asked")) return { ...o, text: `${msgGsAutoRegistered(no, dealNo)}\n${o.text}` };
-    return o;
+    const c = o.code;
+    // 進んだ（準備へ・聞いた）／準備の側で印を外して返した（止めている・断られた）／ほかの人の印（選択済み）は、そのまま返す
+    if (c.startsWith("prep sent") || c.startsWith("prep unknown") || c.startsWith("info-asked") || c.startsWith("prep stopped") || c.startsWith("prep rejected") || c === "already") {
+      await quiet(() => kv.srem(GS_AUTO_SET, tid));
+      if (c.startsWith("prep sent")) return { ...o, text: msgGsAutoRegistered(no, dealNo) };
+      if (c.startsWith("info-asked")) return { ...o, text: `${msgGsAutoRegistered(no, dealNo)}\n${o.text}` };
+      return o;
+    }
+    // それ以外（フォルダ名を作れない・案件が見つからない など）は、印を持ったまま返さない：M8 と同じ後始末（点検 高1）
+    return fail(c.includes(" title") ? "title" : "prep");
   } catch {
     return fail("kv");
   }
@@ -330,14 +408,16 @@ export interface GsAutoSweepDeps extends GsAutoRunDeps {
   startedAt?: number;
 }
 
-/** 続きに要る残り（Notion の数回＋portal の受付） */
+/** 続きの1段に要る残り（Notion の数回か portal の受付） */
 const AUTO_SWEEP_MIN_MS = 25_000;
 const sentOk = (status: number | null) => status !== null && ((status >= 200 && status < 300) || status === 409);
+const ACTIVE_STEPS: ReadonlyArray<GsAuto["step"]> = ["prop", "deal", "prep"];
 
 /**
  * 毎分の見回り（cloud-tick。段2b-2 の見回りの前）：登録の途中（step が prop・deal・prep）で落ちた票を、auto.at から3分たったら同じ段から続ける。
- * 1回に1件・予算の残りが25秒以上のときだけ。「印で探してから作る」ので増えない。3回でやめて下村さんへ1通（M7）、印を外して asking に戻す。
- * スイッチ off・Notion の口が無ければ KV も読まない
+ * 1回に1件・1段だけ（物件／案件／準備。進んだら次の回にすぐ続ける）・予算の残りが25秒以上のときだけ。「印で探してから作る」ので増えない。
+ * 進まない回が3回でやめて下村さんへ1通（M7）、印を外して asking に戻す。準備まで進めたら、番号の知らせ（M2）を1通（返事が出ていないため）。
+ * 印だけ残って auto の無い票（印を取った直後に落ちた）も、ここで拾う。スイッチ off・Notion の口が無ければ KV も読まない
  */
 export async function sweepGsAuto(deps: GsAutoSweepDeps): Promise<void> {
   const env = deps.env ?? process.env;
@@ -348,17 +428,25 @@ export async function sweepGsAuto(deps: GsAutoSweepDeps): Promise<void> {
     const tids = (await kv.smembers(GS_AUTO_SET)).filter((x): x is string => typeof x === "string");
     for (const tid of tids) {
       const tk = asTicket(await kv.get(gsTicketKey(tid)));
-      const auto = tk?.auto;
-      if (!tk || !auto || tk.state !== "asking" || !["prop", "deal", "prep"].includes(auto.step)) {
+      if (!tk || tk.state !== "asking") {
         await kv.srem(GS_AUTO_SET, tid);
         continue;
       }
       // 登録の流れが印を持っている票だけ（その場の失敗で印を外した票は、押し直しを待つ）
       const dec = await kv.get(gsDecKey(tid));
-      if (dec !== gsAutoMark(tid) && !(auto.dealId && dec === `prep:${auto.dealId}`)) {
+      const held = dec === gsAutoMark(tid);
+      if (!held && !(tk.auto?.dealId && dec === `prep:${tk.auto.dealId}`)) {
         await kv.srem(GS_AUTO_SET, tid);
         continue;
       }
+      if (!tk.auto || !ACTIVE_STEPS.includes(tk.auto.step)) {
+        // 印だけ残った票（受付票に途中の控えを書く前に落ちた）：控えを書き直し、3分待ってから続ける
+        const ids = idsOf(tk.auto);
+        await kv.set(gsTicketKey(tid), { ...tk, auto: { ...ids, step: stepOf(ids), at: deps.now(), tries: 0 } }, GS_TICKET_TTL);
+        deps.log(`[group-satei] auto adopted ${receiptOf(tk.no)}`);
+        continue;
+      }
+      const auto = tk.auto;
       if (deps.now() - auto.at < GS_AUTO_STALE_MS) continue;
       if (deps.now() - start > GS_SWEEP_BUDGET_MS - AUTO_SWEEP_MIN_MS) {
         deps.log("[group-satei] auto sweep budget");
@@ -366,16 +454,29 @@ export async function sweepGsAuto(deps: GsAutoSweepDeps): Promise<void> {
       }
       const R = receiptOf(tk.no);
       const to = sateiNotifyTarget(env);
-      if (auto.tries >= GS_AUTO_TRIES || !to) {
+      if (auto.tries >= GS_AUTO_TRIES || !to || !tk.read || !isPrepKind(tk.read.kind) || !gsPropTitle(tk.read)) {
         await gaveUp(tid, tk, to, deps, kv);
         return;
       }
       const next: GsTicket = { ...tk, auto: { ...auto, tries: auto.tries + 1, at: deps.now() } };
       await kv.set(gsTicketKey(tid), next, GS_TICKET_TTL);
       deps.log(`[group-satei] auto resumed ${R}`);
-      const o = await gsAutoRun(tid, next, deps, kv, deps.hooks(tid, to), true);
-      // 準備まで進めた（集合からは準備の中で外れる）／その回はだめ（次の回にもう一度）／それ以外は続けられない
-      if (o.code.startsWith("prep sent") || o.code.startsWith("prep unknown") || o.code.startsWith("auto retry")) return;
+      const o = await gsAutoRun(tid, next, deps, kv, deps.hooks(tid, to), { resume: true });
+      // 1段進んだ・その回はだめ（次の回にもう一度）
+      if (o.code.startsWith("auto step") || o.code.startsWith("auto retry")) return;
+      if (o.code.startsWith("prep sent") || o.code.startsWith("prep unknown")) {
+        // 準備まで進めた（集合からは準備の中で外れる）。押したときの返事が出ていないので、番号の知らせを1通（点検 低7）
+        const dealNo = asTicket(await kv.get(gsTicketKey(tid)))?.auto?.dealNo ?? auto.dealNo;
+        if (dealNo) {
+          const st = await deps.push(to, [{ type: "text", text: msgGsAutoRegistered(tk.no, dealNo) }], `auto-done:${tid}`).catch(() => null);
+          if (!sentOk(st)) {
+            deps.log(`[group-satei] auto done ${R} push-failed`);
+            await gsOutboxAdd(kv, "auto-done", tid, deps.now(), deps.log, R);
+          }
+        }
+        return;
+      }
+      // それ以外（portal に断られた・同じ物件の案件が見つかった など）は続けられない
       await gaveUp(tid, tk, to, deps, kv);
       return;
     }

@@ -313,6 +313,16 @@ export const msgGsAutoRegistered = (no: number, dealNo: number) =>
   `案件 ${D(dealNo)} として登録しました（${R(no)}）。フォルダを作って、事例の取り方の案を数分でお送りします。顧客と案件ソースは、あとで Notion に入れてください`;
 /** M3：決められない（今のカードの文の頭） */
 export const msgGsAutoAsk = (no: number) => `合いそうな案件が複数あるので、選んでください（${R(no)}）`;
+/** M3 の理由ごとの文（点検 低2・中2）：部分一致だけ／同じ物件の購入の案件／同じ建物（号室まで合っていない） */
+export const msgGsAutoAskPartial = (no: number) => `似た名前の案件が見つかりました。同じ案件なら一覧から選び、違えば［案件がまだ無い］で登録してください（${R(no)}）`;
+export const msgGsAutoAskBuy = (no: number) => `同じ物件の購入の案件が見つかりました。売却の査定として新しく登録するなら［案件がまだ無い］を押してください（${R(no)}）`;
+export const msgGsAutoAskBuilding = (no: number) => `同じ建物の案件が見つかりました。同じ部屋なら一覧から選び、違う部屋なら［案件がまだ無い］で登録してください（${R(no)}）`;
+/** 合う案件はあるが進められない（点検 中1・低10）。why＝Driveフォルダ が未設定／物件の種別が未設定 */
+export const msgGsAutoCannot = (no: number, dealName: string, why: "folder" | "kind") =>
+  `合う案件「${dealName}」が見つかりましたが、${why === "folder" ? "Driveフォルダ が未設定" : "物件の種別が未設定"}のため進められません。Notion に入れてから一覧で選ぶか、［案件がまだ無い］で新しく登録してください（${R(no)}）`;
+/** フォルダの失敗ではない理由で案を作れず、フォルダの ID も無いとき（点検 低8） */
+export const msgGsAutoPrepFailedNoFolder = (no: number, dealNo: number) =>
+  `案件 ${D(dealNo)} は登録しましたが、事例の取り方の案を作れませんでした（${R(no)}）。山口さんへは手で頼んでください`;
 export const msgGsAutoDup = (no: number) => `同じ物件の進行中の案件が見つかりました。一覧から選んでください（${R(no)}）`;
 /** M4：フォルダを作れなかった（push。retry key prepfail:<tid>） */
 export const msgGsAutoFolderFailed = (no: number, dealNo: number, config: boolean) =>

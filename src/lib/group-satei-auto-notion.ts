@@ -29,13 +29,19 @@ export interface GsAutoPropertyInput {
   remark: string;
   /** 探すときの印（「票 ab12cd34」） */
   mark: string;
+  /** ［案件がまだ無い］から：同じ物件名のページの種別が査定の3種でなければ、使い回さずに新しく作る */
+  force?: boolean;
 }
+/** badKind＝同じ物件名のページはあるが、種別が査定の3種（マンション・戸建・土地）でない（使い回さない。点検 低10） */
+export type GsAutoPropertyResult = { id: string } | { badKind: true };
 export interface GsAutoDealInput {
   name: string;
   propTitle: string;
   propertyId: string;
   remark: string;
   mark: string;
+  /** ［案件がまだ無い］から（人が「無い」と言った）：「同じ物件名を含む進行中の案件」の検査を飛ばす。票の印の探し直しは残す */
+  skipDup?: boolean;
 }
 export type GsAutoDealResult = { kind: "ok"; id: string; dealNo: number | null } | { kind: "dup" };
 export type GsAutoLinkResult = "linked" | "same" | "conflict" | "foreign";
@@ -51,6 +57,11 @@ const titleOf = (page: Page, prop: string): string => {
   const p = (page.properties as Record<string, unknown> | undefined)?.[prop] as { title?: Array<{ plain_text?: string }> } | undefined;
   return (p?.title ?? []).map((t) => t.plain_text ?? "").join("").trim();
 };
+const selectOf = (page: Page, prop: string): string => {
+  const p = (page.properties as Record<string, unknown> | undefined)?.[prop] as { select?: { name?: unknown } | null } | undefined;
+  return typeof p?.select?.name === "string" ? p.select.name : "";
+};
+const PREP_KINDS = ["マンション", "戸建", "土地"];
 const ACTIVE = [
   { property: "フェーズ", select: { does_not_equal: "完了" } },
   { property: "フェーズ", select: { does_not_equal: "失注" } },
@@ -63,11 +74,18 @@ export function gsAutoNotion(client: GsAutoNotionClient, ids: { propsDbId: strin
   };
   return {
     /** CRM_物件：①備考に印のあるページ ②物件名が完全に同じページ の順で探し、無ければ作る。見つけたページは書き換えない */
-    async findOrCreateProperty(p: GsAutoPropertyInput): Promise<{ id: string }> {
+    async findOrCreateProperty(p: GsAutoPropertyInput): Promise<GsAutoPropertyResult> {
       const byMark = await first(ids.propsDbId, { property: "備考", rich_text: { contains: p.mark } });
       if (byMark && richOf(byMark, "備考").includes(p.mark)) return { id: normNotionId(String(byMark.id)) };
-      const byName = await first(ids.propsDbId, { property: "物件名", title: { equals: p.title } });
-      if (byName && titleOf(byName, "物件名") === p.title) return { id: normNotionId(String(byName.id)) };
+      const named = (await client.databases.query({ database_id: ids.propsDbId, page_size: 5, filter: { property: "物件名", title: { equals: p.title } } })).results
+        .filter(live).filter((x) => titleOf(x, "物件名") === p.title);
+      // 時間切れの裏で作られた自分のページ（検索に印がまだ出ない）もここで拾う
+      const mine = named.find((x) => richOf(x, "備考").includes(p.mark));
+      if (mine) return { id: normNotionId(String(mine.id)) };
+      const usable = named.find((x) => PREP_KINDS.includes(selectOf(x, "種別")));
+      if (usable) return { id: normNotionId(String(usable.id)) };
+      // 同じ物件名のページはあるが種別が3種でない：使い回さない（あとの道が Notion の種別で手作業に閉じてしまう）
+      if (named.length > 0 && !p.force) return { badKind: true };
       const made = (await client.pages.create({
         parent: { database_id: ids.propsDbId },
         properties: {
@@ -92,8 +110,17 @@ export function gsAutoNotion(client: GsAutoNotionClient, ids: { propsDbId: strin
         const d = readSateiDealPage(byMark);
         return { kind: "ok", id: d.id, dealNo: d.dealNo };
       }
-      const dup = await first(ids.dealsDbId, { and: [{ property: "案件名", title: { contains: p.propTitle } }, ...ACTIVE] });
-      if (dup) return { kind: "dup" };
+      // 同じ案件名で備考に票の印のある案件（時間切れの裏で作られた分。検索に印がまだ出ないことがある。点検 低3・低4）
+      const sameName = (await client.databases.query({ database_id: ids.dealsDbId, page_size: 10, filter: { property: "案件名", title: { equals: p.name } } })).results
+        .filter(live).find((x) => richOf(x, "備考").includes(p.mark));
+      if (sameName) {
+        const d = readSateiDealPage(sameName);
+        return { kind: "ok", id: d.id, dealNo: d.dealNo };
+      }
+      if (!p.skipDup) {
+        const dup = await first(ids.dealsDbId, { and: [{ property: "案件名", title: { contains: p.propTitle } }, ...ACTIVE] });
+        if (dup) return { kind: "dup" };
+      }
       const made = (await client.pages.create({
         parent: { database_id: ids.dealsDbId },
         properties: {

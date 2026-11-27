@@ -41,12 +41,29 @@ t("鍵が無い・種別が不明・読み取りが無い → ask", () => {
   assert.deepEqual(gsAutoMatch({ ...READ, kind: "不明" }, []), { kind: "ask", reason: "kind" });
   assert.deepEqual(gsAutoMatch(null, []), { kind: "ask", reason: "no-read" });
 });
-t("建物名だけの案件名に、号室つきの読み取りが exact", () => {
-  const r = gsAutoMatch({ ...READ, propertyName: "パークハウス天満 1203号室" }, [d("a", "売却｜山田様｜パークハウス天満")]);
-  assert.equal(r.kind, "one");
+t("マンション：建物名だけ・所在だけの一致は ask building（同じ建物の別の部屋の案件に結びつけない。点検 中2）", () => {
+  const B = { kind: "ask", reason: "building" };
+  // 501号室の案件があるところへ 1203 の依頼
+  assert.deepEqual(gsAutoMatch({ ...READ, propertyName: "パークハウス天満 1203号室" }, [d("a", "売却｜山田様｜パークハウス天満")]), B);
+  assert.deepEqual(gsAutoMatch(READ, [d("a", "売却｜山田｜大阪市北区天満2丁目3-4")]), B);
+  // 号室の無い読み取りは、物件名が合っても建物名だけの一致
+  assert.deepEqual(gsAutoMatch({ ...READ, propertyName: "パークハウス天満", facts: { ...facts, roomNo: null } }, [d("a", "売却｜山田｜パークハウス天満")]), B);
+  assert.deepEqual(gsAutoMatch({ ...READ, propertyName: null }, [d("a", "査定｜顧客未定｜大阪市北区天満2丁目3-4 マンション")]), B);
+  // 建物の一致が何件あっても、【買】でも building（号室まで合った案件が無い）
+  assert.deepEqual(gsAutoMatch(READ, [d("a", "売却｜山田｜パークハウス天満"), d("b", "購入｜田中｜パークハウス天満", "【買】内見")]), B);
 });
-t("所在の完全一致も exact", () => {
+t("マンション：号室まで入った物件名の一致が1件あれば、建物名の一致がほかにあっても one", () => {
+  const r = gsAutoMatch(READ, [d("a", "売却｜山田｜パークハウス天満"), d("b", "査定｜顧客未定｜パークハウス天満 1203")]);
+  assert.equal(r.kind === "one" && r.deal.id, "b");
+});
+t("戸建・土地：所在か物件名の完全一致で one", () => {
   assert.equal(gsAutoMatch({ ...READ, propertyName: null, kind: "戸建" }, [d("a", "売却｜山田｜大阪市北区天満２丁目３－４")]).kind, "one");
+  assert.equal(gsAutoMatch({ ...READ, propertyName: "永楽荘の家", address: null, kind: "土地" }, [d("a", "売却｜山田｜永楽荘の家")]).kind, "one");
+});
+t("所在だけの物件名（自動で作った「<所在> 戸建」）が、次の同じ所在の依頼で exact になる（点検 低1）", () => {
+  const read = { ...READ, kind: "戸建" as const, propertyName: null, address: "豊中市永楽荘4丁目12-3" };
+  assert.equal(gsAutoMatch(read, [d("a", gsDealName(gsPropTitle(read)!))]).kind, "one");
+  assert.equal(gsAutoMatch({ ...read, kind: "土地" }, [d("a", "査定｜顧客未定｜豊中市永楽荘4丁目12-3 土地")]).kind, "one");
 });
 
 t("物件名：マンション・戸建・土地・所在だけ・60字", () => {

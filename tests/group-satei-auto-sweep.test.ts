@@ -48,6 +48,8 @@ const M4_CONFIG = `${M4}（Mac の親フォルダの設定がありません）`
 const M5 = `案件 DEAL-0231 のフォルダは作りましたが、Notion に書けませんでした（受付 G7）。CRM_案件 の Driveフォルダ に次を入れてください：${URL_}`;
 const M5_CONFLICT = `案件 DEAL-0231 のフォルダは作りましたが、Notion に書けませんでした（受付 G7）。CRM_案件 の Driveフォルダ に別のフォルダが入っています。新しく作ったフォルダは次です：${URL_}`;
 const M6 = `案件 DEAL-0231 とフォルダは作ってあります。${msgGsPrepFailed(7)}`;
+const M2 = "案件 DEAL-0231 として登録しました（受付 G7）。フォルダを作って、事例の取り方の案を数分でお送りします。顧客と案件ソースは、あとで Notion に入れてください";
+const M_PREP_FAILED = "案件 DEAL-0231 は登録しましたが、事例の取り方の案を作れませんでした（受付 G7）。山口さんへは手で頼んでください";
 const M7 = "案件の自動登録が途中で止まりました（受付 G7）。カードの［一覧から選ぶ］で選ぶか、もう一度［査定］を押してください";
 const M7_DEAL = "案件の自動登録が途中で止まりました（受付 G7）。CRM_案件 DEAL-0231 はできています。カードの［一覧から選ぶ］で選ぶか、もう一度［査定］を押してください";
 
@@ -111,9 +113,10 @@ function mkAuto(o: { auto: GsAuto; dec?: string | null; env?: Record<string, str
   const pushes: Array<{ to: string; text: string; key: string }> = [];
   const logs: string[] = [];
   const replies: string[] = [];
+  const dealIn: Array<{ skipDup?: boolean }> = [];
   const autoDeal = o.noNotion ? null : {
     findOrCreateProperty: async () => { order.push("prop"); if (o.propFail) throw new Error("notion"); return { id: PROP }; },
-    findOrCreateDeal: async () => { order.push("deal"); return o.dup ? { kind: "dup" as const } : { kind: "ok" as const, id: DEAL, dealNo: 231 }; },
+    findOrCreateDeal: async (p: { skipDup?: boolean }) => { order.push("deal"); dealIn.push(p); return o.dup && !p.skipDup ? { kind: "dup" as const } : { kind: "ok" as const, id: DEAL, dealNo: 231 }; },
     readDealNo: async () => 231,
     propTitle: async () => "パークハウス天満 1203",
     sleep: async () => undefined,
@@ -142,7 +145,7 @@ function mkAuto(o: { auto: GsAuto; dec?: string | null; env?: Record<string, str
     startedAt: o.startedAt,
     log: (l: string) => logs.push(l),
   } as unknown as GsAutoSweepDeps;
-  return { ...s, deps, order, preps, pushes, logs, replies };
+  return { ...s, deps, order, preps, pushes, logs, replies, dealIn };
 }
 const STALE = NOW - 4 * MIN;
 
@@ -210,8 +213,8 @@ const STALE = NOW - 4 * MIN;
     assert.ok(x.logs.includes("[group-satei] auto link-failed G7 foreign"));
   });
 
-  await t("失敗（folder-config・folder-create）でフォルダが無い → M4・手作業。Notion は呼ばない", async () => {
-    for (const [reason, text, code] of [["folder-config", M4_CONFIG, "config"], ["folder-create", M4, "create"], ["internal", M4, "other"]]) {
+  await t("失敗でフォルダが無い：folder-config・folder-create は M4、ほかの理由は「案を作れませんでした」（フォルダを作れなかったとは言わない。点検 低8）。手作業・Notion は呼ばない", async () => {
+    for (const [reason, text, code] of [["folder-config", M4_CONFIG, "folder-failed G7 config"], ["folder-create", M4, "folder-failed G7 create"], ["internal", M_PREP_FAILED, "prep-failed G7"], ["timeout", M_PREP_FAILED, "prep-failed G7"]]) {
       const x = mkS2({ nt: { tid, no: 7, status: "失敗", lines: [], areaDone: false, failReason: reason } });
       await sweepGsStage2(x.deps);
       assert.deepEqual(x.pushes.map((p) => [p.to, p.key, p.text]), [[SHIMO, `prepfail:${tid}`, text]]);
@@ -219,7 +222,7 @@ const STALE = NOW - 4 * MIN;
       assert.equal(x.ticket().state, "manual");
       assert.deepEqual(x.calls, ["decide manual"]);
       assert.deepEqual(x.members(GS_STAGE2_SET), []);
-      assert.ok(x.logs.includes(`[group-satei] auto folder-failed G7 ${code}`));
+      assert.ok(x.logs.includes(`[group-satei] auto ${code}`), x.logs.join("|"));
     }
   });
 
@@ -242,12 +245,16 @@ const STALE = NOW - 4 * MIN;
     assert.deepEqual(y.pushes.map((p) => p.text), [msgGsPrepFailed(7)]);
   });
 
-  await t("スイッチ off・Notion の口が無い：auto のある票でも Notion を呼ばず、今の配達だけ", async () => {
+  await t("途中でスイッチを off にされても、auto のある票の「フォルダ → Notion に URL」は続ける（点検 中3）。口が無ければ今の配達だけ", async () => {
     const x = mkS2({ env: OFF });
     await sweepGsStage2(x.deps);
-    assert.equal(x.links.length, 0);
+    assert.deepEqual(x.links, [[DEAL, FOLDER, `票 ${TID8}`]]);
     assert.equal(x.ticket().state, "proposing");
-    assert.equal(x.ticket().auto?.linked, false);
+    assert.equal(x.ticket().auto?.linked, true);
+    // off のまま、書けないときの知らせ（M5）も出る
+    const z = mkS2({ env: OFF, link: "conflict" });
+    await sweepGsStage2(z.deps);
+    assert.equal(z.pushes[0].text, M5_CONFLICT);
     const y = mkS2({ noLink: true });
     await sweepGsStage2(y.deps);
     assert.equal(y.ticket().state, "proposing");
@@ -264,8 +271,17 @@ const STALE = NOW - 4 * MIN;
     assert.equal(x.members(GS_OUTBOX_SET).includes(`auto-link:${tid}`), false);
   });
 
-  await t("落ちた票（step prop・3分）を続ける：物件 → 案件 → portal（newFolder）。返事・push はしない", async () => {
+  await t("落ちた票（step prop・3分）を続ける：1回の見回りに1段だけ（物件 → 案件 → portal）。終わったら番号の知らせ（M2）を push で1通（点検 低6・低7）", async () => {
     const x = mkAuto({ auto: { step: "prop", at: STALE, tries: 1 } });
+    await sweepGsAuto(x.deps);
+    assert.deepEqual(x.order, ["prop"]);
+    assert.deepEqual([x.ticket().auto?.step, x.ticket().auto?.tries, x.ticket().state], ["deal", 1, "asking"], "進んだ回は回数に数えない");
+    assert.deepEqual(x.members(GS_AUTO_SET), [tid]);
+    assert.equal(x.pushes.length, 0);
+    // 次の回は3分待たずに続ける
+    await sweepGsAuto(x.deps);
+    assert.deepEqual(x.order, ["prop", "deal"]);
+    assert.deepEqual([x.ticket().auto?.step, x.ticket().auto?.tries, x.ticket().auto?.dealNo], ["prep", 1, 231]);
     await sweepGsAuto(x.deps);
     assert.deepEqual(x.order, ["prop", "deal", "portal"]);
     assert.deepEqual(x.preps[0].newFolder, { name: "DEAL-0231_売却_顧客未定_パークハウス天満 1203" });
@@ -275,12 +291,18 @@ const STALE = NOW - 4 * MIN;
     assert.deepEqual([tk.auto?.step, tk.auto?.tries, tk.auto?.dealNo], ["folder", 2, 231]);
     assert.equal(x.m.get(gsDecKey(tid)), `prep:${DEAL}`);
     assert.deepEqual(x.members(GS_AUTO_SET), []);
-    assert.deepEqual([x.pushes.length, x.replies.length], [0, 0]);
+    assert.deepEqual(x.pushes, [{ to: SHIMO, text: M2, key: `auto-done:${tid}` }]);
+    assert.equal(x.replies.length, 0);
     assert.ok(x.logs.includes("[group-satei] auto resumed G7"));
+    // もう終わっているので、次の回は何もしない
+    await sweepGsAuto(x.deps);
+    assert.equal(x.pushes.length, 1);
   });
 
   await t("落ちた票（step deal・prep）は作れた分を作り直さない。足りない項目があっても聞かずに進める", async () => {
     const x = mkAuto({ auto: { step: "deal", at: STALE, tries: 1, propId: PROP } });
+    await sweepGsAuto(x.deps);
+    assert.deepEqual(x.order, ["deal"]);
     await sweepGsAuto(x.deps);
     assert.deepEqual(x.order, ["deal", "portal"]);
     const y = mkAuto({ auto: { step: "prep", at: STALE, tries: 1, propId: PROP, dealId: DEAL, dealNo: 231 } });
@@ -293,6 +315,37 @@ const STALE = NOW - 4 * MIN;
     await sweepGsAuto(z.deps);
     assert.deepEqual(z.order, ["portal"]);
     assert.equal(z.ticket().state, "gathering");
+  });
+
+  await t("［案件がまだ無い］から始めた票の続きは、同じ物件の案件の検査を飛ばしたまま（auto.force）", async () => {
+    const x = mkAuto({ auto: { step: "deal", at: STALE, tries: 1, propId: PROP, force: true }, dup: true });
+    await sweepGsAuto(x.deps);
+    assert.deepEqual(x.dealIn.map((d) => d.skipDup), [true]);
+    assert.equal(x.ticket().auto?.dealNo, 231);
+    assert.equal(x.pushes.length, 0);
+  });
+
+  await t("印だけ残った票（印を取った直後に落ちて auto が無い）を見回りが拾う：控えを書き、3分後に続ける（点検 低5）", async () => {
+    let now = NOW;
+    const x = mkAuto({ auto: { step: "prop", at: STALE, tries: 1 } });
+    x.deps.now = () => now;
+    x.m.set(gsTicketKey(tid), { ...x.ticket(), auto: undefined });
+    await sweepGsAuto(x.deps);
+    assert.deepEqual(x.order, []);
+    assert.deepEqual(x.ticket().auto, { step: "prop", at: NOW, tries: 0 });
+    assert.deepEqual(x.members(GS_AUTO_SET), [tid]);
+    assert.ok(x.logs.includes("[group-satei] auto adopted G7"));
+    now += MIN;
+    await sweepGsAuto(x.deps);
+    assert.deepEqual(x.order, [], "3分は待つ（押した関数がまだ動いているかもしれない）");
+    now += 3 * MIN;
+    await sweepGsAuto(x.deps);
+    assert.deepEqual(x.order, ["prop"]);
+    // あきらめたあとに押し直して、また印だけ残った票も同じ（作れた分の ID は使う）
+    const y = mkAuto({ auto: { step: "gave-up", at: STALE, tries: 3, propId: PROP, dealId: DEAL, dealNo: 231 } });
+    await sweepGsAuto(y.deps);
+    assert.deepEqual([y.ticket().auto?.step, y.ticket().auto?.tries, y.ticket().auto?.dealNo], ["prep", 0, 231]);
+    assert.equal(y.pushes.length, 0);
   });
 
   await t("3分たっていない票・予算が足りないときは触らない", async () => {
@@ -348,6 +401,8 @@ const STALE = NOW - 4 * MIN;
     await sweepGsAuto(x.deps);
     assert.deepEqual([x.order.length, x.members(GS_AUTO_SET).length, x.pushes.length], [0, 0, 0]);
     const y = mkAuto({ auto: { step: "folder", at: STALE, tries: 1, propId: PROP, dealId: DEAL, dealNo: 231 } });
+    y.m.set(gsTicketKey(tid), { ...gathering, auto: y.ticket().auto });
+    y.m.set(gsDecKey(tid), `prep:${DEAL}`);
     await sweepGsAuto(y.deps);
     assert.deepEqual([y.order.length, y.members(GS_AUTO_SET).length], [0, 0]);
   });
@@ -377,6 +432,24 @@ const STALE = NOW - 4 * MIN;
     await sweepGsAuto(y.deps);
     y.m.set(gsTicketKey(tid), { ...y.ticket(), auto: { ...y.ticket().auto!, step: "prop" } });
     const e2 = y.m.get(gsObKey("auto-fail", tid)) as { nextAt: number };
+    const sent2: unknown[] = [];
+    await gsOutboxRetry({ kv: y.kv, to: SHIMO, push: async () => { sent2.push(1); return 200; }, now: () => e2.nextAt + 1, startedAt: e2.nextAt + 1, log: () => undefined });
+    assert.deepEqual([sent2.length, y.members(GS_OUTBOX_SET).length], [0, 0]);
+  });
+
+  await t("控え：続きの知らせ（M2）が送れなければ auto-done を積み、同じ retry key で送り直す。先へ進んだあとは捨てる", async () => {
+    const x = mkAuto({ auto: { step: "prep", at: STALE, tries: 1, propId: PROP, dealId: DEAL, dealNo: 231 }, push: 500 });
+    await sweepGsAuto(x.deps);
+    assert.ok(x.members(GS_OUTBOX_SET).includes(`auto-done:${tid}`));
+    const e = x.m.get(gsObKey("auto-done", tid)) as { nextAt: number };
+    const sent: Array<{ text: string; key: string }> = [];
+    const retry = () => gsOutboxRetry({ kv: x.kv, to: SHIMO, push: async (_to, messages, key) => { sent.push({ text: (messages[0] as { text: string }).text, key }); return 200; }, now: () => e.nextAt + 1, startedAt: e.nextAt + 1, log: () => undefined });
+    await retry();
+    assert.deepEqual(sent, [{ text: M2, key: `auto-done:${tid}` }]);
+    const y = mkAuto({ auto: { step: "prep", at: STALE, tries: 1, propId: PROP, dealId: DEAL, dealNo: 231 }, push: null });
+    await sweepGsAuto(y.deps);
+    y.m.set(gsTicketKey(tid), { ...y.ticket(), state: "waiting-cases" });
+    const e2 = y.m.get(gsObKey("auto-done", tid)) as { nextAt: number };
     const sent2: unknown[] = [];
     await gsOutboxRetry({ kv: y.kv, to: SHIMO, push: async () => { sent2.push(1); return 200; }, now: () => e2.nextAt + 1, startedAt: e2.nextAt + 1, log: () => undefined });
     assert.deepEqual([sent2.length, y.members(GS_OUTBOX_SET).length], [0, 0]);

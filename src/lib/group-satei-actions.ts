@@ -354,16 +354,7 @@ const autoRunDeps = (deps: GsActionDeps & { autoDeal: GsAutoDealDeps }) => ({
 /** 自動登録の流れに渡す続き（既存の案件で進める／登録した案件で聞く → 準備）。見回り（落ちた票の続き）も同じものを使う */
 export function autoHooks(tid: string, userId: string, deps: GsActionDeps, kv: Kv): GsAutoHooks {
   return {
-    existing: async (dealId, tk) => {
-      let got: { deal: SateiDeal; kind: string | null } | null;
-      try {
-        got = await deps.readDeal(dealId);
-      } catch {
-        return null;
-      }
-      if (!got || got.deal.gone) return null;
-      return pickGot({ tid, dealId }, tk, got, userId, deps, kv);
-    },
+    existing: (got, tk) => pickGot({ tid, dealId: normNotionId(got.deal.id) }, tk, got, userId, deps, kv),
     cont: async (tk, got, kind, held, o) => {
       const a = { tid, dealId: normNotionId(got.deal.id) };
       if (!o.noAsk) {

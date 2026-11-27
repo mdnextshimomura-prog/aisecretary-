@@ -30,7 +30,7 @@ import { GS_AUTO_LINK_TRIES, GS_AUTO_SET, groupSateiAutoDealOn } from "./group-s
 import { gsAutoNoteMark, gsDealFolderName } from "./group-satei-auto";
 import type { GsAutoLinkResult } from "./group-satei-auto-notion";
 import {
-  msgGsAutoFailed, msgGsAutoFolderFailed, msgGsAutoIntakeRejected, msgGsAutoLinkConflict, msgGsAutoLinkFailed, msgGsAutoPrepFailed, msgGsAutoRegisteredHead,
+  msgGsAutoFailed, msgGsAutoFolderFailed, msgGsAutoIntakeRejected, msgGsAutoLinkConflict, msgGsAutoLinkFailed, msgGsAutoPrepFailed, msgGsAutoPrepFailedNoFolder, msgGsAutoRegisteredHead,
 } from "./group-satei-case";
 import type { GsCasesNote } from "./group-satei-data";
 
@@ -437,10 +437,13 @@ async function gsLinkAutoFolder(tid: string, tk: GsTicket, nt: SateiPrepNotice, 
       deps.log(`[group-satei] auto link-missing ${R}`);
       return done({});
     }
-    // Mac がフォルダを作れなかった（M4）：グループには何も出さず、手作業へ
+    // Mac がフォルダを作れなかった（M4。failReason が folder-config・folder-create のときだけ）：グループには何も出さず、手作業へ。
+    // ほかの理由（時間切れなど。フォルダができているかは分からない）は「作れませんでした」と言わない（点検 低8）
     const config = nt.failReason === "folder-config";
-    const st = await deps.push(to, textMsg(msgGsAutoFolderFailed(tk.no, auto.dealNo, config)), `prepfail:${tid}`).catch(() => null);
-    deps.log(`[group-satei] auto folder-failed ${R} ${config ? "config" : nt.failReason === "folder-create" ? "create" : "other"}${sentOk(st) ? "" : " push-failed"}`);
+    const folderFail = config || nt.failReason === "folder-create";
+    const text = folderFail ? msgGsAutoFolderFailed(tk.no, auto.dealNo, config) : msgGsAutoPrepFailedNoFolder(tk.no, auto.dealNo);
+    const st = await deps.push(to, textMsg(text), `prepfail:${tid}`).catch(() => null);
+    deps.log(`[group-satei] auto ${folderFail ? `folder-failed ${R} ${config ? "config" : "create"}` : `prep-failed ${R}`}${sentOk(st) ? "" : " push-failed"}`);
     const next = await done({});
     await closeManual(tid, next, 0, deps, kv);
     return "closed";
@@ -618,8 +621,9 @@ async function sweepS2Tickets(deps: GsSweepDeps, kv: SweepKv, env: Record<string
         const nt = list.find((x) => x.tid === tid);
         if (nt) {
           let cur = tk;
-          // 案件の自動登録：案の配達の前に、Mac が作ったフォルダの URL を Notion に書く（スイッチ off・口が無ければ今のまま）
-          if (tk.auto && !tk.auto.linked && deps.autoLink && groupSateiAutoDealOn(env)) {
+          // 案件の自動登録：案の配達の前に、Mac が作ったフォルダの URL を Notion に書く（auto の無い票・口が無ければ今のまま）
+          // 途中でスイッチを off にされても、始めた分（auto のある票）は終わらせる（点検 中3。off で止めるのは新しい登録だけ）
+          if (tk.auto && !tk.auto.linked && deps.autoLink) {
             const linked = await gsLinkAutoFolder(tid, tk, nt, to, deps, kv);
             if (linked === "wait" || linked === "closed") continue;
             cur = linked;

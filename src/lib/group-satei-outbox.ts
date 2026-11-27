@@ -11,14 +11,14 @@ import { GS_SWEEP_BUDGET_MS, asTicket, gsTicketKey, receiptOf, type GsCasesNote 
 import {
   msgGsCasesAmbig, msgGsCasesDraftUnknown, msgGsCasesFailed, msgGsCasesNoAuto, msgGsCasesNoStart, msgGsCasesSlow, msgGsCasesSomeFailed,
   msgGsCasesStarted, msgGsCasesUnsaved, msgGsPrepLate, msgGsRemindFailed, msgGsRemindMe, msgGsRemindUnknown,
-  msgGsAutoLinkConflict, msgGsAutoLinkFailed, msgGsAutoStopped,
+  msgGsAutoLinkConflict, msgGsAutoLinkFailed, msgGsAutoRegistered, msgGsAutoStopped,
 } from "./group-satei-case";
 import { gsDeadlineLabel } from "./group-satei-deadline";
 import { msgGsInfoNotStarted } from "./group-satei-facts";
 
 /** auto-fail・auto-link は案件の自動登録（計画 2026-11-27）：登録が途中で止まった（M7）／Notion に URL を書けなかった（M5） */
-export type GsObKind = "prop-late" | "remind-note" | "cases" | "cases-late" | "ambig" | "info-to" | "auto-fail" | "auto-link";
-export const GS_OB_KINDS: readonly GsObKind[] = ["prop-late", "remind-note", "cases", "cases-late", "ambig", "info-to", "auto-fail", "auto-link"];
+export type GsObKind = "prop-late" | "remind-note" | "cases" | "cases-late" | "ambig" | "info-to" | "auto-fail" | "auto-link" | "auto-done";
+export const GS_OB_KINDS: readonly GsObKind[] = ["prop-late", "remind-note", "cases", "cases-late", "ambig", "info-to", "auto-fail", "auto-link", "auto-done"];
 export const GS_OUTBOX_SET = "gsatei:outbox";
 export const gsObKey = (kind: GsObKind, id: string) => `gsatei:ob:${kind}:${id}`;
 export const GS_OB_TTL = 24 * 60 * 60;
@@ -100,6 +100,7 @@ export function gsObRetryKey(kind: GsObKind, id: string): string {
   if (kind === "info-to") return `info-to:${id}`;
   if (kind === "auto-fail") return `auto-fail:${id}`;
   if (kind === "auto-link") return `auto-link:${id}`;
+  if (kind === "auto-done") return `auto-done:${id}`;
   return `ambig:${id}`;
 }
 
@@ -141,6 +142,10 @@ async function rebuild(kind: GsObKind, id: string, kv: GsObKv): Promise<{ text: 
   if (kind === "auto-fail") {
     // 登録をあきらめて asking に戻した票。押し直して進んだあとは古い
     return t && t.state === "asking" && t.auto?.step === "gave-up" ? { text: msgGsAutoStopped(t.no, t.auto.dealNo), receipt: receiptOf(t.no) } : null;
+  }
+  if (kind === "auto-done") {
+    // 見回りの続きで登録が終わった知らせ（M2）。まだ準備・案の段にいるあいだだけ（先へ進んだあとは古い）
+    return t && t.auto?.dealNo && (t.state === "gathering" || t.state === "proposing") ? { text: msgGsAutoRegistered(t.no, t.auto.dealNo), receipt: receiptOf(t.no) } : null;
   }
   if (kind === "auto-link") {
     const a = t?.auto;

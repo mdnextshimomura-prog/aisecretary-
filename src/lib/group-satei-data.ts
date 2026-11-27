@@ -375,6 +375,8 @@ export interface GsAuto {
   folderId?: string;
   /** Notion に書けなかった知らせの種類（控えからの送り直しで文を作り直す） */
   linkNote?: "failed" | "conflict";
+  /** ［案件がまだ無い］から（人が「無い」と言った）：作る直前の「同じ物件の案件」の検査を飛ばす。見回りの続きでも同じに扱う */
+  force?: boolean;
 }
 
 export interface GsTicket {
@@ -444,7 +446,8 @@ function isGsAuto(v: unknown): v is GsAuto {
     (a.linked === undefined || typeof a.linked === "boolean") &&
     (a.linkTries === undefined || isCount(a.linkTries)) &&
     (a.folderId === undefined || (typeof a.folderId === "string" && DRIVE_ID_RE.test(a.folderId))) &&
-    (a.linkNote === undefined || a.linkNote === "failed" || a.linkNote === "conflict")
+    (a.linkNote === undefined || a.linkNote === "failed" || a.linkNote === "conflict") &&
+    (a.force === undefined || typeof a.force === "boolean")
   );
 }
 

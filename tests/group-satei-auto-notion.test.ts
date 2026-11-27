@@ -15,7 +15,9 @@ const MARK = "票 ab12cd34";
 const REMARK = `グループ査定 受付 G7 から自動登録（${MARK}）`;
 const rich = (s: string) => ({ rich_text: [{ plain_text: s }] });
 const title = (s: string) => ({ title: [{ plain_text: s }] });
-const propPage = (id: string, name: string, remark = "") => ({ id, parent: { type: "database_id", database_id: PROPS }, properties: { 物件名: title(name), 備考: rich(remark) } });
+const propPage = (id: string, name: string, remark = "", kind: string | null = "マンション") => ({
+  id, parent: { type: "database_id", database_id: PROPS }, properties: { 物件名: title(name), 備考: rich(remark), 種別: { select: kind ? { name: kind } : null } },
+});
 const dealPage = (id: string, o: { remark?: string; no?: number | null; url?: string | null; db?: string; archived?: boolean } = {}) => ({
   id, archived: o.archived ?? false, parent: { type: "database_id", database_id: o.db ?? DEALS },
   properties: { 案件名: title("査定｜顧客未定｜パークハウス天満 1203"), ID: { unique_id: { number: o.no === undefined ? 231 : o.no } }, Driveフォルダ: { url: o.url ?? null }, 物件: { relation: [] }, 備考: rich(o.remark ?? REMARK) },
@@ -43,7 +45,7 @@ const FOLDER = "1AbC_dEf-GhIjKlMnOp";
   await t("物件：無ければ作る。欄はデータ辞書どおり（物件名・種別・所在地・備考。ステータスは入れない）", async () => {
     const x = mk(() => []);
     const r = await x.api.findOrCreateProperty(P_IN);
-    assert.equal(r.id, "cccc0000cccc0000cccc0000cccc0000");
+    assert.deepEqual(r, { id: "cccc0000cccc0000cccc0000cccc0000" });
     assert.deepEqual(x.calls.map((c) => c.op), ["query", "query", "create"]);
     assert.deepEqual(x.calls[0].args.filter, { property: "備考", rich_text: { contains: MARK } });
     assert.deepEqual(x.calls[1].args.filter, { property: "物件名", title: { equals: "パークハウス天満 1203" } });
@@ -67,10 +69,10 @@ const FOLDER = "1AbC_dEf-GhIjKlMnOp";
   });
   await t("物件：票の印のあるページ・同じ物件名のページがあれば作らない（そのページは書き換えない）", async () => {
     const x = mk((_db, f) => (JSON.stringify(f).includes("備考") ? [propPage("dddd0000-dddd-0000-dddd-0000dddd0000", "前に作った", REMARK)] : []));
-    assert.equal((await x.api.findOrCreateProperty(P_IN)).id, "dddd0000dddd0000dddd0000dddd0000");
+    assert.deepEqual(await x.api.findOrCreateProperty(P_IN), { id: "dddd0000dddd0000dddd0000dddd0000" });
     assert.deepEqual(x.writes(), []);
     const y = mk((_db, f) => (JSON.stringify(f).includes("物件名") ? [propPage("eeee0000eeee0000eeee0000eeee0000", "パークハウス天満 1203")] : []));
-    assert.equal((await y.api.findOrCreateProperty(P_IN)).id, "eeee0000eeee0000eeee0000eeee0000");
+    assert.deepEqual(await y.api.findOrCreateProperty(P_IN), { id: "eeee0000eeee0000eeee0000eeee0000" });
     assert.deepEqual(y.writes(), []);
     // 消したページ・印や名前が実は違うページは使わない
     const z = mk((_db, f) => (JSON.stringify(f).includes("備考") ? [{ ...propPage("x", "y", REMARK), archived: true }, propPage("x2", "y", "別の票 99999999")] : [propPage("x3", "パークハウス天満 1203 別棟")]));
@@ -78,19 +80,36 @@ const FOLDER = "1AbC_dEf-GhIjKlMnOp";
     assert.equal(z.writes().length, 1);
   });
 
+  await t("物件：同じ物件名のページの種別が3種以外・空なら使い回さない（badKind。作らない）。［案件がまだ無い］からなら新しく作る（点検 低10）", async () => {
+    for (const kind of ["収益", "その他", null]) {
+      const x = mk((_db, f) => (JSON.stringify(f).includes("物件名") ? [propPage("eeee0000eeee0000eeee0000eeee0000", "パークハウス天満 1203", "", kind)] : []));
+      assert.deepEqual(await x.api.findOrCreateProperty(P_IN), { badKind: true }, String(kind));
+      assert.deepEqual(x.writes(), []);
+      const y = mk((_db, f) => (JSON.stringify(f).includes("物件名") ? [propPage("eeee0000eeee0000eeee0000eeee0000", "パークハウス天満 1203", "", kind)] : []));
+      assert.deepEqual(await y.api.findOrCreateProperty({ ...P_IN, force: true }), { id: "cccc0000cccc0000cccc0000cccc0000" });
+      assert.deepEqual(y.writes().map((c) => c.op), ["create"]);
+    }
+    // 種別が3種のページが1つでもあれば、それを使う。自分の票の印のあるページ（検索に印がまだ出ない）は種別に関わらず使う
+    const z = mk((_db, f) => (JSON.stringify(f).includes("物件名") ? [propPage("e1", "パークハウス天満 1203", "", "収益"), propPage("eeee0000eeee0000eeee0000eeee0002", "パークハウス天満 1203", "", "戸建")] : []));
+    assert.deepEqual(await z.api.findOrCreateProperty(P_IN), { id: "eeee0000eeee0000eeee0000eeee0002" });
+    const w = mk((_db, f) => (JSON.stringify(f).includes("物件名") ? [propPage("eeee0000eeee0000eeee0000eeee0003", "パークハウス天満 1203", REMARK, null)] : []));
+    assert.deepEqual(await w.api.findOrCreateProperty(P_IN), { id: "eeee0000eeee0000eeee0000eeee0003" });
+  });
+
   await t("案件：無ければ作る。フェーズ【売】査定・売買仲介・仲介・売却・担当（仮）下村・物件 relation・備考。顧客・案件ソース・主担当・フォルダ状態は入れない", async () => {
     const x = mk(() => []);
     const r = await x.api.findOrCreateDeal(D_IN);
     assert.deepEqual(r, { kind: "ok", id: "cccc0000cccc0000cccc0000cccc0000", dealNo: 231 });
     assert.deepEqual(x.calls[0].args.filter, { property: "備考", rich_text: { contains: MARK } });
-    assert.deepEqual(x.calls[1].args.filter, {
+    assert.deepEqual(x.calls[1].args.filter, { property: "案件名", title: { equals: "査定｜顧客未定｜パークハウス天満 1203" } });
+    assert.deepEqual(x.calls[2].args.filter, {
       and: [
         { property: "案件名", title: { contains: "パークハウス天満 1203" } },
         { property: "フェーズ", select: { does_not_equal: "完了" } },
         { property: "フェーズ", select: { does_not_equal: "失注" } },
       ],
     });
-    assert.deepEqual(x.calls[2].args, {
+    assert.deepEqual(x.calls[3].args, {
       parent: { database_id: DEALS },
       properties: {
         案件名: { title: [{ text: { content: "査定｜顧客未定｜パークハウス天満 1203" } }] },
@@ -113,6 +132,23 @@ const FOLDER = "1AbC_dEf-GhIjKlMnOp";
     const x = mk((_db, f) => (JSON.stringify(f).includes("案件名") ? [dealPage("1111000011110000111100001111aaaa", { remark: "人が作った" })] : []));
     assert.deepEqual(await x.api.findOrCreateDeal(D_IN), { kind: "dup" });
     assert.deepEqual(x.writes(), []);
+  });
+  await t("案件：［案件がまだ無い］から（skipDup）は、同じ物件名の案件があっても作る。票の印の探し直しは残す（点検 低11）", async () => {
+    const x = mk((_db, f) => (JSON.stringify(f).includes("contains\":\"パークハウス") ? [dealPage("1111000011110000111100001111aaaa", { remark: "人が作った" })] : []));
+    assert.deepEqual(await x.api.findOrCreateDeal({ ...D_IN, skipDup: true }), { kind: "ok", id: "cccc0000cccc0000cccc0000cccc0000", dealNo: 231 });
+    assert.deepEqual(x.calls.map((c) => c.op), ["query", "query", "create"], "含む案件の検査は呼ばない");
+    const y = mk((_db, f) => (JSON.stringify(f).includes("備考") ? [dealPage("ffff0000-ffff-0000-ffff-0000ffff0000")] : []));
+    assert.deepEqual(await y.api.findOrCreateDeal({ ...D_IN, skipDup: true }), { kind: "ok", id: "ffff0000ffff0000ffff0000ffff0000", dealNo: 231 });
+    assert.deepEqual(y.writes(), []);
+  });
+  await t("案件：同じ案件名で票の印のある案件（時間切れの裏で作られ、印の検索にまだ出ない）を拾う。印の違う同名の案件は拾わない（点検 低3・低4）", async () => {
+    const mine = dealPage("2222000022220000222200002222aaaa", { no: 240 });
+    const x = mk((_db, f) => (JSON.stringify(f).includes("equals") ? [dealPage("3333000033330000333300003333aaaa", { remark: "グループ査定 受付 G5 から自動登録（票 99999999）" }), mine] : []));
+    assert.deepEqual(await x.api.findOrCreateDeal(D_IN), { kind: "ok", id: "2222000022220000222200002222aaaa", dealNo: 240 });
+    assert.deepEqual(x.writes(), []);
+    const y = mk((_db, f) => (JSON.stringify(f).includes("equals") ? [dealPage("3333000033330000333300003333aaaa", { remark: "グループ査定 受付 G5 から自動登録（票 99999999）" })] : []));
+    assert.deepEqual(await y.api.findOrCreateDeal(D_IN), { kind: "ok", id: "cccc0000cccc0000cccc0000cccc0000", dealNo: 231 });
+    assert.equal(y.writes().length, 1);
   });
   await t("案件番号：作った答えに番号が無ければ null。読み直しは pages.retrieve", async () => {
     const x = mk(() => [], { d1: dealPage("d1", { no: 232 }), d2: dealPage("d2", { no: null }) });
