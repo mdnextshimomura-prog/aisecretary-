@@ -4,7 +4,6 @@ import { handleGroupSateiPostback, type GsActionDeps } from "../src/lib/group-sa
 import {
   asTicket, GS_STAGE2_SET, groupSateiPrepOn, gsCaseStaffId, gsCaseStaffIds, gsTicketKey, parseGsData, ticketIdOf, type GsTicket,
 } from "../src/lib/group-satei-data";
-import { sweepGsStage2, type GsSweepDeps } from "../src/lib/group-satei-propose";
 import { gsGroupMemberStatus } from "../src/lib/group-satei-member";
 
 let n = 0;
@@ -142,23 +141,20 @@ const mentioned = (msg: unknown) => (msg as { substitution: { staff: { mentionee
     assert.ok(x.replies[0].startsWith("山口さんがグループにいるか確かめられませんでした"));
   });
 
-  const sweep = (x: ReturnType<typeof mk>): GsSweepDeps => ({
-    env: x.deps.env, kv: x.kv as unknown as GsSweepDeps["kv"], prep: x.deps.prep!,
-    push: async (to, messages, key) => { x.pushes.push({ to, messages, key }); return 200; },
-    now: () => NOW, log: (l) => x.logs.push(l),
-  });
+  const pressRemind = (x: ReturnType<typeof mk>) =>
+    handleGroupSateiPostback(parseGsData(`v1|gr|${tid}|1`)!, { replyToken: "r", webhookEventId: "e2", source: { userId: SHIMO } }, x.deps);
   const waiting = (o: Partial<NonNullable<GsTicket["prep"]>> = {}): Partial<GsTicket> => ({
     state: "waiting-cases", prep: { ...base.prep!, groupPushes: 1, deadline: NOW - 1, requestedAt: NOW - 3_600_000, ...o },
   });
-  await t("催促：受付票の caseStaffId でメンションする", async () => {
+  await t("催促（［催促する］を押す）：受付票の caseStaffId でメンションする", async () => {
     const x = mk({ staff: `${S1},${S2}`, ticket: waiting({ caseStaffId: S2 }) });
-    await sweepGsStage2(sweep(x));
+    await pressRemind(x);
     assert.equal(x.pushes[0].key, `remind:${tid}`);
     assert.equal(mentioned(x.pushes[0].messages[0]), S2);
   });
-  await t("催促：caseStaffId の無い古い票は env の最初の ID", async () => {
+  await t("催促（［催促する］を押す）：caseStaffId の無い古い票は env の最初の ID", async () => {
     const x = mk({ staff: `bad,${S1},${S2}`, ticket: waiting() });
-    await sweepGsStage2(sweep(x));
+    await pressRemind(x);
     assert.equal(mentioned(x.pushes[0].messages[0]), S1);
   });
   await t("受付票：caseStaffId の形が違えば票として読まない", async () => {

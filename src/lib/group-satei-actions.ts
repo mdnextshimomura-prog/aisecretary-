@@ -13,7 +13,7 @@ import {
 } from "./group-satei-data";
 import type { GsPrepPortal } from "./group-satei-prep-portal";
 import { gsSateiIntake } from "./group-satei-intake";
-import { answerGsProposal, startGsPrep } from "./group-satei-propose";
+import { answerGsProposal, answerGsRemind, startGsPrep } from "./group-satei-propose";
 import type { GsKv } from "./group-satei-open";
 import {
   gsListCard, gsSateiNextCard, msgGsKindRecorded, msgGsKindSatei, MSG_GS_BUSY, MSG_GS_LIST_END, MSG_GS_DEALS_FAILED, MSG_GS_EXPIRED, MSG_GS_FORBIDDEN, MSG_GS_NO_FOLDER, MSG_GS_NOT_ACTIVE,
@@ -361,6 +361,8 @@ async function decide(a: Exclude<GsAction, { op: "gl" }>, tk: GsTicket, userId: 
   if (a.op === "gy" || a.op === "gf") return answerGsProposal(a, tk, userId, deps, kv);
   // 段2b-2：［このまま進める］は仮の印（info:）を持ったまま、受付票の状態と token で決める
   if (a.op === "gi") return skipInfo(a, tk, deps, kv);
+  // 催促はボタンで（2026-11-27）：［催促する］は受付票の状態だけで決める
+  if (a.op === "gr") return answerGsRemind(a, tk, deps, kv);
   const dec = await kv.get(gsDecKey(a.tid));
   if (dec) {
     return typeof dec === "string" && dec.startsWith(UNKNOWN_DEC)
@@ -405,7 +407,7 @@ export async function handleGroupSateiPostback(
     return say(MSG_GS_PAUSED, "paused");
   }
   // 段2d のボタン（gy・gf）は 2d が off（山口さんの ID が無い・STAGE2 off）なら何もしない
-  if ((action.op === "gy" || action.op === "gf" || action.op === "gi") && !groupSateiPrepOn(env)) {
+  if ((action.op === "gy" || action.op === "gf" || action.op === "gi" || action.op === "gr") && !groupSateiPrepOn(env)) {
     deps.log(`[group-satei] ${action.op} paused prep`);
     return say(MSG_GS_PAUSED, "paused");
   }

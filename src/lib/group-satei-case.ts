@@ -4,7 +4,7 @@
  * グループに出す文には、お客様の名前・REINS の物件番号・号室・番地を入れない（設計 6.2）。gsSafeText に通らないものは出さない（D14）。
  * 案件名（Notion）は使わない（お客様の名前が入りうる。D13）。
  */
-import { encodeGsFix, encodeGsYes, receiptOf, type GsPrepKind, type GsRead } from "./group-satei-data";
+import { encodeGsFix, encodeGsRemind, encodeGsYes, receiptOf, type GsPrepKind, type GsRead } from "./group-satei-data";
 import { gsDeadlineLabel } from "./group-satei-deadline";
 import { GS_READ_MODEL, type GsCreateReq } from "./group-satei-read";
 import { ALT_TEXT_MAX, FLEX_LABEL_MAX, POSTBACK_TEXT_MAX, pressedText, type FlexMessage } from "./task-card";
@@ -170,7 +170,33 @@ export function gsCaseRequestPlain(o: { no: number; place: string | null; lines:
   return [`査定の事例をお願いします（受付 ${receiptOf(o.no)}）`, `物件：${o.place ?? "（町名を入れてください）"}`, ...o.lines, `期日：${gsDeadlineLabel(o.deadline)}`].join("\n");
 }
 
-/** リマインド（設計 6.2）：グループに1回だけ */
+/**
+ * 催促はボタンで（2026-11-27）：期日を過ぎたら、下村さんの1対1に［催促する］のカード。
+ * 押したときだけグループへ催促（gsReminderMessages）。押さなければグループには何も出さない
+ */
+export function gsRemindAskCard(o: { tid: string; ver: number; no: number; deadlineLabel: string }): FlexMessage {
+  const subj = `受付 ${receiptOf(o.no)}`;
+  return {
+    type: "flex",
+    altText: cut(`事例がまだ届いていません（${subj}）`, ALT_TEXT_MAX),
+    contents: {
+      type: "bubble",
+      body: {
+        type: "box",
+        layout: "vertical",
+        spacing: "sm",
+        contents: [
+          text(`事例がまだ届いていません（${subj}）`, { weight: "bold", size: "md" }),
+          text(`期日（${o.deadlineLabel}）を過ぎました。山口さんに催促しますか？`),
+          text("押すと、依頼のグループで山口さんにメンションして声をかけます。押さなければ何も送りません", { color: "#555555" }),
+        ],
+      },
+      footer: { type: "box", layout: "vertical", spacing: "sm", contents: [button("催促する", encodeGsRemind(o.tid, o.ver), subj, true)] },
+    },
+  };
+}
+
+/** リマインド（設計 6.2）：グループに1回だけ（2026-11-27 から、下村さんが［催促する］を押したときだけ） */
 export function gsReminderMessages(staffId: string, no: number): unknown[] {
   return [{ type: "textV2", text: `{staff} 受付 ${receiptOf(no)} の事例はいかがでしょうか`, substitution: mention(staffId) }];
 }
@@ -245,6 +271,14 @@ export const msgGsRemindUnknown = (no: number) =>
   `${R(no)} の事例がまだ届いていないので、グループで山口さんに声をかけましたが、届いたか確かめられませんでした。グループを見て、出ていなければ手で声をかけてください`;
 export const msgGsRemindFailed = (no: number) =>
   `${R(no)} の事例がまだ届いていないので、グループで山口さんに声をかけようとしましたが、送れませんでした。手で声をかけてください`;
+export const msgGsRemindPressed = (no: number) => `グループで山口さんに声をかけました（${R(no)}）`;
+export const msgGsRemindPressUnknown = (no: number) =>
+  `グループで山口さんに声をかけましたが、届いたか確かめられませんでした。グループを見て、出ていなければ手で声をかけてください（${R(no)}）`;
+export const msgGsRemindPressFailed = (no: number) => `送れませんでした。少し待ってから、もう一度［催促する］を押してください（${R(no)}）`;
+export const msgGsRemindPressGaveUp = (no: number) => `何度か送れませんでした。グループで手で声をかけてください（${R(no)}）`;
+export const msgGsRemindAlready = (no: number) => `催促はもう送ってあります（${R(no)}）`;
+export const msgGsRemindCasesIn = (no: number) => `もう事例の PDF が届いています。催促はしません（${R(no)}）`;
+export const msgGsRemindClosed = (no: number) => `この受付はもう事例待ちではありません（${R(no)}）`;
 export const msgGsAlreadyRequested = (no: number) => `山口さんへはもう頼んであります（${R(no)}）`;
 export const MSG_GS_PROPOSAL_STALE = "新しい案が届いています。そちらから選んでください";
 

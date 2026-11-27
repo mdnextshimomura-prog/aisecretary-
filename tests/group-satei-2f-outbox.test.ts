@@ -181,34 +181,6 @@ const noText = (logs: string[]) => logs.every((l) => !l.includes("事例") && !l
   const waiting = (o: Partial<GsTicket["prep"]> = {}): Partial<GsTicket> => ({
     state: "waiting-cases", prep: { ...prep0, rev: 1, lines: ["x"], sentRev: 1, tries: 1, groupPushes: 1, deadline: NOW - 1, requestedAt: NOW - 3_600_000, ...o },
   });
-  await t("催促のあとの1行（remind-note）：送れなければ同じ文で送り直す（グループへの催促は送り直さない）", async () => {
-    const x = mk({ ticket: waiting(), push: [200, 500] });
-    await sweepGsStage2(x.deps);
-    assert.deepEqual(x.pushes.map((p) => [p.to, p.key]), [[G, `remind:${tid}`], [SHIMO, `remind-me:${tid}`]]);
-    assert.equal(ticket(x).prep!.remindNote, "sent");
-    x.at(2 * MIN);
-    await sweepGsStage2(x.deps);
-    assert.deepEqual(x.pushes.map((p) => [p.to, p.key]), [[G, `remind:${tid}`], [SHIMO, `remind-me:${tid}`], [SHIMO, `remind-me:${tid}`]]);
-    assert.equal(x.pushes[2].text, x.pushes[1].text);
-    // 結果不明（グループに届いたか分からない）の1行も同じ文
-    const y = mk({ ticket: waiting(), push: [null, 500] });
-    await sweepGsStage2(y.deps);
-    assert.equal(ticket(y).prep!.remindNote, "unknown");
-    y.at(2 * MIN);
-    await sweepGsStage2(y.deps);
-    assert.equal(y.pushes[2].text, y.pushes[1].text);
-    assert.match(y.pushes[2].text, /確かめられませんでした/);
-  });
-  await t("催促が3回送れなかったあとの1行（failed）も同じ文で", async () => {
-    const x = mk({ ticket: waiting({ remindFails: 2 }), push: [500, 500] });
-    await sweepGsStage2(x.deps);
-    assert.equal(ticket(x).prep!.remindNote, "failed");
-    x.at(2 * MIN);
-    await sweepGsStage2(x.deps);
-    assert.equal(x.pushes.length, 3);
-    assert.equal(x.pushes[2].text, x.pushes[1].text);
-    assert.match(x.pushes[2].text, /送れませんでした/);
-  });
   const three = [{ m: "p1", at: 1 }, { m: "p2", at: 2 }];
   await t("保存の遅れ（cases-late）：送り直す。結果が来て閉じたあとは送らない", async () => {
     const x = mk({ ticket: waiting({ casesHanded: 2, casesHandedAt: NOW - 31 * MIN }), push: [500] });
@@ -246,13 +218,13 @@ const noText = (logs: string[]) => logs.every((l) => !l.includes("事例") && !l
     assert.ok(x.logs.every((l) => !l.includes("p1") && !l.includes(G)));
   });
   await t("L1：もう要らない知らせは作り直さず消す（催促の1行は結果が来たら、遅れは案の配達を試したら、ambig は候補が閉じたら）", async () => {
-    const x = mk({ ticket: waiting(), push: [200, 500] });
-    await sweepGsStage2(x.deps);
-    assert.equal(x.queued(`remind-note:${tid}`), true);
+    // 催促はボタンで（2026-11-27）になってから remind-note は積まれないが、前の版で積まれた分は今の決まりで片付ける
+    const x = mk({ ticket: waiting({ remindAsked: true }) });
+    await gsOutboxAdd(x.kv, "remind-note", tid, NOW, () => undefined);
     x.m.set(gsTicketKey(tid), { ...base, ...waiting({ casesDone: true, remindNote: "sent" }), state: "started" });
     x.at(2 * MIN);
     await sweepGsStage2(x.deps);
-    assert.deepEqual([x.pushes.length, x.queued(`remind-note:${tid}`)], [2, false]);
+    assert.deepEqual([x.pushes.length, x.queued(`remind-note:${tid}`)], [0, false]);
     // prop-late：案の配達を試した（tries>0）なら「案がまだできていません」は送らない
     const y = mk();
     y.sets.get(GS_STAGE2_SET)!.clear();

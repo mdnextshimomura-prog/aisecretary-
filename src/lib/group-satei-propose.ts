@@ -12,7 +12,7 @@ import type { GsActionDeps, GsOutcome, GsPickDeps } from "./group-satei-actions"
 import type { GsKv } from "./group-satei-open";
 import { MSG_GS_BUSY, MSG_GS_NO_FOLDER, msgGsAlready } from "./group-satei-card";
 import {
-  gsBuildingOf, gsCaseRequestMessages, gsCleanLines, gsReminderMessages, msgGsPrepFailed, msgGsPrepLate, msgGsRemindFailed, msgGsRemindMe, msgGsRemindUnknown, gsCaseRequestPlain, gsProposalCard, gsPublicPlace, msgGsAlreadyRequested, msgGsCaseRequested,
+  gsBuildingOf, gsCaseRequestMessages, gsCleanLines, gsReminderMessages, gsRemindAskCard, msgGsPrepFailed, msgGsPrepLate, msgGsRemindAlready, msgGsRemindCasesIn, msgGsRemindClosed, msgGsRemindPressed, msgGsRemindPressFailed, msgGsRemindPressGaveUp, msgGsRemindPressUnknown, gsCaseRequestPlain, gsProposalCard, gsPublicPlace, msgGsAlreadyRequested, msgGsCaseRequested,
   msgGsCaseSendFailed, msgGsCaseStaffNone, msgGsCaseStaffUnknown, msgGsFixAsk, msgGsFixDone, msgGsFixFailed, msgGsFixLimit, msgGsFixUnsafe, msgGsPrepRejected, msgGsPrepStarted, msgGsPrepStopped,
   msgGsPrepUnknown, MSG_GS_PROPOSAL_STALE,
   msgGsCasesAmbig, msgGsCasesDraftUnknown, msgGsCasesFailed, msgGsCasesNoAuto, msgGsCasesSlow, msgGsCasesUnsaved, msgGsCasesNoStart, msgGsCasesSomeFailed, msgGsCasesStarted,
@@ -373,46 +373,82 @@ async function deliverProposal(tid: string, tk: GsTicket, nt: SateiPrepNotice, t
   if (!sentOk(st) && next.prep!.tries >= GS_PROPOSE_TRIES) await failToManual(tid, next, to, deps, kv, "propose gave-up");
 }
 
-async function remind(tid: string, tk: GsTicket, to: string | null, staff: string, deps: GsSweepDeps, kv: SweepKv): Promise<void> {
+/**
+ * 催促はボタンで（2026-11-27）：期日を過ぎて PDF が無ければ、下村さんの1対1へ［催促する］のカードを1回だけ。
+ * グループには送らない（押したときだけ answerGsRemind が送る）。はっきり失敗なら次の回に、GS_REMIND_TRIES 回であきらめる
+ */
+async function askRemind(tid: string, tk: GsTicket, to: string | null, deps: GsSweepDeps, kv: SweepKv): Promise<void> {
   const p = tk.prep!;
   if ((await kv.smembers(gsCasesKey(tid))).length > 0) {
     await kv.srem(GS_STAGE2_SET, tid);
     return;
   }
-  // 予約してから送る（多くて1回）。はっきり失敗（HTTP の誤り）なら予約を外して次の回に。結果不明は予約を残す（重ねない側）
-  if (!(await kv.setNx(gsRemindKey(tid), 1, GS_CASES_TTL))) return;
-  const st = await deps.push(tk.groupId, gsReminderMessages(staff, tk.no), `remind:${tid}`).catch(() => null);
-  if (st !== null && !sentOk(st)) {
-    const fails = (p.remindFails ?? 0) + 1;
-    if (fails < GS_REMIND_TRIES) {
-      await saveGsTicket(kv, tid, { ...tk, prep: { ...p, remindFails: fails } });
-      await quiet(() => kv.del(gsRemindKey(tid)), deps, "remind release-failed");
-      deps.log(`[group-satei] remind push-failed ${receiptOf(tk.no)} retry`);
-      return;
-    }
-    await saveGsTicket(kv, tid, { ...tk, prep: { ...p, reminded: true, remindFails: fails, remindNote: "failed" } });
-    if (to) {
-      const me = await deps.push(to, textMsg(msgGsRemindFailed(tk.no)), `remind-me:${tid}`).catch(() => null);
-      await toOutbox(me, "remind-note", tid, tk.no, deps, kv);
-    }
-    await kv.srem(GS_STAGE2_SET, tid);
-    deps.log(`[group-satei] remind push-failed ${receiptOf(tk.no)} gave-up`);
+  if (!to || !p.deadline) {
+    await saveGsTicket(kv, tid, { ...tk, prep: { ...p, remindAsked: true } });
+    deps.log(`[group-satei] remind-ask skip:no-target ${receiptOf(tk.no)}`);
     return;
   }
-  await saveGsTicket(kv, tid, { ...tk, prep: { ...p, reminded: true, groupPushes: p.groupPushes + 1, remindNote: sentOk(st) ? "sent" : "unknown" } });
-  if (to && p.deadline) {
-    const me = sentOk(st) ? msgGsRemindMe(tk.no, gsDeadlineLabel(p.deadline)) : msgGsRemindUnknown(tk.no);
-    const ms = await deps.push(to, textMsg(me), `remind-me:${tid}`).catch(() => null);
-    await toOutbox(ms, "remind-note", tid, tk.no, deps, kv);
+  const card = gsRemindAskCard({ tid, ver: tk.ver, no: tk.no, deadlineLabel: gsDeadlineLabel(p.deadline) });
+  const st = await deps.push(to, [card], `remind-ask:${tid}`).catch(() => null);
+  const fresh = asTicket(await kv.get(gsTicketKey(tid)));
+  if (!fresh || fresh.state !== "waiting-cases" || !fresh.prep) return;
+  if (st !== null && !sentOk(st)) {
+    const fails = (fresh.prep.remindAskFails ?? 0) + 1;
+    const gaveUp = fails >= GS_REMIND_TRIES;
+    await saveGsTicket(kv, tid, { ...fresh, prep: { ...fresh.prep, remindAskFails: fails, ...(gaveUp ? { remindAsked: true } : {}) } });
+    deps.log(`[group-satei] remind-ask push-failed ${receiptOf(tk.no)} ${gaveUp ? "gave-up" : "retry"}`);
+    return;
   }
-  await kv.srem(GS_STAGE2_SET, tid);
-  deps.log(`[group-satei] remind ${sentOk(st) ? "sent" : "push-failed"} ${receiptOf(tk.no)}`);
+  await saveGsTicket(kv, tid, { ...fresh, prep: { ...fresh.prep, remindAsked: true } });
+  deps.log(`[group-satei] remind-ask ${sentOk(st) ? "sent" : "unknown"} ${receiptOf(tk.no)}`);
+}
+
+/**
+ * ［催促する］（gr。2026-11-27）：押したときだけ、依頼のグループで山口さんにメンションして1回だけ声をかける。
+ * 予約（gsRemindKey）を取ってから送る。はっきり失敗なら予約を外してもう一度押せる（GS_REMIND_TRIES 回まで）。結果不明は予約を残す（重ねない側）
+ */
+export async function answerGsRemind(a: Extract<GsAction, { op: "gr" }>, tk: GsTicket, deps: GsActionDeps, kv: Kv): Promise<GsOutcome> {
+  const env = deps.env ?? process.env;
+  const no = tk.no;
+  const p = tk.prep;
+  if (tk.state !== "waiting-cases" || !p) return { text: msgGsRemindClosed(no), code: `remind closed ${receiptOf(no)}`, settled: true };
+  if (p.reminded || p.groupPushes >= GS_GROUP_PUSH_MAX) return { text: msgGsRemindAlready(no), code: `remind already ${receiptOf(no)}`, settled: true };
+  const items = asCaseItems(await kv.lrange(gsCaseItemsKey(a.tid)));
+  const sm = (kv as { smembers?(k: string): Promise<unknown[]> }).smembers;
+  const marked = sm ? (await sm.call(kv, gsCasesKey(a.tid))).length : 0;
+  if (items.length > 0 || marked > 0 || p.casesHanded !== undefined) return { text: msgGsRemindCasesIn(no), code: `remind cases-in ${receiptOf(no)}`, settled: true };
+  const staff = p.caseStaffId ?? gsCaseStaffIds(env)[0];
+  if (!staff || !deps.push) return { text: MSG_GS_BUSY, code: "config-missing", settled: false };
+  if (!(await kv.setNx(gsRemindKey(a.tid), 1, GS_CASES_TTL))) return { text: msgGsRemindAlready(no), code: `remind already ${receiptOf(no)}`, settled: true };
+  const st = await deps.push(tk.groupId, gsReminderMessages(staff, no), `remind:${a.tid}`).catch(() => null);
+  const fresh = asTicket(await kv.get(gsTicketKey(a.tid)).catch(() => null)) ?? tk;
+  const fp = fresh.prep ?? p;
+  if (st !== null && !sentOk(st)) {
+    const fails = (fp.remindFails ?? 0) + 1;
+    if (fails < GS_REMIND_TRIES) {
+      await quiet(() => saveGsTicket(kv, a.tid, { ...fresh, prep: { ...fp, remindFails: fails } }), deps, "remind save-failed");
+      await quiet(() => kv.del(gsRemindKey(a.tid)), deps, "remind release-failed");
+      return { text: msgGsRemindPressFailed(no), code: `remind push-failed ${receiptOf(no)} retry`, settled: true };
+    }
+    await quiet(() => saveGsTicket(kv, a.tid, { ...fresh, prep: { ...fp, reminded: true, remindFails: fails, remindNote: "failed" } }), deps, "remind save-failed");
+    await quiet(() => kv.srem(GS_STAGE2_SET, a.tid), deps, "remind s2-rem-failed");
+    return { text: msgGsRemindPressGaveUp(no), code: `remind push-failed ${receiptOf(no)} gave-up`, settled: true };
+  }
+  await quiet(
+    () => saveGsTicket(kv, a.tid, { ...fresh, prep: { ...fp, reminded: true, groupPushes: fp.groupPushes + 1, remindNote: sentOk(st) ? "sent" : "unknown" } }),
+    deps,
+    "remind save-failed",
+  );
+  await quiet(() => kv.srem(GS_STAGE2_SET, a.tid), deps, "remind s2-rem-failed");
+  return sentOk(st)
+    ? { text: msgGsRemindPressed(no), code: `remind sent ${receiptOf(no)}`, settled: true }
+    : { text: msgGsRemindPressUnknown(no), code: `remind unknown ${receiptOf(no)}`, settled: true };
 }
 
 /**
  * 毎分の見回り（D10）：gsatei:s2 の受付票だけを見る。
  * gathering → portal の一覧から案（相談中）を下村さんへ／失敗なら手作業／30分で遅れの知らせ。
- * waiting-cases → 期日を過ぎて PDF の控えが無ければ1回だけリマインド。終わった票は集合から外す。例外は投げない
+ * waiting-cases → 期日を過ぎて PDF の控えが無ければ、下村さんへ［催促する］のカードを1回だけ（2026-11-27。グループへは押したときだけ）。終わった票は集合から外す。例外は投げない
  */
 export async function sweepGsStage2(deps: GsSweepDeps): Promise<void> {
   const env = deps.env ?? process.env;
@@ -428,7 +464,6 @@ async function sweepS2Tickets(deps: GsSweepDeps, kv: SweepKv, env: Record<string
     const tids = (await kv.smembers(GS_STAGE2_SET)).filter((x): x is string => typeof x === "string");
     if (tids.length === 0) return;
     const to = sateiNotifyTarget(env);
-    const staff = gsCaseStaffId(env)!;
     let stopped = false;
     // 新しい票に手を付けてよいか（予算の残りが GS_SWEEP_MARGIN_MS を切ったら、その回はやめて次の回へ）
     const go = () => {
@@ -502,9 +537,11 @@ async function sweepS2Tickets(deps: GsSweepDeps, kv: SweepKv, env: Record<string
         await kv.srem(GS_STAGE2_SET, tid);
         continue;
       }
+      // 催促はボタンで（2026-11-27）：カードを出したあとは、押されるか PDF が来るまで待つ（グループへは自動で送らない）
+      if (p.remindAsked) continue;
       if (p.deadline && deps.now() >= p.deadline) {
         if (!go()) break;
-        await remind(tid, tk, to, tk.prep!.caseStaffId ?? staff, deps, kv);
+        await askRemind(tid, tk, to, deps, kv);
       }
     }
     if (handed.length > 0 && !to) deps.log("[group-satei] cases skip:no-target");

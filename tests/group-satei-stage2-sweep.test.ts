@@ -1,7 +1,7 @@
 /** 段2d：毎分の見回り（案の配達・失敗・遅れ・リマインド）と事例の PDF の控え（group-satei-propose.ts） */
 import assert from "node:assert/strict";
 import {
-  asTicket, GS_STAGE2_SET, gsCasesKey, gsRemindKey, gsTicketKey, gsWaitKey, ticketIdOf, type GsTicket,
+  asTicket, GS_STAGE2_SET, gsCasesKey, gsTicketKey, gsWaitKey, ticketIdOf, type GsTicket,
 } from "../src/lib/group-satei-data";
 import { markGsCasePdf, sweepGsStage2, type GsSweepDeps } from "../src/lib/group-satei-propose";
 import type { SateiPrepNotice } from "../src/lib/group-satei-prep-portal";
@@ -119,18 +119,22 @@ const ticket = (x: ReturnType<typeof mk>) => asTicket(x.m.get(gsTicketKey(tid)))
   const waiting = (o: Partial<GsTicket["prep"]> = {}): Partial<GsTicket> => ({
     state: "waiting-cases", prep: { ...prep0, rev: 1, lines: ["x"], sentRev: 1, tries: 1, groupPushes: 1, deadline: NOW - 1, requestedAt: NOW - 3_600_000, ...o },
   });
-  await t("リマインド：期日を過ぎ・PDF の控えが無い → グループに1回・下村さんに1行。2回目は出さない", async () => {
+  await t("催促はボタンで：期日を過ぎ・PDF の控えが無い → 下村さんへ［催促する］のカードを1回だけ。グループへは送らない", async () => {
     const x = mk({ ticket: waiting() });
     await sweepGsStage2(x.deps);
     await sweepGsStage2(x.deps);
-    assert.deepEqual(x.pushes.map((p) => [p.to, p.key]), [[G, `remind:${tid}`], [SHIMO, `remind-me:${tid}`]]);
-    assert.equal((x.pushes[0].messages[0] as { text: string }).text, "{staff} 受付 G7 の事例はいかがでしょうか");
-    assert.equal(ticket(x).prep!.reminded, true);
-    assert.equal(ticket(x).prep!.groupPushes, 2);
-    assert.equal(x.sets.get(GS_STAGE2_SET)?.has(tid), false);
-    assert.ok(x.logs.includes("[group-satei] remind sent G7"));
+    assert.deepEqual(x.pushes.map((p) => [p.to, p.key]), [[SHIMO, `remind-ask:${tid}`]]);
+    const card = JSON.stringify(x.pushes[0].messages);
+    assert.ok(card.includes(`v1|gr|${tid}|1`), card);
+    assert.ok(card.includes("催促する"));
+    assert.equal(ticket(x).prep!.remindAsked, true);
+    assert.equal(ticket(x).prep!.reminded, undefined);
+    assert.equal(ticket(x).prep!.groupPushes, 1);
+    // 押されるか PDF が来るまで見回りの集合に残す
+    assert.equal(x.sets.get(GS_STAGE2_SET)?.has(tid), true);
+    assert.ok(x.logs.includes("[group-satei] remind-ask sent G7"));
   });
-  await t("リマインド：期日前は出さない／PDF の控えがあれば出さずに集合から外す／グループへ2回済みなら出さない", async () => {
+  await t("催促はボタンで：期日前は出さない／PDF の控えがあれば出さずに集合から外す／グループへ2回済みなら出さない", async () => {
     const a = mk({ ticket: waiting({ deadline: NOW + 1 }) });
     await sweepGsStage2(a.deps);
     assert.equal(a.pushes.length, 0);
@@ -158,37 +162,21 @@ const ticket = (x: ReturnType<typeof mk>) => asTicket(x.m.get(gsTicketKey(tid)))
     await sweepGsStage2({ ...x.deps, env: { ...ON, GROUP_SATEI_CASE_STAFF_ID: "" } });
     assert.deepEqual([x.calls, x.pushes.length], [[], 0]);
   });
-  await t("リマインドの push がはっきり失敗（HTTP の誤り）：予約を外して次の回にもう一度。下村さんには「声をかけました」と言わない", async () => {
+  await t("［催促する］のカードの push がはっきり失敗：次の回にもう一度。3回であきらめる（グループへは送らない）", async () => {
     const x = mk({ ticket: waiting(), push: 500 });
-    await sweepGsStage2(x.deps);
-    assert.deepEqual(x.pushes.map((p) => p.key), [`remind:${tid}`]);
-    assert.equal(x.m.has(gsRemindKey(tid)), false);
-    assert.equal(ticket(x).prep!.reminded, undefined);
-    assert.equal(x.sets.get(GS_STAGE2_SET)?.has(tid), true);
-    const ok = mk({ ticket: { ...waiting(), prep: { ...ticket(x).prep! } } });
-    await sweepGsStage2(ok.deps);
-    assert.deepEqual(ok.pushes.map((p) => p.key), [`remind:${tid}`, `remind-me:${tid}`]);
-    assert.equal(ticket(ok).prep!.reminded, true);
-  });
-  await t("リマインドの push が3回続けて失敗：あきらめて、下村さんへ「送れませんでした・手で」", async () => {
-    const x = mk({ ticket: waiting(), push: 400 });
     for (let i = 0; i < 4; i++) await sweepGsStage2(x.deps);
-    const keys = x.pushes.map((p) => [p.to, p.key]);
-    assert.deepEqual(keys, [[G, `remind:${tid}`], [G, `remind:${tid}`], [G, `remind:${tid}`], [SHIMO, `remind-me:${tid}`]]);
-    const me = (x.pushes[3].messages[0] as { text: string }).text;
-    assert.ok(me.includes("送れませんでした"), me);
-    assert.equal(me.includes("声をかけました"), false);
-    assert.equal(ticket(x).prep!.reminded, true);
-    assert.equal(x.sets.get(GS_STAGE2_SET)?.has(tid), false);
+    assert.deepEqual(x.pushes.map((p) => [p.to, p.key]), [[SHIMO, `remind-ask:${tid}`], [SHIMO, `remind-ask:${tid}`], [SHIMO, `remind-ask:${tid}`]]);
+    assert.equal(ticket(x).prep!.remindAskFails, 3);
+    assert.equal(ticket(x).prep!.remindAsked, true);
+    assert.ok(x.logs.includes("[group-satei] remind-ask push-failed G7 gave-up"));
   });
-  await t("リマインドの push の結果不明：予約は残す（2回目は出さない）。下村さんには「確かめられませんでした」", async () => {
+  await t("［催促する］のカードの push の結果不明：出したことにして2回目は出さない", async () => {
     const x = mk({ ticket: waiting(), push: null });
     await sweepGsStage2(x.deps);
     await sweepGsStage2(x.deps);
-    assert.deepEqual(x.pushes.map((p) => p.key), [`remind:${tid}`, `remind-me:${tid}`]);
-    const me = (x.pushes[1].messages[0] as { text: string }).text;
-    assert.ok(me.includes("確かめられませんでした"), me);
-    assert.equal(x.m.has(gsRemindKey(tid)), true);
+    assert.deepEqual(x.pushes.map((p) => p.key), [`remind-ask:${tid}`]);
+    assert.equal(ticket(x).prep!.remindAsked, true);
+    assert.ok(x.logs.includes("[group-satei] remind-ask unknown G7"));
   });
   await t("時間の予算：見回りの開始から38秒を過ぎたら新しい票に手を付けない（ログは符号だけ）", async () => {
     const x = mk({ ticket: waiting() });
@@ -200,7 +188,7 @@ const ticket = (x: ReturnType<typeof mk>) => asTicket(x.m.get(gsTicketKey(tid)))
     assert.equal(y.pushes.length, 0);
     const z = mk({ ticket: waiting() });
     await sweepGsStage2({ ...z.deps, startedAt: NOW - 10_000 });
-    assert.equal(z.pushes.length, 2);
+    assert.equal(z.pushes.length, 1);
   });
   await t("下村さんの宛先が無い：gathering の票は飛ばすが、その回に1度だけ符号でログを出す", async () => {
     const tid2 = ticketIdOf("m2");

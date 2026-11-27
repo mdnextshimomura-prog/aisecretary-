@@ -179,6 +179,10 @@ export interface GsPrep {
   casesNote?: GsCasesNote;
   /** 段2f（F3）：催促のあとの下村さんへの1行がどれだったか（送り直しで文を作り直す） */
   remindNote?: "sent" | "unknown" | "failed";
+  /** 催促はボタンで（2026-11-27）：期日を過ぎて下村さんへ［催促する］のカードを出した（出し終えた・あきらめた） */
+  remindAsked?: boolean;
+  /** ［催促する］のカードの push がはっきり失敗した回数（GS_REMIND_TRIES であきらめる） */
+  remindAskFails?: number;
 }
 
 /** 段2f（F4）：段2e の結果の知らせの中身（数と下書きの結果の種類だけ） */
@@ -401,7 +405,9 @@ function isGsPrep(v: unknown): v is GsPrep {
     (p.casesDraftTries === undefined || isCount(p.casesDraftTries)) &&
     (p.casesLateNotified === undefined || typeof p.casesLateNotified === "boolean") &&
     (p.casesNote === undefined || isCasesNote(p.casesNote)) &&
-    (p.remindNote === undefined || p.remindNote === "sent" || p.remindNote === "unknown" || p.remindNote === "failed")
+    (p.remindNote === undefined || p.remindNote === "sent" || p.remindNote === "unknown" || p.remindNote === "failed") &&
+    (p.remindAsked === undefined || typeof p.remindAsked === "boolean") &&
+    (p.remindAskFails === undefined || isCount(p.remindAskFails))
   );
 }
 function isCasesNote(v: unknown): v is GsCasesNote {
@@ -446,7 +452,8 @@ export type GsAction =
   | { op: "gk"; tid: string; ver: number; code: GsReqKind }
   | { op: "gy"; tid: string; ver: number; rev: number }
   | { op: "gf"; tid: string; ver: number; rev: number }
-  | { op: "gi"; tid: string; ver: number; tok: string };
+  | { op: "gi"; tid: string; ver: number; tok: string }
+  | { op: "gr"; tid: string; ver: number };
 
 const TID_RE = /^[0-9a-f]{16}$/;
 const VER_RE = /^[1-9][0-9]?$/;
@@ -461,6 +468,8 @@ export const encodeGsNone = (tid: string, ver: number) => `v1|gn|${tid}|${ver}`;
 export const encodeGsYes = (tid: string, ver: number, rev: number) => `v1|gy|${tid}|${ver}|${rev}`;
 export const encodeGsFix = (tid: string, ver: number, rev: number) => `v1|gf|${tid}|${ver}|${rev}`;
 const REV_RE = /^[1-9]$/;
+/** 催促はボタンで（2026-11-27）：下村さんの1対1の［催促する］ */
+export const encodeGsRemind = (tid: string, ver: number) => `v1|gr|${tid}|${ver}`;
 
 /** このカードのボタンの data を読む。形が違えば null（ほかのボタンは読まない） */
 export function parseGsData(data: string): GsAction | null {
@@ -476,6 +485,7 @@ export function parseGsData(data: string): GsAction | null {
   }
   if (p[1] === "gm" && p.length === 4) return { op: "gm", tid, ver };
   if (p[1] === "gn" && p.length === 4) return { op: "gn", tid, ver };
+  if (p[1] === "gr" && p.length === 4) return { op: "gr", tid, ver };
   if (p[1] === "gi") return p.length === 5 && /^[0-9a-f]{8}$/.test(p[4]) ? { op: "gi", tid, ver, tok: p[4] } : null;
   if (p[1] === "gk") {
     const code = p[4];
