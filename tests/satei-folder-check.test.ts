@@ -8,7 +8,7 @@ import {
   type FolderCheckDeps,
 } from "../src/lib/satei-folder-check";
 import { sateiNotifyToken } from "../src/lib/satei-notify";
-import type { SateiDeal } from "../src/lib/satei-deal";
+import { readSateiDealPage, type SateiDeal } from "../src/lib/satei-deal";
 
 let fail = 0;
 const ok = (name: string, cond: boolean, d = "") => {
@@ -66,6 +66,15 @@ ok("フォルダ欄が空", !folderMatches({ ...GOOD, folderId: null }, IN, DB))
 ok("消えたページ", !folderMatches({ ...GOOD, gone: true }, IN, DB));
 ok("ほかの DB のページ", !folderMatches({ ...GOOD, parentDbId: "99990000000000000000000000000000" }, IN, DB));
 ok("違う案件のページ", !folderMatches({ ...GOOD, id: "ffffffff0123456789ab0123456789ab" }, IN, DB));
+// 案件の自動登録（計画 2026-11-27）：見回りが Notion に書く URL の形（linkDealFolder と同じ）を読み戻すと、portal の行の folderId と一致する
+{
+  const page = {
+    id: DEAL, parent: { type: "database_id", database_id: DB },
+    properties: { 案件名: { title: [{ plain_text: "査定｜顧客未定｜テスト" }] }, ID: { unique_id: { number: 231 } }, Driveフォルダ: { url: `https://drive.google.com/drive/folders/${FOLDER}` }, 物件: { relation: [] } },
+  };
+  ok("自動で作った案件（Notion に URL を書いたあと）は match", folderMatches(readSateiDealPage(page), { no: 12, dealId: DEAL, folderId: FOLDER }, DB));
+  ok("自動で作った案件（URL を書く前）は match しない", !folderMatches(readSateiDealPage({ ...page, properties: { ...page.properties, Driveフォルダ: { url: null } } }), { no: 12, dealId: DEAL, folderId: FOLDER }, DB));
+}
 
 (async () => {
   const RAW = JSON.stringify(IN);

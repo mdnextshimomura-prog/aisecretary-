@@ -37,6 +37,8 @@ import { GS_READ_MODEL } from "./group-satei-read";
 import { loadActiveDeals } from "./task-record-wire";
 import { groupSateiAutoDealOn, gsPropsDbId } from "./group-satei-data";
 import { gsAutoNotion, type GsAutoNotion, type GsAutoNotionClient } from "./group-satei-auto-notion";
+import { sweepGsAuto } from "./group-satei-auto";
+import { autoHooks } from "./group-satei-actions";
 
 const log = (l: string) => console.log(l);
 const CONTENT_TIMEOUT_MS = 8_000;
@@ -305,6 +307,27 @@ export async function sweepGroupSateiStage2OnTick(startedAt?: number): Promise<v
   try {
     if (!groupSateiPrepOn()) return;
     const s = sateiActionDeps();
+    // 案件の自動登録：登録の途中で落ちた票を1件、同じ段から続ける（スイッチ off なら Notion の口が null＝KV も読まない）
+    const an = gsAutoNotionReal();
+    if (an) {
+      const ad: GsActionDeps = {
+        ...groupSateiActionDeps(),
+        // 見回りは返事をしない・予約も使わない（続きの中では呼ばれない）
+        reserve: async () => ({ proceed: false }), complete: async () => undefined, reply: async () => undefined, log,
+      };
+      const akv = groupSateiKv();
+      await sweepGsAuto({
+        kv: akv,
+        autoDeal: an,
+        loadDeals: ad.loadDeals,
+        readDeal: ad.readDeal,
+        hooks: (tid, userId) => autoHooks(tid, userId, ad, akv!),
+        push: (to, messages, key) => pushMessagesWithRetryKey(to, messages, uuidv5(key, GS_RETRY_NAMESPACE)),
+        now: () => Date.now(),
+        startedAt,
+        log,
+      });
+    }
     // 段2b-2：聞いてから30分たった票を1件、足りないまま進める（段2d の見回りの前）
     await sweepGsInfo({
       kv: groupSateiKv(),
@@ -326,6 +349,8 @@ export async function sweepGroupSateiStage2OnTick(startedAt?: number): Promise<v
       startedAt,
       // 段2e：事例を保存したマンションの下書きの受付（段1の［案件を選ぶ］と同じ口）
       satei: { dealsDbId: s.dealsDbId, readDeal: (dealId) => within(s.readDeal(dealId), CRM_TIMEOUT_MS), intake: s.intake },
+      // 案件の自動登録：Mac が作ったフォルダの URL を Notion に書く（スイッチ off なら null＝今の見回りのまま）
+      autoLink: an ? an.linkDealFolder : null,
       log,
     });
   } catch {

@@ -11,12 +11,14 @@ import { GS_SWEEP_BUDGET_MS, asTicket, gsTicketKey, receiptOf, type GsCasesNote 
 import {
   msgGsCasesAmbig, msgGsCasesDraftUnknown, msgGsCasesFailed, msgGsCasesNoAuto, msgGsCasesNoStart, msgGsCasesSlow, msgGsCasesSomeFailed,
   msgGsCasesStarted, msgGsCasesUnsaved, msgGsPrepLate, msgGsRemindFailed, msgGsRemindMe, msgGsRemindUnknown,
+  msgGsAutoLinkConflict, msgGsAutoLinkFailed, msgGsAutoStopped,
 } from "./group-satei-case";
 import { gsDeadlineLabel } from "./group-satei-deadline";
 import { msgGsInfoNotStarted } from "./group-satei-facts";
 
-export type GsObKind = "prop-late" | "remind-note" | "cases" | "cases-late" | "ambig" | "info-to";
-export const GS_OB_KINDS: readonly GsObKind[] = ["prop-late", "remind-note", "cases", "cases-late", "ambig", "info-to"];
+/** auto-fail・auto-link は案件の自動登録（計画 2026-11-27）：登録が途中で止まった（M7）／Notion に URL を書けなかった（M5） */
+export type GsObKind = "prop-late" | "remind-note" | "cases" | "cases-late" | "ambig" | "info-to" | "auto-fail" | "auto-link";
+export const GS_OB_KINDS: readonly GsObKind[] = ["prop-late", "remind-note", "cases", "cases-late", "ambig", "info-to", "auto-fail", "auto-link"];
 export const GS_OUTBOX_SET = "gsatei:outbox";
 export const gsObKey = (kind: GsObKind, id: string) => `gsatei:ob:${kind}:${id}`;
 export const GS_OB_TTL = 24 * 60 * 60;
@@ -96,6 +98,8 @@ export function gsObRetryKey(kind: GsObKind, id: string): string {
   if (kind === "cases") return `cases:${id}`;
   if (kind === "cases-late") return `cases-late:${id}`;
   if (kind === "info-to") return `info-to:${id}`;
+  if (kind === "auto-fail") return `auto-fail:${id}`;
+  if (kind === "auto-link") return `auto-link:${id}`;
   return `ambig:${id}`;
 }
 
@@ -134,6 +138,16 @@ async function rebuild(kind: GsObKind, id: string, kv: GsObKv): Promise<{ text: 
     return t && t.state === "asking" ? { text: msgGsInfoNotStarted(t.no), receipt: receiptOf(t.no) } : null;
   }
   const t = asTicket(await kv.get(gsTicketKey(id)));
+  if (kind === "auto-fail") {
+    // 登録をあきらめて asking に戻した票。押し直して進んだあとは古い
+    return t && t.state === "asking" && t.auto?.step === "gave-up" ? { text: msgGsAutoStopped(t.no, t.auto.dealNo), receipt: receiptOf(t.no) } : null;
+  }
+  if (kind === "auto-link") {
+    const a = t?.auto;
+    if (!t || !a || !a.linkNote || !a.folderId || !a.dealNo) return null;
+    const text = a.linkNote === "conflict" ? msgGsAutoLinkConflict(t.no, a.dealNo, a.folderId) : msgGsAutoLinkFailed(t.no, a.dealNo, a.folderId);
+    return { text, receipt: receiptOf(t.no) };
+  }
   if (!t || !t.prep) return null;
   const p = t.prep;
   const receipt = receiptOf(t.no);

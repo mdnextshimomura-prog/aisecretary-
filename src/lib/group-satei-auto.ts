@@ -5,7 +5,7 @@
  * ログ・KV に物件名・所在・フォルダ名・案件名・userId は出さない（符号・受付番号 G7・案件番号 D231・回数だけ）。
  */
 import {
-  GS_AUTO_SET, GS_AUTO_TRIES, GS_PREP_KINDS, GS_TICKET_TTL, gsDecKey, gsTicketKey, receiptOf,
+  GS_AUTO_SET, GS_AUTO_STALE_MS, GS_AUTO_TRIES, GS_PREP_KINDS, GS_SWEEP_BUDGET_MS, GS_TICKET_TTL, asTicket, groupSateiAutoDealOn, gsDecKey, gsOpenKey, gsTicketKey, receiptOf,
   type GsAuto, type GsEnv, type GsPrepKind, type GsRead, type GsTicket,
 } from "./group-satei-data";
 import {
@@ -15,6 +15,8 @@ import { gsSateiNextCard, msgGsAlready, msgGsKindSatei, MSG_GS_BUSY } from "./gr
 import type { GsAutoDealInput, GsAutoDealResult, GsAutoPropertyInput } from "./group-satei-auto-notion";
 import type { GsOutcome } from "./group-satei-actions";
 import { normNotionId, type SateiDeal } from "./satei-deal";
+import { sateiNotifyTarget } from "./satei-data";
+import { gsOutboxAdd, type GsObKv } from "./group-satei-outbox";
 import { normalizeProperty } from "./property";
 import { candidateDeals, dealKeys, type DealRef } from "./task-record";
 
@@ -316,5 +318,93 @@ export async function gsAutoRun(tid: string, tk: GsTicket, deps: GsAutoRunDeps, 
     return o;
   } catch {
     return fail("kv");
+  }
+}
+
+export interface GsAutoSweepDeps extends GsAutoRunDeps {
+  kv: (AutoKv & GsObKv) | null;
+  /** 続きを進めるための続き（group-satei-actions.ts の autoHooks。userId＝準備の依頼者として portal に渡す人） */
+  hooks(tid: string, userId: string): GsAutoHooks;
+  push(to: string, messages: unknown[], key: string): Promise<number | null>;
+  now(): number;
+  startedAt?: number;
+}
+
+/** 続きに要る残り（Notion の数回＋portal の受付） */
+const AUTO_SWEEP_MIN_MS = 25_000;
+const sentOk = (status: number | null) => status !== null && ((status >= 200 && status < 300) || status === 409);
+
+/**
+ * 毎分の見回り（cloud-tick。段2b-2 の見回りの前）：登録の途中（step が prop・deal・prep）で落ちた票を、auto.at から3分たったら同じ段から続ける。
+ * 1回に1件・予算の残りが25秒以上のときだけ。「印で探してから作る」ので増えない。3回でやめて下村さんへ1通（M7）、印を外して asking に戻す。
+ * スイッチ off・Notion の口が無ければ KV も読まない
+ */
+export async function sweepGsAuto(deps: GsAutoSweepDeps): Promise<void> {
+  const env = deps.env ?? process.env;
+  if (!groupSateiAutoDealOn(env) || !deps.kv || !deps.autoDeal) return;
+  const kv = deps.kv;
+  const start = deps.startedAt ?? deps.now();
+  try {
+    const tids = (await kv.smembers(GS_AUTO_SET)).filter((x): x is string => typeof x === "string");
+    for (const tid of tids) {
+      const tk = asTicket(await kv.get(gsTicketKey(tid)));
+      const auto = tk?.auto;
+      if (!tk || !auto || tk.state !== "asking" || !["prop", "deal", "prep"].includes(auto.step)) {
+        await kv.srem(GS_AUTO_SET, tid);
+        continue;
+      }
+      // 登録の流れが印を持っている票だけ（その場の失敗で印を外した票は、押し直しを待つ）
+      const dec = await kv.get(gsDecKey(tid));
+      if (dec !== gsAutoMark(tid) && !(auto.dealId && dec === `prep:${auto.dealId}`)) {
+        await kv.srem(GS_AUTO_SET, tid);
+        continue;
+      }
+      if (deps.now() - auto.at < GS_AUTO_STALE_MS) continue;
+      if (deps.now() - start > GS_SWEEP_BUDGET_MS - AUTO_SWEEP_MIN_MS) {
+        deps.log("[group-satei] auto sweep budget");
+        return;
+      }
+      const R = receiptOf(tk.no);
+      const to = sateiNotifyTarget(env);
+      if (auto.tries >= GS_AUTO_TRIES || !to) {
+        await gaveUp(tid, tk, to, deps, kv);
+        return;
+      }
+      const next: GsTicket = { ...tk, auto: { ...auto, tries: auto.tries + 1, at: deps.now() } };
+      await kv.set(gsTicketKey(tid), next, GS_TICKET_TTL);
+      deps.log(`[group-satei] auto resumed ${R}`);
+      const o = await gsAutoRun(tid, next, deps, kv, deps.hooks(tid, to), true);
+      // 準備まで進めた（集合からは準備の中で外れる）／その回はだめ（次の回にもう一度）／それ以外は続けられない
+      if (o.code.startsWith("prep sent") || o.code.startsWith("prep unknown") || o.code.startsWith("auto retry")) return;
+      await gaveUp(tid, tk, to, deps, kv);
+      return;
+    }
+  } catch {
+    deps.log("[group-satei] auto sweep skip:exception");
+  }
+}
+
+/** 続きをあきらめる：受付票を asking に戻し（仮の決定なし）、印を外し、下村さんへ1通（M7。送れなければ控えへ） */
+async function gaveUp(tid: string, tk: GsTicket, to: string | null, deps: GsAutoSweepDeps, kv: AutoKv & GsObKv): Promise<void> {
+  const R = receiptOf(tk.no);
+  const fresh = asTicket(await kv.get(gsTicketKey(tid))) ?? tk;
+  if (fresh.state !== "asking") {
+    await kv.srem(GS_AUTO_SET, tid);
+    return;
+  }
+  const base = fresh.auto ?? tk.auto!;
+  const { provisional: _p, ...rest } = fresh;
+  void _p;
+  const next: GsTicket = { ...rest, state: "asking", auto: { ...base, step: "gave-up", at: deps.now() } };
+  await kv.set(gsTicketKey(tid), next, GS_TICKET_TTL);
+  await kv.sadd(gsOpenKey(next.groupId), tid);
+  await kv.srem(GS_AUTO_SET, tid);
+  await kv.del(gsDecKey(tid));
+  deps.log(`[group-satei] auto gave-up ${R}`);
+  if (!to) return;
+  const st = await deps.push(to, [{ type: "text", text: msgGsAutoStopped(tk.no, next.auto?.dealNo) }], `auto-fail:${tid}`).catch(() => null);
+  if (!sentOk(st)) {
+    deps.log(`[group-satei] auto gave-up ${R} push-failed`);
+    await gsOutboxAdd(kv, "auto-fail", tid, deps.now(), deps.log, R);
   }
 }

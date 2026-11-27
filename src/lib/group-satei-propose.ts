@@ -26,9 +26,12 @@ import type { SateiCall, SateiIntakeOk, SateiIntakeReq } from "./satei-portal";
 import { MSG_SATEI_DEAL_NOT_FOUND } from "./satei-text";
 import type { FlexMessage } from "./task-card";
 import { gsOutboxAdd, gsOutboxRetry, type GsObKind } from "./group-satei-outbox";
-import { GS_AUTO_SET, groupSateiAutoDealOn } from "./group-satei-data";
-import { gsDealFolderName } from "./group-satei-auto";
-import { msgGsAutoFailed, msgGsAutoIntakeRejected, msgGsAutoRegisteredHead } from "./group-satei-case";
+import { GS_AUTO_LINK_TRIES, GS_AUTO_SET, groupSateiAutoDealOn } from "./group-satei-data";
+import { gsAutoNoteMark, gsDealFolderName } from "./group-satei-auto";
+import type { GsAutoLinkResult } from "./group-satei-auto-notion";
+import {
+  msgGsAutoFailed, msgGsAutoFolderFailed, msgGsAutoIntakeRejected, msgGsAutoLinkConflict, msgGsAutoLinkFailed, msgGsAutoPrepFailed, msgGsAutoRegisteredHead,
+} from "./group-satei-case";
 import type { GsCasesNote } from "./group-satei-data";
 
 type Kv = GsKv & { del(key: string): Promise<void>; srem(key: string, member: string): Promise<void> };
@@ -387,6 +390,11 @@ export interface GsSweepDeps {
     readDeal(dealId: string): Promise<{ deal: SateiDeal; kind: string | null } | null>;
     intake(req: SateiIntakeReq): Promise<SateiCall<SateiIntakeOk>>;
   } | null;
+  /**
+   * 案件の自動登録（計画 2026-11-27 の A5-7）：Mac が作ったフォルダの URL を、その案件の Driveフォルダ・フォルダ状態 に書く。
+   * 無ければ（スイッチ off も）何もしない＝今の見回りのまま
+   */
+  autoLink?: ((dealId: string, folderId: string, mark: string) => Promise<GsAutoLinkResult>) | null;
   log(l: string): void;
 }
 
@@ -401,9 +409,70 @@ async function toOutbox(st: number | null, kind: GsObKind, id: string, no: numbe
 
 /** 失敗・検査に通らない案・2回届かなかった案：下村さんに1回だけ知らせて手作業（グループには何も出さない。見回りから外す） */
 async function failToManual(tid: string, tk: GsTicket, to: string, deps: GsSweepDeps, kv: SweepKv, code: string): Promise<void> {
-  const st = await deps.push(to, textMsg(msgGsPrepFailed(tk.no)), `prepfail:${tid}`).catch(() => null);
+  // 自動登録でフォルダまで作れている票は、頭に「案件 DEAL-0231 とフォルダは作ってあります。」（M6）
+  const text = tk.auto?.dealNo && tk.auto.folderId ? msgGsAutoPrepFailed(tk.no, tk.auto.dealNo) : msgGsPrepFailed(tk.no);
+  const st = await deps.push(to, textMsg(text), `prepfail:${tid}`).catch(() => null);
   deps.log(`[group-satei] ${code} ${receiptOf(tk.no)}${sentOk(st) ? "" : " push-failed"}`);
   await closeManual(tid, tk, 0, deps, kv);
+}
+
+/**
+ * 案件の自動登録（A5-7）：portal の行が来た票で、まだ Notion に URL を書いていないとき、案の配達の前に書く。
+ * 返り値：続ける票（このあと今の deliverProposal へ）／"wait"＝この回は案を出さず次の回へ／"closed"＝フォルダを作れなかったので手作業で閉じた
+ */
+async function gsLinkAutoFolder(tid: string, tk: GsTicket, nt: SateiPrepNotice, to: string, deps: GsSweepDeps, kv: SweepKv): Promise<GsTicket | "wait" | "closed"> {
+  const auto = tk.auto!;
+  const R = receiptOf(tk.no);
+  const done = async (extra: Partial<NonNullable<GsTicket["auto"]>>): Promise<GsTicket> => {
+    const next: GsTicket = { ...tk, auto: { ...auto, ...extra, linked: true, step: "done" } };
+    await saveGsTicket(kv, tid, next);
+    await quiet(() => kv.srem(GS_AUTO_SET, tid), deps, "auto q-rem-failed");
+    return next;
+  };
+  const fid = nt.newFolderId;
+  if (!auto.dealId || !auto.dealNo) return done({});
+  if (!fid) {
+    if (nt.status !== "失敗") {
+      // 案は来たのにフォルダの ID が無い（古い portal）：書けないので、今の配達だけ進める
+      deps.log(`[group-satei] auto link-missing ${R}`);
+      return done({});
+    }
+    // Mac がフォルダを作れなかった（M4）：グループには何も出さず、手作業へ
+    const config = nt.failReason === "folder-config";
+    const st = await deps.push(to, textMsg(msgGsAutoFolderFailed(tk.no, auto.dealNo, config)), `prepfail:${tid}`).catch(() => null);
+    deps.log(`[group-satei] auto folder-failed ${R} ${config ? "config" : nt.failReason === "folder-create" ? "create" : "other"}${sentOk(st) ? "" : " push-failed"}`);
+    const next = await done({});
+    await closeManual(tid, next, 0, deps, kv);
+    return "closed";
+  }
+  let r: GsAutoLinkResult | null = null;
+  try {
+    r = await deps.autoLink!(auto.dealId, fid, gsAutoNoteMark(tid));
+  } catch {
+    r = null;
+  }
+  if (r === "linked" || r === "same") {
+    deps.log(`[group-satei] auto linked ${R}`);
+    return done({ folderId: fid });
+  }
+  if (r === null) {
+    const tries = (auto.linkTries ?? 0) + 1;
+    if (tries < GS_AUTO_LINK_TRIES) {
+      // Notion に書けない：その回は案を出さずに次の回へ
+      await saveGsTicket(kv, tid, { ...tk, auto: { ...auto, linkTries: tries, folderId: fid } });
+      deps.log(`[group-satei] auto link-retry ${R} ${tries}`);
+      return "wait";
+    }
+  }
+  // 5回だめ・別の URL が入っていた・この流れの案件でない：URL を下村さんへ1通（M5）。上書きはしない。事例の依頼は進める
+  const conflict = r === "conflict";
+  const note = conflict ? "conflict" as const : "failed" as const;
+  const text = conflict ? msgGsAutoLinkConflict(tk.no, auto.dealNo, fid) : msgGsAutoLinkFailed(tk.no, auto.dealNo, fid);
+  const next = await done({ folderId: fid, linkNote: note, ...(r === null ? { linkTries: GS_AUTO_LINK_TRIES } : {}) });
+  const st = await deps.push(to, textMsg(text), `auto-link:${tid}`).catch(() => null);
+  deps.log(`[group-satei] auto ${conflict ? "link-conflict" : "link-failed"} ${R}${r === "foreign" ? " foreign" : ""}${sentOk(st) ? "" : " push-failed"}`);
+  await toOutbox(st, "auto-link", tid, tk.no, deps, kv);
+  return next;
 }
 
 async function deliverProposal(tid: string, tk: GsTicket, nt: SateiPrepNotice, to: string, deps: GsSweepDeps, kv: SweepKv): Promise<void> {
@@ -548,7 +617,14 @@ async function sweepS2Tickets(deps: GsSweepDeps, kv: SweepKv, env: Record<string
         if (!go()) break;
         const nt = list.find((x) => x.tid === tid);
         if (nt) {
-          await deliverProposal(tid, tk, nt, to, deps, kv);
+          let cur = tk;
+          // 案件の自動登録：案の配達の前に、Mac が作ったフォルダの URL を Notion に書く（スイッチ off・口が無ければ今のまま）
+          if (tk.auto && !tk.auto.linked && deps.autoLink && groupSateiAutoDealOn(env)) {
+            const linked = await gsLinkAutoFolder(tid, tk, nt, to, deps, kv);
+            if (linked === "wait" || linked === "closed") continue;
+            cur = linked;
+          }
+          await deliverProposal(tid, cur, nt, to, deps, kv);
           continue;
         }
         if (!tk.prep!.lateNotified && tk.prepAt && deps.now() - tk.prepAt >= GS_LATE_MS) {
