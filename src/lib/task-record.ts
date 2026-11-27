@@ -38,7 +38,7 @@ const MAX_NAMES = 5;
 const MIN_PARTIAL_LENGTH = 4;
 
 /** 案件名を「｜」で分けた各部分と全体を、物件名と同じ規則で照合用の鍵にする。 */
-function dealKeys(name: string): string[] {
+export function dealKeys(name: string): string[] {
   const parts = [name, ...name.split(/[｜|]/)];
   const keys = parts.map((p) => normalizeProperty(p)).filter(Boolean);
   return keys.filter((k, i) => keys.indexOf(k) === i);

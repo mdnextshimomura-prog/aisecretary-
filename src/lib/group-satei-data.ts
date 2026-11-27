@@ -38,6 +38,25 @@ export function gsCaseStaffId(env: GsEnv = process.env): string | null {
 /** 段2d が動くか（計画 2026-11-26-group-satei-2d の D6）。off なら 2a のまま */
 export const groupSateiPrepOn = (env: GsEnv = process.env) => groupSateiStage2On(env) && gsCaseStaffId(env) !== null;
 
+/**
+ * 案件の自動登録（計画 2026-11-27-group-satei-auto-deal の A1）：CRM_物件 の DB ID（32桁の16進。ハイフン入りも可。そろえて返す）。
+ * 形が違えば null
+ */
+export function gsPropsDbId(env: GsEnv = process.env): string | null {
+  const v = (env.CRM_PROPERTIES_DB_ID ?? "").trim().replace(/-/g, "").toLowerCase();
+  return /^[0-9a-f]{32}$/.test(v) ? v : null;
+}
+/** 案件の自動登録が動くか：2d が on・GROUP_SATEI_AUTO_DEAL=1・CRM_物件 の ID が正しい・CRM_DEALS_DB_ID がある。どれか欠ければ off（今のまま） */
+export const groupSateiAutoDealOn = (env: GsEnv = process.env) =>
+  groupSateiPrepOn(env) && env.GROUP_SATEI_AUTO_DEAL === "1" && gsPropsDbId(env) !== null && Boolean((env.CRM_DEALS_DB_ID ?? "").trim());
+/** 自動登録の途中の受付票（落ちた票を毎分の見回りが続ける） */
+export const GS_AUTO_SET = "gsatei:autoq";
+/** 途中で落ちたとみなすまで・続きを試す回数 */
+export const GS_AUTO_STALE_MS = 3 * 60 * 1000;
+export const GS_AUTO_TRIES = 3;
+/** Notion に URL を書けないとき、見回りで試す回数 */
+export const GS_AUTO_LINK_TRIES = 5;
+
 /** 段2d の決まり（設計 6・10・14、計画 D8〜D16） */
 export const GS_FIX_MAX = 2;
 export const GS_PROPOSE_TRIES = 2;
@@ -333,6 +352,31 @@ export interface GsInfo {
   token: string;
 }
 
+/**
+ * 案件の自動登録（計画 A5）の控え。入れるのは ID・番号・時刻・段の符号だけ（物件名・フォルダ名は入れない）。
+ * step：prop（物件を作る）→ deal（案件を作る）→ prep（準備を頼む）→ folder（Mac がフォルダを作るのを待つ）→ done／gave-up
+ */
+export type GsAutoStep = "prop" | "deal" | "prep" | "folder" | "done" | "gave-up";
+export const GS_AUTO_STEPS: readonly GsAutoStep[] = ["prop", "deal", "prep", "folder", "done", "gave-up"];
+export interface GsAuto {
+  step: GsAutoStep;
+  at: number;
+  tries: number;
+  /** CRM_物件 のページ ID（ハイフンなし小文字32桁） */
+  propId?: string;
+  /** CRM_案件 のページ ID（同じ形） */
+  dealId?: string;
+  /** 案件番号（DEAL-0231 の 231） */
+  dealNo?: number;
+  /** Notion の Driveフォルダ を書き終えた（書けずにあきらめた・別の URL が入っていた、も true） */
+  linked?: boolean;
+  linkTries?: number;
+  /** Mac が作ったフォルダの Drive の ID（Notion に書けなかったときの知らせを作り直すため） */
+  folderId?: string;
+  /** Notion に書けなかった知らせの種類（控えからの送り直しで文を作り直す） */
+  linkNote?: "failed" | "conflict";
+}
+
 export interface GsTicket {
   no: number;
   ver: number;
@@ -371,6 +415,8 @@ export interface GsTicket {
   prep?: GsPrep;
   /** 段2b-2：足りない項目を聞いている（state が asking-info のあいだ） */
   info?: GsInfo;
+  /** 案件の自動登録（GROUP_SATEI_AUTO_DEAL on のときだけ書く） */
+  auto?: GsAuto;
 }
 
 const STATES: readonly GsState[] = ["asking", "started", "manual", "dismissed", "gathering", "proposing", "waiting-cases", "asking-info"];
@@ -382,6 +428,23 @@ function isGsInfo(v: unknown): v is GsInfo {
     typeof i.by === "string" && i.by.length > 0 && GS_PREP_KINDS.includes(i.kind as GsPrepKind) &&
     Array.isArray(i.keys) && i.keys.length <= 10 && i.keys.every((k) => typeof k === "string") &&
     typeof i.at === "number" && typeof i.token === "string" && i.token.length > 0
+  );
+}
+
+const NOTION_ID_RE = /^[0-9a-f]{32}$/;
+const DRIVE_ID_RE = /^[A-Za-z0-9_-]{10,200}$/;
+function isGsAuto(v: unknown): v is GsAuto {
+  if (!v || typeof v !== "object") return false;
+  const a = v as Record<string, unknown>;
+  const id = (x: unknown) => x === undefined || (typeof x === "string" && NOTION_ID_RE.test(x));
+  return (
+    GS_AUTO_STEPS.includes(a.step as GsAutoStep) && typeof a.at === "number" && Number.isFinite(a.at) && isCount(a.tries) &&
+    id(a.propId) && id(a.dealId) &&
+    (a.dealNo === undefined || (typeof a.dealNo === "number" && Number.isInteger(a.dealNo) && a.dealNo > 0 && a.dealNo <= 999_999)) &&
+    (a.linked === undefined || typeof a.linked === "boolean") &&
+    (a.linkTries === undefined || isCount(a.linkTries)) &&
+    (a.folderId === undefined || (typeof a.folderId === "string" && DRIVE_ID_RE.test(a.folderId))) &&
+    (a.linkNote === undefined || a.linkNote === "failed" || a.linkNote === "conflict")
   );
 }
 
@@ -440,6 +503,7 @@ export function asTicket(raw: unknown): GsTicket | null {
   if (r.requestKind !== undefined && !isGsReqKind(r.requestKind)) return null;
   if (r.prep !== undefined && !isGsPrep(r.prep)) return null;
   if (r.info !== undefined && !isGsInfo(r.info)) return null;
+  if (r.auto !== undefined && !isGsAuto(r.auto)) return null;
   if (r.state === "asking-info" && (r.info === undefined || typeof r.dealId !== "string")) return null;
   return r as unknown as GsTicket;
 }
