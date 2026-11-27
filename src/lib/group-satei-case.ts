@@ -299,3 +299,40 @@ export const msgGsCasesSomeFailed = (n: number) => `取り出せなかった PDF
 export const msgGsCasesUnsaved = (n: number) => `保存していない PDF が ${n}件あります。02 に入れてください`;
 export const msgGsCasesSlow = (no: number) =>
   `事例の PDF の保存がまだ終わっていません。Mac の様子を見るか、案件フォルダの 02 に入れてください（受付 ${receiptOf(no)}）`;
+
+/**
+ * 案件の自動登録（計画 2026-11-27-group-satei-auto-deal の A6。M1〜M8）。下村さんの1対1だけ。文は一字一句テストで固定。
+ * D＝案件番号（DEAL-0231）
+ */
+const D = (dealNo: number) => `DEAL-${String(dealNo).padStart(4, "0")}`;
+const driveUrl = (folderId: string) => `https://drive.google.com/drive/folders/${folderId}`;
+/** M1：ぴったり合った（返事の頭。このあとに今の文） */
+export const msgGsAutoMatched = (no: number, dealName: string) => `進行中の案件「${dealName}」に合ったので、この案件で進めます（${R(no)}）`;
+/** M2：登録した（返事） */
+export const msgGsAutoRegistered = (no: number, dealNo: number) =>
+  `案件 ${D(dealNo)} として登録しました（${R(no)}）。フォルダを作って、事例の取り方の案を数分でお送りします。顧客と案件ソースは、あとで Notion に入れてください`;
+/** M3：決められない（今のカードの文の頭） */
+export const msgGsAutoAsk = (no: number) => `合いそうな案件が複数あるので、選んでください（${R(no)}）`;
+export const msgGsAutoDup = (no: number) => `同じ物件の進行中の案件が見つかりました。一覧から選んでください（${R(no)}）`;
+/** M4：フォルダを作れなかった（push。retry key prepfail:<tid>） */
+export const msgGsAutoFolderFailed = (no: number, dealNo: number, config: boolean) =>
+  `案件 ${D(dealNo)} は登録しましたが、案件フォルダを作れませんでした（${R(no)}）。フォルダを手で作り、CRM_案件 の Driveフォルダ に入れてください。山口さんへは手で頼んでください` +
+  (config ? "（Mac の親フォルダの設定がありません）" : "");
+/** M5：Notion に URL を書けなかった（push。retry key auto-link:<tid>） */
+export const msgGsAutoLinkFailed = (no: number, dealNo: number, folderId: string) =>
+  `案件 ${D(dealNo)} のフォルダは作りましたが、Notion に書けませんでした（${R(no)}）。CRM_案件 の Driveフォルダ に次を入れてください：${driveUrl(folderId)}`;
+export const msgGsAutoLinkConflict = (no: number, dealNo: number, folderId: string) =>
+  `案件 ${D(dealNo)} のフォルダは作りましたが、Notion に書けませんでした（${R(no)}）。CRM_案件 の Driveフォルダ に別のフォルダが入っています。新しく作ったフォルダは次です：${driveUrl(folderId)}`;
+/** M6：案を作れなかった（今の msgGsPrepFailed の頭に） */
+export const msgGsAutoPrepFailed = (no: number, dealNo: number) => `案件 ${D(dealNo)} とフォルダは作ってあります。${msgGsPrepFailed(no)}`;
+/** M7：登録が途中で止まった（push。retry key auto-fail:<tid>） */
+export const msgGsAutoStopped = (no: number, dealNo?: number) =>
+  `案件の自動登録が途中で止まりました（${R(no)}）。` +
+  (dealNo ? `CRM_案件 ${D(dealNo)} はできています。` : "") +
+  "カードの［一覧から選ぶ］で選ぶか、もう一度［査定］を押してください";
+/** M8：その場で失敗（返事） */
+export const msgGsAutoFailed = (no: number) => `案件を登録できませんでした（${R(no)}）。少し待ってから、もう一度［査定］を押してください`;
+export const msgGsAutoIntakeRejected = (no: number, dealNo: number) =>
+  `案件 ${D(dealNo)} は登録しましたが、事例の案づくりを受け付けられませんでした（${R(no)}）。山口さんへは手で頼んでください`;
+/** portal が止めている・結果不明のとき、今の文の頭に付ける（A7） */
+export const msgGsAutoRegisteredHead = (dealNo: number) => `案件 ${D(dealNo)} として登録しました。`;

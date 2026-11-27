@@ -27,6 +27,8 @@ import { SATEI_CODE_AWAITING_REASON, type SateiCall, type SateiIntakeOk, type Sa
 import { MSG_SATEI_AWAITING_REASON, MSG_SATEI_DEAL_NOT_FOUND, MSG_SATEI_FAILED, msgSateiAccepted, msgSateiInProgress } from "./satei-text";
 import type { DealRef } from "./task-record";
 import type { FlexMessage } from "./task-card";
+import { groupSateiAutoDealOn } from "./group-satei-data";
+import { gsAutoDeal, type GsAutoDealDeps, type GsAutoHooks } from "./group-satei-auto";
 
 export interface GsActionDeps {
   env?: GsEnv;
@@ -48,10 +50,12 @@ export interface GsActionDeps {
   /** 山口さんの候補が2つ以上のとき、依頼のグループにいるか（1件3秒。in/out/unknown）。無ければ確かめられない扱い */
   groupMember?(groupId: string, userId: string): Promise<"in" | "out" | "unknown">;
   now?(): number;
+  /** 案件の自動登録（計画 2026-11-27）：Notion の口。無ければ自動登録しない（今のまま） */
+  autoDeal?: GsAutoDealDeps | null;
 }
 
 /** 準備へ進める所（proceedPick・startGsPrep・段2b-2 の再開）が使う部品だけ */
-export type GsPickDeps = Pick<GsActionDeps, "env" | "dealsDbId" | "readDeal" | "intake" | "prep" | "now" | "log">;
+export type GsPickDeps = Pick<GsActionDeps, "env" | "dealsDbId" | "readDeal" | "intake" | "prep" | "now" | "log" | "autoDeal">;
 
 export interface GsOutcome {
   text: string;
@@ -88,7 +92,6 @@ const UNKNOWN_DEC = "unknown:";
 async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: string, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
   // PAGE_ID_RE はハイフン入り・大文字も通すので、比べる前・保存する前にそろえる
   const a = { ...raw, dealId: normNotionId(raw.dealId) };
-  const no = tk.no;
   if (!deps.dealsDbId) return { text: MSG_SATEI_DEAL_NOT_FOUND, code: "config-missing", settled: true };
   // 一覧に出した案件だけ（進行中）
   let active: DealRef[];
@@ -105,6 +108,18 @@ async function pick(raw: Extract<GsAction, { op: "gs" }>, tk: GsTicket, userId: 
     return { text: MSG_SATEI_DEAL_NOT_FOUND, code: "read-failed", settled: false };
   }
   if (!got || got.deal.gone) return { text: MSG_SATEI_DEAL_NOT_FOUND, code: "not-found", settled: true };
+  return pickGot(a, tk, got, userId, deps, kv);
+}
+
+/** 読めた案件で進める（［案件を選ぶ］の後半。自動登録の「ぴったり合った」もここを通る） */
+async function pickGot(
+  a: { tid: string; dealId: string },
+  tk: GsTicket,
+  got: { deal: SateiDeal; kind: string | null },
+  userId: string,
+  deps: GsActionDeps,
+  kv: Kv,
+): Promise<Outcome> {
   const kind = got.kind;
   const warn =
     tk.read && MISMATCH_KINDS.includes(tk.read.kind) && kind && MISMATCH_KINDS.includes(kind) && tk.read.kind !== kind
@@ -197,12 +212,16 @@ async function maybeAskInfo(
   userId: string,
   deps: GsActionDeps,
   kv: Kv,
+  /** 案件の自動登録：登録の流れが持っている印（auto:<tid8>）。今の印がこの値のときだけ info:<dealId> に書き換える */
+  held?: string,
 ): Promise<Outcome | null> {
   const no = tk.no;
   const keys = gsInfoKeys(kind, tk.read);
   if (keys.length === 0) return null;
+  // この受付票で自動登録した案件は、フォルダがまだ無くても聞く（準備で Mac が作る）
+  const autoOwn = !deal.folderId && groupSateiAutoDealOn(deps.env ?? process.env) && Boolean(deps.autoDeal) && tk.auto?.dealId === a.dealId;
   // 準備へ進めない案件（フォルダ無し等）は聞かずに、startGsPrep の今の返事へ
-  if (!deps.dealsDbId || deal.gone || deal.parentDbId !== normNotionId(deps.dealsDbId) || !deal.folderId) return null;
+  if (!deps.dealsDbId || deal.gone || deal.parentDbId !== normNotionId(deps.dealsDbId) || (!deal.folderId && !autoOwn)) return null;
   const token = randomUUID();
   // ほかの印（差し戻し理由・［直す］）があれば聞かない。答えを待つ印は SET NX で取る（同じ人の2票が同時でも上書きしない。点検 LOW-8）
   let busy: boolean;
@@ -218,7 +237,10 @@ async function maybeAskInfo(
   }
   let decOk = false;
   try {
-    decOk = await kv.setNx(gsDecKey(a.tid), `${GS_INFO_DEC}${a.dealId}`, GS_TICKET_TTL);
+    if (held) {
+      decOk = (await kv.get(gsDecKey(a.tid))) === held;
+      if (decOk) await kv.set(gsDecKey(a.tid), `${GS_INFO_DEC}${a.dealId}`, GS_TICKET_TTL);
+    } else decOk = await kv.setNx(gsDecKey(a.tid), `${GS_INFO_DEC}${a.dealId}`, GS_TICKET_TTL);
   } finally {
     if (!decOk) await quietKv(() => clearInfoMark(userId, token, kv), deps);
   }
@@ -239,7 +261,9 @@ async function maybeAskInfo(
       if (tk.state === "asking" || tk.provisional) await kv.sadd(gsOpenKey(tk.groupId), a.tid);
       await kv.srem(GS_INFO_SET, a.tid);
       await clearInfoMark(userId, token, kv);
-      await kv.del(gsDecKey(a.tid));
+      // 自動登録の流れから来たときは、持っていた印に戻す（このあと準備が受け入れる）
+      if (held) await kv.set(gsDecKey(a.tid), held, GS_TICKET_TTL);
+      else await kv.del(gsDecKey(a.tid));
     }, deps);
     return null;
   }
@@ -320,6 +344,37 @@ export async function gsResumeInfo(tid: string, tk: GsTicket, deps: GsPickDeps, 
   return o;
 }
 
+/** 案件の自動登録が動かせるか（スイッチ・Notion の口・準備の口・CRM_案件 の ID）。off なら何も読まない */
+const autoReady = (deps: GsActionDeps): deps is GsActionDeps & { autoDeal: GsAutoDealDeps } =>
+  groupSateiAutoDealOn(deps.env ?? process.env) && Boolean(deps.autoDeal) && Boolean(deps.prep) && Boolean(deps.dealsDbId);
+const autoRunDeps = (deps: GsActionDeps & { autoDeal: GsAutoDealDeps }) => ({
+  env: deps.env, autoDeal: deps.autoDeal, loadDeals: deps.loadDeals, readDeal: deps.readDeal, now: deps.now, log: deps.log,
+});
+
+/** 自動登録の流れに渡す続き（既存の案件で進める／登録した案件で聞く → 準備）。見回り（落ちた票の続き）も同じものを使う */
+export function autoHooks(tid: string, userId: string, deps: GsActionDeps, kv: Kv): GsAutoHooks {
+  return {
+    existing: async (dealId, tk) => {
+      let got: { deal: SateiDeal; kind: string | null } | null;
+      try {
+        got = await deps.readDeal(dealId);
+      } catch {
+        return null;
+      }
+      if (!got || got.deal.gone) return null;
+      return pickGot({ tid, dealId }, tk, got, userId, deps, kv);
+    },
+    cont: async (tk, got, kind, held, o) => {
+      const a = { tid, dealId: normNotionId(got.deal.id) };
+      if (!o.noAsk) {
+        const asked = await maybeAskInfo(a, tk, got.deal, kind, userId, deps, kv, held);
+        if (asked) return asked;
+      }
+      return startGsPrep(a, tk, got.deal, kind, userId, deps, kv, { autoHeld: held, autoResume: o.resume });
+    },
+  };
+}
+
 /** ［このまま進める］（gi） */
 async function skipInfo(a: Extract<GsAction, { op: "gi" }>, tk: GsTicket, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
   const no = tk.no;
@@ -335,7 +390,7 @@ async function skipInfo(a: Extract<GsAction, { op: "gi" }>, tk: GsTicket, deps: 
  * 段2：「何の依頼？」。［査定］は印（gsatei:dec）を取らない（取ると、このあとの案件選び gs が「選択済み」になる）。
  * ほかの7つは記録だけ：印を gk:<符号> で取り、受付票を manual にして閉じる（中身の自動化は別の設計）。
  */
-async function chooseKind(a: Extract<GsAction, { op: "gk" }>, tk: GsTicket, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
+async function chooseKind(a: Extract<GsAction, { op: "gk" }>, tk: GsTicket, userId: string, deps: GsActionDeps, kv: Kv): Promise<Outcome> {
   const no = tk.no;
   if (a.code === "satei") {
     if (tk.state === "asking" && tk.requestKind !== "satei") {
@@ -346,6 +401,14 @@ async function chooseKind(a: Extract<GsAction, { op: "gk" }>, tk: GsTicket, deps
         if (await kv.get(gsDecKey(a.tid))) return;
         await save(kv, a.tid, { ...fresh, requestKind: "satei" });
       }, deps);
+    }
+    // 案件の自動登録（スイッチ on のときだけ）：ぴったり合う案件が1件ならそれで進め、無ければ登録する。決められなければ今のカード
+    if (tk.state === "asking" && autoReady(deps)) {
+      const cur = asTicket(await kv.get(gsTicketKey(a.tid)).catch(() => null)) ?? tk;
+      if (cur.state === "asking" && cur.ver === tk.ver) {
+        const o = await gsAutoDeal(a, cur, autoRunDeps(deps), kv, autoHooks(a.tid, userId, deps, kv), "match");
+        if (o) return o;
+      }
     }
     return { text: msgGsKindSatei(no), code: `kind satei ${receiptOf(no)}`, settled: true, card: gsSateiNextCard(a.tid, tk.ver, no) };
   }
@@ -369,13 +432,18 @@ async function decide(a: Exclude<GsAction, { op: "gl" }>, tk: GsTicket, userId: 
       ? { text: MSG_GS_UNKNOWN, code: "unknown-again", settled: true }
       : { text: msgGsAlready(tk.no), code: "already", settled: true };
   }
-  if (a.op === "gk") return chooseKind(a, tk, deps, kv);
+  if (a.op === "gk") return chooseKind(a, tk, userId, deps, kv);
   if (a.op === "gs") return pick(a, tk, userId, deps, kv);
   if (a.op === "gm") {
     // 連打で7日を延ばさない
     if (tk.provisional) return { text: msgGsNoDeal(tk.no), code: "no-deal-again", settled: true };
     // 同時に押された gs が印を取っていたら上書きしない
     if (await kv.get(gsDecKey(a.tid))) return { text: msgGsAlready(tk.no), code: "already", settled: true };
+    // 案件の自動登録（裁定 R1）：on かつ査定の票なら、押したら登録する（照合は飛ばす。作る直前に同じ物件の案件が見つかれば一覧へ）
+    if (tk.state === "asking" && tk.requestKind === "satei" && autoReady(deps)) {
+      const o = await gsAutoDeal(a, tk, autoRunDeps(deps), kv, autoHooks(a.tid, userId, deps, kv), "force");
+      if (o) return o;
+    }
     await save(kv, a.tid, { ...tk, state: "manual", provisional: true });
     return { text: msgGsNoDeal(tk.no), code: "no-deal", settled: true };
   }

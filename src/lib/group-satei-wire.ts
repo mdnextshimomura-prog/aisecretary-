@@ -35,6 +35,8 @@ import { handleGsInfoText, sweepGsInfo, type GsInfoDeps } from "./group-satei-in
 import { gsInfoSystem } from "./group-satei-facts";
 import { GS_READ_MODEL } from "./group-satei-read";
 import { loadActiveDeals } from "./task-record-wire";
+import { groupSateiAutoDealOn, gsPropsDbId } from "./group-satei-data";
+import { gsAutoNotion, type GsAutoNotion, type GsAutoNotionClient } from "./group-satei-auto-notion";
 
 const log = (l: string) => console.log(l);
 const CONTENT_TIMEOUT_MS = 8_000;
@@ -196,6 +198,24 @@ export function groupSateiOpenDeps(today: string): GsOpenDeps {
   };
 }
 
+/**
+ * 案件の自動登録（計画 2026-11-27）：本物の Notion の口。スイッチが off・ID が無ければ null（＝自動登録しない。Client も作らない）。
+ * 呼び出しは1回 CRM_TIMEOUT_MS まで。Client は makeSateiNotion（ログに ID・名前を出さない）
+ */
+export function gsAutoNotionReal(): GsAutoNotion | null {
+  const propsDbId = gsPropsDbId();
+  const dealsDbId = (process.env.CRM_DEALS_DB_ID ?? "").trim();
+  if (!groupSateiAutoDealOn() || !propsDbId || !dealsDbId) return null;
+  const n = gsAutoNotion(crm() as unknown as GsAutoNotionClient, { propsDbId, dealsDbId: normNotionId(dealsDbId) });
+  return {
+    findOrCreateProperty: (p) => within(n.findOrCreateProperty(p), CRM_TIMEOUT_MS * 2),
+    findOrCreateDeal: (p) => within(n.findOrCreateDeal(p), CRM_TIMEOUT_MS * 2),
+    readDealNo: (id) => within(n.readDealNo(id), CRM_TIMEOUT_MS),
+    propTitle: (id) => within(n.propTitle(id), CRM_TIMEOUT_MS),
+    linkDealFolder: (dealId, folderId, mark) => within(n.linkDealFolder(dealId, folderId, mark), CRM_TIMEOUT_MS * 2),
+  };
+}
+
 export function groupSateiActionDeps(): Omit<GsActionDeps, "reserve" | "complete" | "reply" | "log"> {
   const s = sateiActionDeps();
   return {
@@ -210,6 +230,7 @@ export function groupSateiActionDeps(): Omit<GsActionDeps, "reserve" | "complete
     pushIds: (to, messages, key) => pushMessagesWithRetryKeyIds(to, messages, uuidv5(key, GS_RETRY_NAMESPACE)),
     groupMember: (groupId, userId) => gsGroupMemberStatus(groupId, userId),
     now: () => Date.now(),
+    autoDeal: gsAutoNotionReal(),
   };
 }
 
@@ -295,6 +316,7 @@ export async function sweepGroupSateiStage2OnTick(startedAt?: number): Promise<v
       now: () => Date.now(),
       startedAt,
       log,
+      autoDeal: gsAutoNotionReal(),
     });
     await sweepGsStage2({
       kv: groupSateiKv(),
@@ -492,6 +514,7 @@ export function groupSateiInfoDeps(): GsInfoDeps {
     readDeal: s.readDeal,
     intake: s.intake,
     prep: s.prep,
+    autoDeal: s.autoDeal,
     answer: async (keys, text) => {
       const out = await within(
         create({ model: GS_READ_MODEL, max_tokens: 400, system: gsInfoSystem(keys), messages: [{ role: "user", content: [{ type: "text", text }] }] }),

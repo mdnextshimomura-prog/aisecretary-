@@ -26,6 +26,9 @@ import type { SateiCall, SateiIntakeOk, SateiIntakeReq } from "./satei-portal";
 import { MSG_SATEI_DEAL_NOT_FOUND } from "./satei-text";
 import type { FlexMessage } from "./task-card";
 import { gsOutboxAdd, gsOutboxRetry, type GsObKind } from "./group-satei-outbox";
+import { GS_AUTO_SET, groupSateiAutoDealOn } from "./group-satei-data";
+import { gsDealFolderName } from "./group-satei-auto";
+import { msgGsAutoFailed, msgGsAutoIntakeRejected, msgGsAutoRegisteredHead } from "./group-satei-case";
 import type { GsCasesNote } from "./group-satei-data";
 
 type Kv = GsKv & { del(key: string): Promise<void>; srem(key: string, member: string): Promise<void> };
@@ -53,39 +56,84 @@ export async function startGsPrep(
   userId: string,
   deps: GsPickDeps,
   kv: Kv,
-  /** 段2b-2：聞いたあとに進めるとき、仮の印（info:<dealId>）を受け入れて prep: に書き換える（token の回ごとに1回だけ） */
-  opts?: { infoDec?: string; infoToken?: string },
+  /**
+   * 段2b-2：聞いたあとに進めるとき、仮の印（info:<dealId>）を受け入れて prep: に書き換える（token の回ごとに1回だけ）。
+   * 案件の自動登録：autoHeld＝登録の流れが持っている印（auto:<tid8>）を受け入れる。autoResume＝落ちた票の続き（印がもう prep:<dealId> でも進める。
+   * portal の受付は同じ tid なら同じ行なので重ならない）
+   */
+  opts?: { infoDec?: string; infoToken?: string; autoHeld?: string; autoResume?: boolean },
 ): Promise<GsOutcome | null> {
   const no = tk.no;
   if (!deps.prep) return null;
   if (!deps.dealsDbId || deal.gone || deal.parentDbId !== normNotionId(deps.dealsDbId)) return { text: MSG_SATEI_DEAL_NOT_FOUND, code: "not-found", settled: true };
-  if (!deal.folderId) return { text: MSG_GS_NO_FOLDER, code: "no-folder", settled: true };
+  // 案件の自動登録（計画 2026-11-27 の A5-6）：この受付票で登録した案件（フォルダはまだ無い）だけ、portal へ「新しく作るフォルダの名前」を渡す。
+  // 名前は KV に持たず、毎回 Notion の CRM_物件 の物件名から作る。印を取る前に作る（作れなければ何も変えない）
+  let newFolder: { name: string } | null = null;
+  let autoNo = 0;
+  if (!deal.folderId) {
+    const auto = tk.auto;
+    if (!groupSateiAutoDealOn(deps.env ?? process.env) || !deps.autoDeal || !auto?.dealId || auto.dealId !== normNotionId(a.dealId)) {
+      return { text: MSG_GS_NO_FOLDER, code: "no-folder", settled: true };
+    }
+    const dealNo = deal.dealNo ?? auto.dealNo ?? null;
+    const propId = deal.propertyIds[0] ?? auto.propId;
+    let title: string | null = null;
+    try {
+      title = propId ? await deps.autoDeal.propTitle(normNotionId(propId)) : null;
+    } catch {
+      title = null;
+    }
+    const name = dealNo && title ? gsDealFolderName(dealNo, title) : null;
+    if (!name || !dealNo) {
+      deps.log(`[group-satei] auto failed ${receiptOf(no)} title`);
+      return { text: msgGsAutoFailed(no), code: `auto failed ${receiptOf(no)} title`, settled: true };
+    }
+    newFolder = { name };
+    autoNo = dealNo;
+  }
   if (!(await kv.setNx(gsDecKey(a.tid), `prep:${a.dealId}`, GS_TICKET_TTL))) {
-    // 仮の印を受け入れるのは、その回の書き換えの印（SET NX）を取れた1つだけ（再開が二度走っても準備は1回）
-    if (!opts?.infoDec || !opts.infoToken || (await kv.get(gsDecKey(a.tid))) !== opts.infoDec) return { text: msgGsAlready(no), code: "already", settled: true };
-    if (!(await kv.setNx(gsInfoPrepKey(a.tid, opts.infoToken), 1, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
-    await kv.set(gsDecKey(a.tid), `prep:${a.dealId}`, GS_TICKET_TTL);
+    const cur = opts?.autoHeld || opts?.autoResume ? await kv.get(gsDecKey(a.tid)) : undefined;
+    if (opts?.autoHeld && cur === opts.autoHeld) {
+      await kv.set(gsDecKey(a.tid), `prep:${a.dealId}`, GS_TICKET_TTL);
+    } else if (opts?.autoResume && cur === `prep:${a.dealId}` && tk.state === "asking") {
+      // 印を書き換えたあと・受付票を書く前に落ちた票の続き
+    } else {
+      // 仮の印を受け入れるのは、その回の書き換えの印（SET NX）を取れた1つだけ（再開が二度走っても準備は1回）
+      if (!opts?.infoDec || !opts.infoToken || (await kv.get(gsDecKey(a.tid))) !== opts.infoDec) return { text: msgGsAlready(no), code: "already", settled: true };
+      if (!(await kv.setNx(gsInfoPrepKey(a.tid, opts.infoToken), 1, GS_TICKET_TTL))) return { text: msgGsAlready(no), code: "already", settled: true };
+      await kv.set(gsDecKey(a.tid), `prep:${a.dealId}`, GS_TICKET_TTL);
+    }
   }
   const f = tk.read?.facts;
+  const common = {
+    place: tk.read?.address ?? null,
+    building: kind === "マンション" ? gsBuildingOf(tk.read) : null,
+    facts: { builtYm: f?.builtYm ?? null, exclusiveArea: f?.exclusiveArea ?? null, landArea: f?.landArea ?? null, buildingArea: f?.buildingArea ?? null },
+    requestedBy: userId,
+  };
   let r;
   try {
-    r = await deps.prep.intake({
-      tid: a.tid, no, dealId: a.dealId, folderId: deal.folderId, kind,
-      place: tk.read?.address ?? null,
-      building: kind === "マンション" ? gsBuildingOf(tk.read) : null,
-      facts: { builtYm: f?.builtYm ?? null, exclusiveArea: f?.exclusiveArea ?? null, landArea: f?.landArea ?? null, buildingArea: f?.buildingArea ?? null },
-      requestedBy: userId,
-    });
+    r = await deps.prep.intake(
+      deal.folderId
+        ? { tid: a.tid, no, dealId: a.dealId, folderId: deal.folderId, kind, ...common }
+        : { tid: a.tid, no, dealId: a.dealId, kind, ...common, newFolder: newFolder as { name: string } },
+    );
   } catch {
     r = { kind: "unknown" as const, reason: "exception" };
   }
   if (r.kind === "rejected" && (r.code === "PREP_DISABLED" || r.code === "INTAKE_STOPPED")) {
     await quiet(() => kv.del(gsDecKey(a.tid)), deps, "gs prep dec-clear-failed");
+    // 自動登録の案件はフォルダがまだ無いので、PREP_DISABLED でも 2a の道（今の受付）へは行かない（A7）
+    if (newFolder) return { text: `${msgGsAutoRegisteredHead(autoNo)}${msgGsPrepStopped(no)}`, code: `prep stopped ${receiptOf(no)}`, settled: true };
     if (r.code === "PREP_DISABLED") return null;
     return { text: msgGsPrepStopped(no), code: `prep stopped ${receiptOf(no)}`, settled: true };
   }
   if (r.kind === "rejected") {
     await quiet(() => kv.del(gsDecKey(a.tid)), deps, "gs prep dec-clear-failed");
+    if (newFolder) {
+      deps.log(`[group-satei] auto failed ${receiptOf(no)} intake`);
+      return { text: msgGsAutoIntakeRejected(no, autoNo), code: `prep rejected ${receiptOf(no)}`, settled: true };
+    }
     return { text: msgGsPrepRejected(no), code: `prep rejected ${receiptOf(no)}`, settled: true };
   }
   // ok と結果不明は同じ受付票にする（結果不明でも portal に届いていれば、見回りが案を拾う。届いていなければ30分の知らせ）
@@ -93,12 +141,15 @@ export async function startGsPrep(
   const next: GsTicket = {
     ...tk, state: "gathering", provisional: false, dealId: a.dealId, requestKind: "satei", prepAt: now,
     prep: { kind, rev: 0, lines: [], fixes: 0, sentRev: 0, tries: 0, groupPushes: 0 },
+    // 自動登録：Mac がフォルダを作るのを待つ（見回りが newFolderId を受けて Notion に書く）
+    ...(newFolder && tk.auto ? { auto: { ...tk.auto, step: "folder" as const, at: now, linked: false } } : {}),
   };
   await quiet(() => saveGsTicket(kv, a.tid, next), deps, "gs save-failed");
   await quiet(() => kv.sadd(GS_STAGE2_SET, a.tid), deps, "gs s2-add-failed");
+  if (newFolder) await quiet(() => kv.srem(GS_AUTO_SET, a.tid), deps, "auto q-rem-failed");
   return r.kind === "ok"
     ? { text: msgGsPrepStarted(no), code: `prep sent ${receiptOf(no)}`, settled: true }
-    : { text: msgGsPrepUnknown(no), code: `prep unknown ${receiptOf(no)}`, settled: true };
+    : { text: `${newFolder ? msgGsAutoRegisteredHead(autoNo) : ""}${msgGsPrepUnknown(no)}`, code: `prep unknown ${receiptOf(no)}`, settled: true };
 }
 
 const sentOk = (status: number | null) => status !== null && ((status >= 200 && status < 300) || status === 409);
