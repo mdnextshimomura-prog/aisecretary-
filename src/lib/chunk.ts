@@ -17,6 +17,8 @@ export interface ChunkItem {
   text: string;
   /** @メンションする相手のLINE userId。いなければ null */
   userId?: string | null;
+  /** true ならメンションを行の頭に置く（「{m1} どうなりましたか？」）。無ければ今までどおり行の末尾 */
+  mentionFirst?: boolean;
 }
 
 export interface Chunk {
@@ -28,6 +30,12 @@ export interface Chunk {
 // 5000が上限。絵文字や置換キーの展開で膨らむ余地を見て余裕を持たせる。
 const MAX_CHARS = 4200;
 const MAX_MENTIONS = 20;
+
+// メンションの置換キーを行に付ける（既定は末尾。mentionFirst なら頭）
+function withKey(item: ChunkItem, key: string | null): string {
+  if (!key) return item.text;
+  return item.mentionFirst ? `{${key}} ${item.text}` : `${item.text} {${key}}`;
+}
 
 export function buildChunks(
   header: string,
@@ -52,7 +60,7 @@ export function buildChunks(
     // メンションを足すと上限を超えるなら、この行から次の通に回す
     const willMention = Boolean(item.userId) && mentionCount < MAX_MENTIONS;
     const key = willMention ? `m${mentionCount + 1}` : null;
-    const line = `\n${item.text}${key ? ` {${key}}` : ""}`;
+    const line = `\n${withKey(item, key)}`;
 
     const overChars =
       header.length + body.length + line.length + footer.length > MAX_CHARS;
@@ -62,7 +70,7 @@ export function buildChunks(
 
     // 区切った直後はカウンタが戻るのでキーを振り直す
     const k = item.userId && mentionCount < MAX_MENTIONS ? `m${mentionCount + 1}` : null;
-    body += `\n${item.text}${k ? ` {${k}}` : ""}`;
+    body += `\n${withKey(item, k)}`;
     if (k && item.userId) {
       mentions[k] = item.userId;
       mentionCount += 1;

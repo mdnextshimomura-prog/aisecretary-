@@ -580,6 +580,8 @@ export async function getUpcomingTasks(opts: { followup?: boolean } = {}): Promi
     origin: string | null;
     /** いま入っているリマインド番号。無ければ null */
     remindNumber: number | null;
+    /** 物件名。空なら null（担当へのまとめ STAFF_DIGEST が添える。ほかは読まない） */
+    propertyName: string | null;
   }>
 > {
   const tomorrowStr = jstDateStr(1);
@@ -686,6 +688,14 @@ export async function getUpcomingTasks(opts: { followup?: boolean } = {}): Promi
       remindNumber:
         (props["リマインド番号"] as { number: number | null } | undefined)
           ?.number ?? null,
+      propertyName:
+        (
+          props["物件名"] as
+            | { rich_text: Array<{ plain_text: string }> }
+            | undefined
+        )?.rich_text
+          ?.map((r) => r.plain_text)
+          .join("") || null,
     };
   });
 }

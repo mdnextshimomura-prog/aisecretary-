@@ -287,6 +287,61 @@ export async function pushLineChunks(
   }
 }
 
+// pushLineChunks と同じ中身を同じ順で送り、送れた通数と、送ったメッセージの ID（応答の sentMessages[0].id）を返す
+// （担当へのまとめ STAFF_DIGEST：まとめを引用した返信の照合に ID を控える）。
+// pushLineChunks・pushLineMessageWithMentions は変えていない。例外は投げない。本文・宛先はログに出さない。
+export async function pushLineChunksWithIds(
+  to: string,
+  chunks: Array<{ text: string; mentions: Record<string, string> }>
+): Promise<{ sent: number; ids: string[] }> {
+  let sent = 0;
+  const ids: string[] = [];
+  for (const c of chunks) {
+    const keys = Object.keys(c.mentions);
+    const message: Record<string, unknown> =
+      keys.length === 0
+        ? { type: "text", text: c.text }
+        : {
+            type: "textV2",
+            text: c.text,
+            substitution: Object.fromEntries(
+              keys.map((k) => [
+                k,
+                {
+                  type: "mention",
+                  mentionee: { type: "user", userId: c.mentions[k] },
+                },
+              ])
+            ),
+          };
+    try {
+      const res = await fetch("https://api.line.me/v2/bot/message/push", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${ACCESS_TOKEN}`,
+        },
+        body: JSON.stringify({ to, messages: [message] }),
+      });
+      if (!res.ok) {
+        console.error("LINE push失敗:", res.status);
+        continue;
+      }
+      sent += 1;
+      try {
+        const data = (await res.json()) as { sentMessages?: Array<{ id?: unknown }> };
+        const id = data.sentMessages?.[0]?.id;
+        if (typeof id === "string" && id) ids.push(id);
+      } catch {
+        // 応答が読めない（送信は成功。ID は控えられない）
+      }
+    } catch (err) {
+      console.error("LINE push の結果が分からない:", (err as { name?: string })?.name ?? "Error");
+    }
+  }
+  return { sent, ids };
+}
+
 
 // ── 返事の結果を3つに分けて返す（設計 2026-10-09 の 14） ──
 //

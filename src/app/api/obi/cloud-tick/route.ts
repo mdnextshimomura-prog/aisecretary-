@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { handleCloudTick } from "@/lib/obi/cloud-entry";
 import { runDueRemindersOnTick } from "@/lib/remind-due";
+import { runStaffDigestEveningOnTick } from "@/lib/staff-digest";
 import { sweepGroupSateiOnTick, sweepGroupSateiStage2OnTick } from "@/lib/group-satei-wire";
 
 // 帯替えの完成リンク・差し戻し・失敗の知らせを、クラウドから出す毎分の見回り（設計 2026-10-11 の C1）。
@@ -23,6 +24,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     await runDueRemindersOnTick(Date.now()).catch((err) => {
       const name = (err as { name?: unknown } | null)?.name;
       console.error(`[remind-due] tick error ${typeof name === "string" ? name : "Error"}`);
+    });
+    // 担当へのまとめ（夕方）の相乗り。STAFF_DIGEST=1 のとき、JST 17時台に1日1回だけ（KV の印）。
+    // off・17時台以外は KV も Notion も触らない。失敗しても、見回りの応答は変えない
+    await runStaffDigestEveningOnTick(Date.now()).catch((err) => {
+      const name = (err as { name?: unknown } | null)?.name;
+      console.error(`[staff-digest] eve error ${typeof name === "string" ? name : "Error"}`);
     });
     // 普通のグループの査定依頼の掃除：知らせの出ていない受付票を、読み直さずに知らせる（AI は呼ばない。
     // CRM 8秒＋名前3秒＋送信の程度）。上の処理で 30 秒を使っていたら、この回は飛ばす（次の回に回す）

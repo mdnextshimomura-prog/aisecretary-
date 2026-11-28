@@ -18,6 +18,7 @@ import { listTasks } from "./notion";
 import { pushCard } from "./line";
 import { sendRemindCards } from "./remind-cards";
 import { splitForGroup } from "./task-origin";
+import { buildStaffDigest, sendDigestChunks, staffDigestOn } from "./staff-digest";
 
 /**
  * 送信に失敗した「担当者への引き渡し」を送り直す。
@@ -206,22 +207,36 @@ export async function sendDailyReminders(): Promise<void> {
       ? "\n相手待ち：「3待ち 売主の書類 金曜」\n期日を変える：「3延期 10/20」\nやらなくてよい：「3不要」"
       : "");
 
-  const chunks = buildChunks("🔔 本日のリマインドです", items, footer);
+  // STAFF_DIGEST=1 のときだけ、文の形を「担当へのまとめ」（担当ごとの箇条書き）に替える。
+  // 選び方・休みの扱いは上のまま。番号は、まとめに載せた順に1から振る（載せる順が担当ごとに変わるため）。
+  // off なら digest は null で、下は足す前と同じ（order は shown そのもの）。
+  const digest = staffDigestOn()
+    ? buildStaffDigest({ slot: "am", tasks, today: todayStr, tomorrow: tomorrowStr, followup })
+    : null;
+  const order: UpcomingTask[] = digest ? digest.ordered.map((o) => o.task) : shown;
+  const chunks = digest
+    ? digest.chunks
+    : buildChunks("🔔 本日のリマインドです", items, footer);
 
   // 本文に載せた順で番号を確定させてから送る。
   // 送信後に番号を振ると、先に返信されたときに引けないため順序が重要。
   if (followup) {
-    await clearStaleRemindNumbers(shown.map((t) => t.id)).catch((e) =>
+    await clearStaleRemindNumbers(order.map((t) => t.id)).catch((e) =>
       console.error("[remind] 古い番号の掃除でエラー（続行）:", e)
     );
   }
-  await Promise.all(shown.map((t, i) => setRemindNumber(t.id, i + 1)));
-  await pushLineChunks(LINE_GROUP_ID, chunks);
+  await Promise.all(order.map((t, i) => setRemindNumber(t.id, i + 1)));
+  if (digest) {
+    // まとめは、送ったメッセージの ID を KV に控える（引用した返信の照合用）。ログは件数だけ
+    await sendDigestChunks("am", chunks, order.length, Date.now());
+  } else {
+    await pushLineChunks(LINE_GROUP_ID, chunks);
+  }
 
   // TASK_REMIND_CARDS=1 のときだけ、同じタスクを同じ順でボタンつきのカードにして1通足す（off なら何もしない）
   await sendRemindCards(
     LINE_GROUP_ID,
-    shown.map((t) => ({
+    order.map((t) => ({
       id: t.id,
       title: t.title,
       dueDate: t.dueDate || null,
