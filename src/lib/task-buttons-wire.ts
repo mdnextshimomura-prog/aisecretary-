@@ -75,6 +75,9 @@ import {
   type ButtonTask,
   type FlexMessage,
 } from "./task-buttons";
+import { staffDigestOn } from "./staff-digest";
+import { parseSdData } from "./staff-digest-reply";
+import { handleStaffDigestPostback } from "./staff-digest-reply-wire";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
@@ -388,6 +391,17 @@ export async function handleTaskPostbackEvent(
       },
     );
     return;
+  }
+  // 担当へのまとめの［催促する］（v1|sd|<JSTの日付>。段階3）。STAFF_DIGEST=1 のときだけ振り分ける
+  // （off なら今までどおり下へ）。押せる人・二度押し・前の日のカードは staff-digest-reply.ts
+  if (staffDigestOn()) {
+    const sd = parseSdData(data);
+    if (sd) {
+      await handleStaffDigestPostback(sd, event.source, async (text) => {
+        await io.reply(replyToken, text);
+      });
+      return;
+    }
   }
   const op = parseButtonData(data)?.op ?? "invalid";
 

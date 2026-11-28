@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { handleCloudTick } from "@/lib/obi/cloud-entry";
 import { runDueRemindersOnTick } from "@/lib/remind-due";
 import { runStaffDigestEveningOnTick } from "@/lib/staff-digest";
+import { flushStaffDigestForwardOnTick } from "@/lib/staff-digest-reply-wire";
 import { sweepGroupSateiOnTick, sweepGroupSateiStage2OnTick } from "@/lib/group-satei-wire";
 
 // 帯替えの完成リンク・差し戻し・失敗の知らせを、クラウドから出す毎分の見回り（設計 2026-10-11 の C1）。
@@ -31,6 +32,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const name = (err as { name?: unknown } | null)?.name;
       console.error(`[staff-digest] eve error ${typeof name === "string" ? name : "Error"}`);
     });
+    // 担当へのまとめ・段階3：グループでの番号の返事を、30分に1回まとめて下村さんの 1対1 へ（STAFF_DIGEST=1 のときだけ。
+    // off なら KV も触らない。印が取れない回は KV を1回たたくだけ）。例外は投げない
+    await flushStaffDigestForwardOnTick(Date.now());
     // 普通のグループの査定依頼の掃除：知らせの出ていない受付票を、読み直さずに知らせる（AI は呼ばない。
     // CRM 8秒＋名前3秒＋送信の程度）。上の処理で 30 秒を使っていたら、この回は飛ばす（次の回に回す）
     if (Date.now() - t0 < 30_000) await sweepGroupSateiOnTick();

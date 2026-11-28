@@ -70,6 +70,7 @@ const SAMPLE: Row[] = [
         "相手待ち：「2待ち 売主の書類 金曜」",
         "期日を変える：「3延期 10/20」",
         "やらなくてよい：「3不要」",
+        "進み具合を書く：「3 アポ取れました。来週火曜です」",
       ].join("\n")
     );
     assert.deepEqual(d.chunks[0].mentions, { m1: U1 });
@@ -100,7 +101,7 @@ const SAMPLE: Row[] = [
     const text = d.chunks[0].text;
     assert.ok(text.includes("1. （m1）の件（本日期限）［A（B）］\n2. 天満ハイツの鍵（本日期限）\n3. 条件の確認（回答待ち）"));
     assert.ok(!text.includes("待ち："));
-    assert.ok(text.endsWith("例：「1済」「1,2完了」"));
+    assert.ok(text.endsWith("例：「1済」「1,2完了」\n進み具合を書く：「3 アポ取れました。来週火曜です」"));
     assert.deepEqual(d.chunks[0].mentions, {});
   });
 
@@ -216,6 +217,20 @@ const SAMPLE: Row[] = [
     assert.deepEqual(f.logs, ["[staff-digest] eve fetch-failed Error"]);
     assert.equal(await D.runStaffDigestEveningOnTick(EVE + MIN, ON, f.deps), "sent");
     assert.equal(f.pushed.length, 1);
+  });
+
+  await t("段階3：夕方のまとめを送る直前に1回だけ beforeSend（いま未完了の全タスクつき）。失敗しても夕方のまとめは送る。0件・休業日は呼ばない", async () => {
+    const f = fake({ tasks: EVE_TASKS });
+    const seen: Array<[string, number, number]> = [];
+    const fd: import("../src/lib/staff-digest").EveningDeps = { ...f.deps, beforeSend: async (day, all) => { seen.push([day, all.length, f.pushed.length]); throw new Error("x"); } };
+    assert.equal(await D.runStaffDigestEveningOnTick(EVE, ON, fd), "sent");
+    assert.equal(await D.runStaffDigestEveningOnTick(EVE + MIN, ON, fd), "taken");
+    assert.deepEqual(seen, [["2026-11-28", EVE_TASKS.length, 0]]);
+    assert.deepEqual(f.logs, ["[staff-digest] nudge ask-failed", "[staff-digest] eve sent 2"]);
+    const g = fake({ tasks: [row("d", "明日・今日入った", TOMORROW)] });
+    let called = 0;
+    assert.equal(await D.runStaffDigestEveningOnTick(EVE, ON, { ...g.deps, beforeSend: async () => { called++; } }), "empty");
+    assert.equal(called, 0);
   });
 
   await t("1通も送れなかったら failed（印は残す＝送り直さない）。ID は控えない", async () => {

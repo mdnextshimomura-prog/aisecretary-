@@ -79,14 +79,15 @@ function taskLine(n: number, t: DigestTask, today: string, tomorrow: string, fol
 }
 
 function footerOf(followup: boolean): string {
-  // 例は、いま受け付ける言葉だけを載せる（自由な文の進捗「3 アポ取れました」は段階3で受けるようになってから足す）
+  // 例は、いま受け付ける言葉だけを載せる。自由な文の進捗（段階3）は、このまとめを引用した返信だけ受ける
   return (
     "\n\n──────────\n" +
     "このメッセージに返信（リプライ）で、番号をつけて答えてください\n" +
     "例：「1済」「1,2完了」" +
     (followup
       ? "\n相手待ち：「2待ち 売主の書類 金曜」\n期日を変える：「3延期 10/20」\nやらなくてよい：「3不要」"
-      : "")
+      : "") +
+    "\n進み具合を書く：「3 アポ取れました。来週火曜です」"
   );
 }
 
@@ -240,6 +241,8 @@ export async function saveDigestMessageIds(
 
 const LINE_GROUP_ID =
   process.env.LINE_GROUP_ID ?? "Cd5fda3261e9bdd012e598884b2e6a696";
+/** まとめの送り先（段階3 の催促も同じグループへ出す） */
+export const DIGEST_GROUP_ID = LINE_GROUP_ID;
 
 export interface DigestSendDeps {
   /** グループへ順に送り、送れた通数とメッセージ ID を返す */
@@ -297,6 +300,11 @@ export interface EveningDeps extends DigestSendDeps {
   /** 朝のリマインドと同じ選び方で、いま未完了のタスクを引く */
   fetchTasks(): Promise<EveTask[]>;
   setNumber(id: string, n: number): Promise<void>;
+  /**
+   * 段階3：夕方のまとめを送る直前に1回（朝のまとめに返事の無いタスクを、下村さんへ［催促する］のカードで知らせる）。
+   * all＝いま未完了のタスク（朝と同じ引き方）。無ければ何もしない。失敗しても夕方のまとめは送る
+   */
+  beforeSend?(day: string, all: EveTask[]): Promise<void>;
 }
 
 /** 朝のリマインド（sendDailyReminders）と同じ引き方・同じ絞り方 */
@@ -321,6 +329,8 @@ function realEveningDeps(): EveningDeps {
     closedToday: async (day) => closureOn(day, await loadClosures().catch(() => [])) !== null,
     fetchTasks: fetchLikeMorning,
     setNumber: setRemindNumber,
+    // 読み込みの輪を作らないよう、使うときに読む（staff-digest-reply-wire は このファイルを読む）
+    beforeSend: async (day, all) => (await import("./staff-digest-reply-wire")).askNudgeBeforeEvening(day, all),
   };
 }
 
@@ -349,8 +359,9 @@ export async function runStaffDigestEveningOnTick(
 
   let chunks: Chunk[];
   let count: number;
+  let all: EveTask[];
   try {
-    const all = await d.fetchTasks();
+    all = await d.fetchTasks();
     const selected = selectEvening(all, today, tomorrow);
     if (selected.length === 0) {
       d.log("[staff-digest] eve empty");
@@ -369,6 +380,9 @@ export async function runStaffDigestEveningOnTick(
     await d.release(today).catch(() => undefined);
     return "failed";
   }
+
+  // 段階3：夕方のまとめの前に、朝のまとめに返事の無いタスクを下村さんへ知らせる（失敗しても夕方のまとめは送る）
+  if (d.beforeSend) await d.beforeSend(today, all).catch(() => d.log("[staff-digest] nudge ask-failed"));
 
   // 送り始めたあとは印を残す（届いたか分からないものを送り直さない）
   return (await sendDigestChunks("eve", chunks, count, now, d)) > 0 ? "sent" : "failed";

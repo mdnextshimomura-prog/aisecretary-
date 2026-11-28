@@ -228,7 +228,12 @@ export async function sendDailyReminders(): Promise<void> {
   await Promise.all(order.map((t, i) => setRemindNumber(t.id, i + 1)));
   if (digest) {
     // まとめは、送ったメッセージの ID を KV に控える（引用した返信の照合用）。ログは件数だけ
-    await sendDigestChunks("am", chunks, order.length, Date.now());
+    const sentAm = await sendDigestChunks("am", chunks, order.length, Date.now());
+    // 段階3：送れた朝だけ、出したタスクを KV に控える（夕方の前の「返事が無い」の判定用。失敗しても投げない）
+    if (sentAm > 0) {
+      const { saveMorningSnapshotReal } = await import("./staff-digest-reply-wire");
+      await saveMorningSnapshotReal(todayStr, digest.ordered);
+    }
   } else {
     await pushLineChunks(LINE_GROUP_ID, chunks);
   }

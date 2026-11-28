@@ -114,6 +114,8 @@ import {
   followupEnabled,
 } from "@/lib/task-status";
 import { statusDeps } from "@/lib/task-status-wire";
+import { statusWhat } from "@/lib/staff-digest-reply";
+import { noteGroupReply, tapFound, tryDigestProgressReply } from "@/lib/staff-digest-reply-wire";
 import {
   MSG_CLOSED,
   MSG_UNCONFIRMED,
@@ -947,6 +949,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       continue;
     }
 
+    // ①-1b 担当へのまとめへの返信のうち、自由な文の進捗（段階3。STAFF_DIGEST=1 のときだけ。off なら KV も読まずに下へ）。
+    // 受けるのは「まとめ（staffdigest:msg:*）を引用している・グループ・行の頭が番号・進捗の行が1つ以上」のときだけ。
+    // 引用の無い「3 …」、今の言葉だけの返事（「3済」「3待ち …」）は handled=false で、今までの流れがそのまま扱う。
+    // ここに置くのは、①-2（初動確認への回答）と②（「1済\n2 まだです」を1・2 の完了と読む）に先に取られないため。
+    {
+      const sd = await tryDigestProgressReply({
+        text: stripMentions(event.message),
+        quotedMessageId: event.message.quotedMessageId,
+        groupId: source.groupId,
+        userId: source.userId,
+        replyToken,
+        parseCompletion: parseNumberedCompletion,
+      });
+      if (sd.handled) {
+        if (sd.committed) markCommitted();
+        continue;
+      }
+    }
+
     // ①-2 初動確認への返事。
     //
     // ②の番号完了より前に置く。ここを後ろにすると、確認への回答が
@@ -1162,6 +1183,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (numbers) {
       try {
         const done: string[] = [];
+        const doneTasks: Array<{ id: string; title: string }> = [];
         const notFound: number[] = [];
         for (const n of numbers) {
           const t = await findTaskByRemindNumber(n, {
@@ -1175,6 +1197,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           await completeTask(t.id);
           markCommitted();
           done.push(`${n}. ${t.title}`);
+          doneTasks.push(t);
         }
 
         const lines: string[] = [];
@@ -1191,6 +1214,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           );
         }
         await sendLineMessage(replyToken, lines.join("\n"));
+        // 段階3：グループでの返事を下村さんへの知らせに控える（STAFF_DIGEST=1 のときだけ。投げない）
+        await noteGroupReply(source, doneTasks, "済");
       } catch (err) {
         console.error("番号での完了処理エラー:", err);
         await sendLineMessage(
@@ -1210,12 +1235,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
       if (statusCmd) {
         try {
-          const r = await applyStatusCommand(
-            statusCmd,
-            statusDeps(Boolean(source.groupId))
-          );
+          // 番号で引けたタスクを横で控える（段階3 の知らせ用。処理は今のまま）
+          const tap = tapFound(statusDeps(Boolean(source.groupId)));
+          const r = await applyStatusCommand(statusCmd, tap.deps);
           if (r.changed > 0) markCommitted();
           await sendLineMessage(replyToken, r.text);
+          if (r.changed > 0) await noteGroupReply(source, tap.hits, statusWhat(statusCmd));
         } catch (err) {
           console.error("状況の返事の処理エラー:", err);
           await sendLineMessage(
@@ -1406,6 +1431,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               replyToken,
               `🗑 タスクを取り消しました\n📋 ${task.title}`
             );
+            await noteGroupReply(source, [task], "取り消し");
           } catch (err) {
             console.error("タスク取り消しエラー:", err);
           }
@@ -1419,6 +1445,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               replyToken,
               `☑️ 完了にしました\n📋 ${task.title}`
             );
+            await noteGroupReply(source, [task], "済");
           } catch (err) {
             console.error("タスク完了エラー:", err);
             await sendLineMessage(
@@ -1440,6 +1467,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               const text = await applyStatusToTask(body, task, statusDeps());
               markCommitted();
               await sendLineMessage(replyToken, text);
+              // 「延期」だけで日付が無いときは書き換えていないので控えない
+              if (body.kind !== "postpone" || body.date) await noteGroupReply(source, [task], statusWhat(body));
             } catch (err) {
               console.error("状況の返事（引用）の処理エラー:", err);
               await sendLineMessage(
