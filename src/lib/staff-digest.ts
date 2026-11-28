@@ -105,11 +105,12 @@ export function digestNotionUrl(env: Env = process.env): string | null {
 const notionLine = (url: string | null | undefined) => (url ? `\nくわしく書くときは Notion へ：${url}` : "");
 
 /** 担当1人ぶんの返信の案内（人ごとに繰り返すので短く。例の番号は、その通に載せた番号を使う） */
+const PERSON_FOOT = "このメッセージに返信（リプライ）で答えてください";
 function personFooter(nums: number[], followup: boolean): string {
   const a = nums[0];
   const b = nums[1] ?? nums[0];
   return (
-    "このメッセージに返信（リプライ）で答えてください\n" +
+    `${PERSON_FOOT}\n` +
     `例：「${a}済」「${b} アポ取れました。来週火曜です」` +
     (followup ? `「${b}待ち 売主の書類 金曜」` : "")
   );
@@ -137,6 +138,8 @@ export interface DigestInput<T extends DigestTask> {
   numbers?: Map<string, number>;
   /** 各通の末尾に添える Notion のリンク（digestNotionUrl）。無ければ行を足さない */
   notionUrl?: string | null;
+  /** 見出しの問いかけを替える（個人 LINE に返事がなかった分の張り出し＝STAFF_DIGEST_DM だけが使う）。無ければ今の文 */
+  ask?: string;
 }
 
 export interface DigestOutput<T extends DigestTask> {
@@ -172,6 +175,7 @@ export function buildStaffDigest<T extends DigestTask>(input: DigestInput<T>): D
   const messages: DigestMessage[] = [];
   // Notion のリンクの行（無ければ ""。長さは1通の上限の計算にも入れる）
   const link = notionLine(input.notionUrl);
+  const ask = input.ask ?? ASK[slot];
   // 1人ぶんを1通に組む。4200字を超えるときだけ、見出しと案内をくり返して次の通に分ける
   const emit = (head: string, mentions: Record<string, string>, uid: string | null, list: T[], foot: (nums: number[]) => string) => {
     let lines: string[] = [];
@@ -196,17 +200,44 @@ export function buildStaffDigest<T extends DigestTask>(input: DigestInput<T>): D
 
   for (const g of Array.from(groups.values())) {
     // userId が無い担当はメンションできないので名前で呼ぶ
-    if (g.userId) emit(`{m1} ${ASK[slot]}`, { m1: g.userId }, g.userId, g.tasks, (nums) => personFooter(nums, followup) + link);
-    else emit(`${sanitizeForTextV2(g.name ?? "")}さん ${ASK[slot]}`, {}, null, g.tasks, (nums) => personFooter(nums, followup) + link);
+    if (g.userId) emit(`{m1} ${ask}`, { m1: g.userId }, g.userId, g.tasks, (nums) => personFooter(nums, followup) + link);
+    else emit(`${sanitizeForTextV2(g.name ?? "")}さん ${ask}`, {}, null, g.tasks, (nums) => personFooter(nums, followup) + link);
   }
   if (unassigned.length > 0) emit(UNASSIGNED_HEAD, {}, null, unassigned, () => UNASSIGNED_FOOT + link);
 
   return { messages, ordered };
 }
 
+// ── 個人 LINE（1対1）あての文（STAFF_DIGEST_DM=1 のときだけ使う。staff-digest-dm.ts） ──
+
+export const DM_FOOT = "このトークに、番号をつけて返信してください";
+export const DM_ESC_NOTE: Record<DigestSlot, string> = {
+  am: "返事がない分は、9時にグループへ出します",
+  eve: "返事がない分は、18時にグループへ出します",
+};
+
+/**
+ * 担当1人ぶんの通（グループあて）から、同じ人の 1対1 あての文を作る。
+ * 箇条書き・例・Notion の行は同じ。見出しのメンションを外し、案内を「このトークに、番号をつけて…」に替え、
+ * 例のあとに「返事がない分は、9時（夕方は18時）にグループへ出します」を足す。
+ * 担当者ID の無い通・担当なしの通・形の違う通は null（＝グループへ今までどおり送る）。
+ */
+export function dmTextOf(m: DigestMessage, slot: DigestSlot): string | null {
+  const head = `{m1} ${ASK[slot]}\n`;
+  if (!m.uid || !m.chunk.text.startsWith(head)) return null;
+  const body = m.chunk.text.slice("{m1} ".length);
+  const mark = `\n\n${PERSON_FOOT}\n`;
+  const at = body.lastIndexOf(mark);
+  if (at < 0) return null;
+  // 案内のあと：例の1行（＋ Notion の行）
+  const [example, ...rest] = body.slice(at + mark.length).split("\n");
+  if (!example.startsWith("例：")) return null;
+  return [body.slice(0, at), "", DM_FOOT, example, DM_ESC_NOTE[slot], ...rest].join("\n");
+}
+
 // ── 夕方に出すもの・番号 ──
 
-type EveTask = DigestTask & {
+export type EveTask = DigestTask & {
   remindNumber: number | null;
   /** ページの最終更新（Notion の last_edited_time）。段階3 の「Notion で更新＝返事あり」が読む。無くてもよい */
   lastEdited?: string;
@@ -285,7 +316,7 @@ export interface DigestMsgRow {
 /** 送ったまとめを1通ずつ控える：staffdigest:msg:<id> = {at, slot, nums, uid}。無ければ KV を触らない */
 export async function saveDigestMessages(
   rows: DigestMsgRow[],
-  slot: DigestSlot,
+  slot: DigestSlot | "am-esc" | "eve-esc",
   now: number,
   store: DigestMsgKv = realMsgKv
 ): Promise<void> {
@@ -305,12 +336,13 @@ export interface DigestSendDeps {
    * （送れなかった・分からなかった通は null）を返す
    */
   push(chunks: Chunk[]): Promise<{ sent: number; ids: Array<string | null> }>;
-  saveMsgs(rows: DigestMsgRow[], slot: DigestSlot, now: number): Promise<void>;
+  saveMsgs(rows: DigestMsgRow[], slot: DigestSlot | "am-esc" | "eve-esc", now: number): Promise<void>;
   log(line: string): void;
 }
 /** まとめの送信は1回の push ごとにここまで（毎分の見回り・朝の cron を止めない） */
 const DIGEST_PUSH_TIMEOUT_MS = 8_000;
-const realSendDeps: DigestSendDeps = {
+/** 本物の送り方（個人 LINE あての道 staff-digest-dm-wire.ts も、グループへ回す分に同じものを使う） */
+export const realSendDeps: DigestSendDeps = {
   push: (chunks) => pushChunksBatchedWithIds(LINE_GROUP_ID, chunks, DIGEST_PUSH_TIMEOUT_MS),
   saveMsgs: (rows, slot, now) => saveDigestMessages(rows, slot, now),
   log: (l) => console.log(l),
@@ -376,6 +408,11 @@ export interface EveningDeps extends DigestSendDeps {
   morningMax?(day: string): Promise<number>;
   /** 送る前の準備（休業日・タスク・番号・催促のカード）に使ってよい時間。省けば 25 秒（テスト用） */
   budgetMs?: number;
+  /**
+   * 個人 LINE へ先に送る（STAFF_DIGEST_DM=1 のときだけ本物が入る）。友だちの担当は 1対1 へ、ほかは今までどおりグループへ。
+   * 無ければ今までどおり全部グループへ（sendDigestMessages）。送れた通数を返す
+   */
+  sendSplit?(day: string, messages: DigestMessage[], ordered: Array<{ task: EveTask; n: number }>, now: number): Promise<number>;
 }
 
 /** 送る前の準備の上限。印を取ってから、ここまでに「送り始める」か「印を外す」 */
@@ -395,7 +432,7 @@ function bounded<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 /** 朝のリマインド（sendDailyReminders）と同じ引き方・同じ絞り方 */
-async function fetchLikeMorning(): Promise<EveTask[]> {
+export async function fetchLikeMorning(): Promise<EveTask[]> {
   const followup = followupEnabled();
   const today = jstDay(Date.now());
   const { shown } = splitForGroup(await getUpcomingTasks({ followup }));
@@ -404,9 +441,16 @@ async function fetchLikeMorning(): Promise<EveTask[]> {
     : shown;
 }
 
-function realEveningDeps(): EveningDeps {
+function realEveningDeps(env: Env = process.env): EveningDeps {
   return {
     ...realSendDeps,
+    // 個人 LINE へ先に送る（STAFF_DIGEST_DM=1 のときだけ。off なら入れない＝今までどおり全部グループへ）
+    ...(env.STAFF_DIGEST_DM === "1"
+      ? {
+          sendSplit: async (day: string, messages: DigestMessage[], ordered: Array<{ task: EveTask; n: number }>, now: number) =>
+            (await import("./staff-digest-dm-wire")).sendDigestWithDmReal("eve", day, messages, ordered, now),
+        }
+      : {}),
     followup: followupEnabled(),
     claim: async (day) => (await kv.set(digestEveKey(day), 1, { nx: true, ex: EVE_MARK_TTL_SEC })) === "OK",
     release: async (day) => {
@@ -440,7 +484,7 @@ export async function runStaffDigestEveningOnTick(
 ): Promise<EveningResult> {
   if (!staffDigestOn(env)) return "off";
   if (jstHour(now) !== EVE_HOUR) return "skip";
-  const d = deps ?? realEveningDeps();
+  const d = deps ?? realEveningDeps(env);
   const today = jstDay(now);
   const tomorrow = jstDay(now + 86_400_000);
   // 印を取ったあとの準備には時間の上限を付ける（見回りが途中で切られると、印だけ残ってその日は送られないため）。
@@ -454,6 +498,7 @@ export async function runStaffDigestEveningOnTick(
   let messages: DigestMessage[];
   let count: number;
   let all: EveTask[];
+  let ordered: Array<{ task: EveTask; n: number }>;
   try {
     if (await bounded(d.closedToday(today), left() - slice)) {
       d.log("[staff-digest] eve closed");
@@ -473,6 +518,7 @@ export async function runStaffDigestEveningOnTick(
     const built = buildStaffDigest({ slot: "eve", tasks: selected, today, tomorrow, followup: d.followup, numbers, notionUrl: digestNotionUrl(env) });
     messages = built.messages;
     count = built.ordered.length;
+    ordered = built.ordered;
   } catch (err) {
     // まだ何も送っていないので、印を外して次の見回りでやり直す（17時台のあいだ）
     const name = (err as { name?: unknown } | null)?.name;
@@ -490,5 +536,6 @@ export async function runStaffDigestEveningOnTick(
   }
 
   // 送り始めたあとは印を残す（届いたか分からないものを送り直さない）
+  if (d.sendSplit) return (await d.sendSplit(today, messages, ordered, now)) > 0 ? "sent" : "failed";
   return (await sendDigestMessages("eve", messages, count, now, d)) > 0 ? "sent" : "failed";
 }

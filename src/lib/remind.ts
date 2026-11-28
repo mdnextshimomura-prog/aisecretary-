@@ -19,6 +19,7 @@ import { pushCard } from "./line";
 import { sendRemindCards } from "./remind-cards";
 import { splitForGroup } from "./task-origin";
 import { buildStaffDigest, digestNotionUrl, sendDigestMessages, staffDigestOn } from "./staff-digest";
+import { staffDigestDmOn } from "./staff-digest-dm";
 
 /**
  * 送信に失敗した「担当者への引き渡し」を送り直す。
@@ -227,7 +228,11 @@ export async function sendDailyReminders(): Promise<void> {
   await Promise.all(order.map((t, i) => setRemindNumber(t.id, i + 1)));
   if (digest) {
     // まとめは担当ごとに1通（5通までを1回の push にまとめる）。送ったメッセージの ID と番号を KV に控える（引用した返信の照合用）。ログは件数だけ
-    const sentAm = await sendDigestMessages("am", digest.messages, order.length, Date.now());
+    // STAFF_DIGEST_DM=1 のときだけ、友だちの担当の通は個人 LINE（1対1）へ先に送る（ほかは今までどおりグループへ。
+    // 1対1 に送れなかった人の分は、その場でグループへ回す）。off なら足す前と同じ1行
+    const sentAm = staffDigestDmOn()
+      ? await (await import("./staff-digest-dm-wire")).sendDigestWithDmReal("am", todayStr, digest.messages, digest.ordered, Date.now())
+      : await sendDigestMessages("am", digest.messages, order.length, Date.now());
     // 段階3：送れた朝だけ、出したタスクを KV に控える（夕方の前の「返事が無い」の判定用。失敗しても投げない）
     if (sentAm > 0) {
       const { saveMorningSnapshotReal } = await import("./staff-digest-reply-wire");

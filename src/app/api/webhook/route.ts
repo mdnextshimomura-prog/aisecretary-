@@ -120,6 +120,7 @@ import { staffDigestOn } from "@/lib/staff-digest";
 import { handleStaffAskText } from "@/lib/staff-ask-wire";
 import { statusWhat } from "@/lib/staff-digest-reply";
 import { noteGroupReply, tapFound, tryDigestProgressReply } from "@/lib/staff-digest-reply-wire";
+import { staffDmPassage } from "@/lib/staff-digest-dm-wire";
 import {
   MSG_CLOSED,
   MSG_UNCONFIRMED,
@@ -766,6 +767,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // ログには種類と理由だけ出す（ID・本文は出さない）。再送は要らないので 200 のまま。
     const gate = checkSecretarySource(event.source);
     if (!gate.ok) {
+      // 個人 LINE へ先に送ったまとめ（STAFF_DIGEST_DM=1 のときだけ。off なら何も呼ばずに false）への、担当の 1対1 の返事だけを通す細い口。
+      // 許可リストに無い人の 1対1 のメッセージで、その人に 1対1 のまとめの控え（staffdigest:dmuser:<userId>）が生きているときだけ受け、
+      // 番号つきの進捗の返事として扱って、ここで終わる（下の今ある機能＝タスクの登録・メニュー・メール・査定へは渡さない）。
+      if (await staffDmPassage(event, gate.reason, parseNumberedCompletion)) continue;
       console.log("送り主の制限で読み飛ばし:", event.source?.type ?? "unknown", gate.reason);
       continue;
     }

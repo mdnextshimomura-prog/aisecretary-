@@ -84,7 +84,7 @@ async function roster(): Promise<Member[]> {
 }
 
 /** 名簿の名前（LINE のプロフィールは読まない）。分からなければ null */
-async function senderName(userId: string | null | undefined): Promise<string | null> {
+export async function senderName(userId: string | null | undefined): Promise<string | null> {
   if (!userId) return null;
   return (await roster()).find((m) => m.userIds.includes(userId))?.name ?? null;
 }
@@ -102,7 +102,7 @@ export async function noteGroupReply(
   await noteItems(src.userId, items.map((t) => ({ id: t.id, title: t.title, what })), undefined);
 }
 
-async function noteItems(
+export async function noteItems(
   userId: string | null | undefined,
   items: ReplyItem[],
   name: string | null | undefined,
@@ -151,6 +151,60 @@ export function tapFound(deps: StatusDeps): { deps: StatusDeps; hits: Array<{ id
 }
 
 /**
+ * 今の言葉（済・完了・待ち・延期・不要）の行の読み方と実行（まとめを引用した返信と、担当の 1対1 の返事 staff-digest-dm-wire.ts が同じものを使う）。
+ * accept：番号で引けたタスクを使ってよいか（1対1 の返事は、その人に送ったタスクだけ）。省けば今までどおり全部。
+ */
+export function knownLineDeps(
+  parseCompletion: (line: string) => number[] | null,
+  accept: (n: number, task: { id: string }) => boolean = () => true
+) {
+  const followup = followupEnabled();
+  const today = jstDateStr(0);
+  const guarded = (f: (n: number) => Promise<{ id: string; title: string } | null>) => async (n: number) => {
+    const t = await f(n);
+    return t && accept(n, t) ? t : null;
+  };
+  const find = guarded((n) => findTaskByRemindNumber(n, { anyDue: followup, inGroup: true }));
+  return {
+    followup,
+    today,
+    find,
+    // route.ts と同じ順：状況の言葉（待ち・延期・不要）を先に見てから、番号での完了。
+    // 完了は、番号＋完了の言葉だけの形に限る（「3 契約済みです」は進捗として残す。まとめを引用した返信の中だけの決まり）
+    isKnown: (line: string) =>
+      (followup && parseStatusCommand(line, today) !== null) || (isBareCompletion(line) && parseCompletion(line) !== null),
+    // 候補への返事（「1 登録」「2 なし」）は、まとめを引用していても今までの流れに任せる
+    isOther: (line: string) => parseCandidateCommand(line) !== null,
+    /** 今の言葉の行の番号 */
+    numbersOf: (line: string): number[] => (followup ? parseStatusCommand(line, today)?.numbers : undefined) ?? parseCompletion(line) ?? [],
+    runKnown: async (line: string): Promise<{ text: string; changed: ReplyItem[] }> => {
+      const cmd = followup ? parseStatusCommand(line, today) : null;
+      if (cmd) {
+        const base = statusDeps(true);
+        const tap = tapFound({ ...base, findByNumber: guarded(base.findByNumber) });
+        const r = await applyStatusCommand(cmd, tap.deps);
+        return { text: r.text, changed: r.changed > 0 ? tap.hits.map((t) => ({ ...t, what: statusWhat(cmd) })) : [] };
+      }
+      const done: Array<{ n: number; id: string; title: string }> = [];
+      const notFound: number[] = [];
+      for (const n of parseCompletion(line) ?? []) {
+        const t = await find(n);
+        if (!t) {
+          notFound.push(n);
+          continue;
+        }
+        await completeTask(t.id);
+        done.push({ n, ...t });
+      }
+      const lines: string[] = [];
+      if (done.length > 0) lines.push(`☑️ 完了にしました（${done.length}件）`, ...done.map((d) => `${d.n}. ${d.title}`));
+      if (notFound.length > 0) lines.push(`⚠️ ${notFound.join("・")}番は見つかりませんでした`, "（完了済みか、直近のリマインドに無い番号です）");
+      return { text: lines.join("\n"), changed: done.map((d) => ({ id: d.id, title: d.title, what: "済" })) };
+    },
+  };
+}
+
+/**
  * webhook から：まとめを引用した「番号＋自由な文」の返信を進捗として受ける。
  * parseCompletion は route.ts の「3済」の読み方（今の言葉かどうかの見分けと、進捗と混ざった行の実行に使う）。
  * handled が false なら、呼び手は今までの流れをそのまま続ける。
@@ -168,42 +222,15 @@ export async function tryDigestProgressReply(o: {
   parseCompletion(line: string): number[] | null;
 }): Promise<{ handled: boolean; committed: boolean }> {
   if (!staffDigestOn() || !o.groupId || !o.quotedMessageId) return { handled: false, committed: false };
-  const followup = followupEnabled();
-  const today = jstDateStr(0);
-  const find = (n: number) => findTaskByRemindNumber(n, { anyDue: followup, inGroup: true });
+  const k = knownLineDeps(o.parseCompletion);
+  const { followup, today, find } = k;
   try {
     return await handleDigestReply(o, {
       now: Date.now,
       kv: realKv,
-      // route.ts と同じ順：状況の言葉（待ち・延期・不要）を先に見てから、番号での完了。
-      // 完了は、番号＋完了の言葉だけの形に限る（「3 契約済みです」は進捗として残す。まとめを引用した返信の中だけの決まり）
-      isKnown: (line) =>
-        (followup && parseStatusCommand(line, today) !== null) || (isBareCompletion(line) && o.parseCompletion(line) !== null),
-      // 候補への返事（「1 登録」「2 なし」）は、まとめを引用していても今までの流れに任せる
-      isOther: (line) => parseCandidateCommand(line) !== null,
-      runKnown: async (line) => {
-        const cmd = followup ? parseStatusCommand(line, today) : null;
-        if (cmd) {
-          const tap = tapFound(statusDeps(true));
-          const r = await applyStatusCommand(cmd, tap.deps);
-          return { text: r.text, changed: r.changed > 0 ? tap.hits.map((t) => ({ ...t, what: statusWhat(cmd) })) : [] };
-        }
-        const done: Array<{ n: number; id: string; title: string }> = [];
-        const notFound: number[] = [];
-        for (const n of o.parseCompletion(line) ?? []) {
-          const t = await find(n);
-          if (!t) {
-            notFound.push(n);
-            continue;
-          }
-          await completeTask(t.id);
-          done.push({ n, ...t });
-        }
-        const lines: string[] = [];
-        if (done.length > 0) lines.push(`☑️ 完了にしました（${done.length}件）`, ...done.map((d) => `${d.n}. ${d.title}`));
-        if (notFound.length > 0) lines.push(`⚠️ ${notFound.join("・")}番は見つかりませんでした`, "（完了済みか、直近のリマインドに無い番号です）");
-        return { text: lines.join("\n"), changed: done.map((d) => ({ id: d.id, title: d.title, what: "済" })) };
-      },
+      isKnown: k.isKnown,
+      isOther: k.isOther,
+      runKnown: k.runKnown,
       findByNumber: find,
       appendNote: appendTaskNote,
       senderName,

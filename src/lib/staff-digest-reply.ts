@@ -122,7 +122,7 @@ export type ReplyEntry =
   | { kind: "known"; raw: string }
   | { kind: "progress"; numbers: number[]; body: string };
 
-const normalize = (s: string) =>
+export const normalizeReplyLine = (s: string) =>
   s.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0)).replace(/　/g, " ").trim();
 
 // 番号（「3」「1,2」）のあとに、必ず区切り（空白か . ． : ： ) ） 、）を置いた形だけ読む。
@@ -130,7 +130,7 @@ const normalize = (s: string) =>
 const PROGRESS_RE = /^(\d{1,2}(?:[,、，・]\d{1,2})*)(\s*[.．:：）)、]\s*|\s+)(\S[\s\S]*)$/;
 const BODY_MAX = 1500;
 
-function parseProgressLine(line: string): { numbers: number[]; body: string } | null {
+export function parseProgressLine(line: string): { numbers: number[]; body: string } | null {
   const m = line.match(PROGRESS_RE);
   if (!m) return null;
   const body = m[3].trim();
@@ -153,7 +153,7 @@ export function parseDigestReply(
   /** ほかの機能の言葉（候補への「1 登録」「2 なし」）の行か。1行でもあれば読まない（今までの流れに任せる） */
   isOther?: (line: string) => boolean
 ): ReplyEntry[] | null {
-  const lines = text.split(/\r?\n/).map(normalize).filter((l) => l.length > 0);
+  const lines = text.split(/\r?\n/).map(normalizeReplyLine).filter((l) => l.length > 0);
   if (lines.length === 0) return null;
   if (isOther && lines.some(isOther)) return null;
   const entries: ReplyEntry[] = [];
@@ -182,7 +182,7 @@ export function parseDigestReply(
 const BARE_DONE_RE =
   /^\d{1,2}(?:[\s,、，・]+\d{1,2})*\s*[.．:：）)、]?\s*(済み?|完了|終わった|終わり|終わりました|おわった|おわり|おわりました|終了|done)(です|でした|しました|ました)?[。.!！\s]*$/i;
 export function isBareCompletion(line: string): boolean {
-  return BARE_DONE_RE.test(normalize(line));
+  return BARE_DONE_RE.test(normalizeReplyLine(line));
 }
 
 // ── 1. 進捗の取り込み ──
@@ -335,7 +335,7 @@ export function freeTextOf(
   isOther?: (line: string) => boolean
 ): string | null {
   if (input.hasMention) return null;
-  const lines = input.text.split(/\r?\n/).map(normalize).filter((l) => l.length > 0);
+  const lines = input.text.split(/\r?\n/).map(normalizeReplyLine).filter((l) => l.length > 0);
   if (lines.length === 0) return null;
   if (lines.some((l) => isKnown(l) || Boolean(isOther?.(l)))) return null;
   const joined = lines.join(" ");
@@ -400,7 +400,7 @@ export async function handleDigestReply(
     : freeTextOf({ text: input.text, hasMention: false }, () => false, deps.isOther);
   if (askBody === null && !input.mentionsBot) {
     // 1字の今の言葉（「済」）も返事として読む
-    const one = normalize(input.text);
+    const one = normalizeReplyLine(input.text);
     if (one && !/\n/.test(one) && !deps.isOther?.(one) && deps.isKnown(`1 ${one}`)) askBody = one;
   }
   if (!entries && free === null && askBody === null) return pass;

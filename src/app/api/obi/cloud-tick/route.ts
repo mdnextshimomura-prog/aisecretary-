@@ -3,6 +3,7 @@ import { handleCloudTick } from "@/lib/obi/cloud-entry";
 import { runDueRemindersOnTick } from "@/lib/remind-due";
 import { runStaffDigestEveningOnTick } from "@/lib/staff-digest";
 import { flushStaffDigestForwardOnTick } from "@/lib/staff-digest-reply-wire";
+import { runStaffDigestDmEscalationOnTick } from "@/lib/staff-digest-dm-wire";
 import { flushDealLogOnTick } from "@/lib/deal-log-wire";
 import { sweepGroupSateiOnTick, sweepGroupSateiStage2OnTick } from "@/lib/group-satei-wire";
 
@@ -36,6 +37,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // 担当へのまとめ・段階3：グループでの番号の返事を、30分に1回まとめて下村さんの 1対1 へ（STAFF_DIGEST=1 のときだけ。
     // off なら KV も触らない。印が取れない回は KV を1回たたくだけ）。例外は投げない
     await flushStaffDigestForwardOnTick(Date.now());
+    // 個人 LINE へ先に送ったまとめ（STAFF_DIGEST_DM=1 のときだけ。off なら KV も触らない）：返事の無い分を、
+    // JST 9時台（朝の分）・18時台（夕方の分）に1日1回だけグループへ張り出す。上の処理で 25 秒を使っていたら、この回は飛ばす
+    // （印を取る前なので、次の回にやり直す）。例外は投げない
+    if (Date.now() - t0 < 25_000) await runStaffDigestDmEscalationOnTick(Date.now());
     // 普通のグループの査定依頼の掃除：知らせの出ていない受付票を、読み直さずに知らせる（AI は呼ばない。
     // CRM 8秒＋名前3秒＋送信の程度）。上の処理で 30 秒を使っていたら、この回は飛ばす（次の回に回す）
     if (Date.now() - t0 < 30_000) await sweepGroupSateiOnTick();
