@@ -326,6 +326,8 @@ export async function handleDealAction(
   actorId: string | undefined,
   groupId: string | undefined,
   deps: DealDeps,
+  /** ask：タスクのカードに［担当に聞く］を足す（仕分ける人の 1対1 から押したときだけ渡す） */
+  opts: { ask?: boolean } = {},
 ): Promise<ListPage> {
   const g = groupId ?? null;
   if (action.op === "dt") {
@@ -337,6 +339,7 @@ export async function handleDealAction(
     return buildListPage("lt", tasks, action.offset, MSG_DEAL_TASKS_EMPTY, {
       name: "この案件の未完了タスク",
       nextData: (o) => encodeDealData("dt", action.dealId, o),
+      ...(opts.ask ? { ask: true } : {}),
     });
   }
   // da：グループの中だけ（印の鍵がグループと人の組なので）

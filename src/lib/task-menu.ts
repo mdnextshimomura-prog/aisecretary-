@@ -244,8 +244,11 @@ export function buildListPage(
   tasks: MenuTask[],
   offset: number,
   emptyText: string,
-  /** 案件のタスク一覧（B1 Task 3）：一覧の名前と、続きの data の作り方を差し替える */
-  opts: { name?: string; nextData?: (offset: number) => string } = {},
+  /**
+   * 案件のタスク一覧（B1 Task 3）：一覧の名前と、続きの data の作り方を差し替える。
+   * ask：各タスクのカードに［担当に聞く］を足す（仕分ける人の 1対1 から開いた一覧だけ）
+   */
+  opts: { name?: string; nextData?: (offset: number) => string; ask?: boolean } = {},
 ): ListPage {
   const listName = opts.name ?? LIST_NAME[op];
   const total = tasks.length;
@@ -258,12 +261,15 @@ export function buildListPage(
     const shown = tasks.slice(offset, offset + count);
     const bubbles: unknown[] = shown.map(
       (t) =>
-        taskCard({
-          pageId: t.id,
-          title: t.title,
-          due: t.due,
-          assignee: t.assignee,
-        }).contents,
+        taskCard(
+          {
+            pageId: t.id,
+            title: t.title,
+            due: t.due,
+            assignee: t.assignee,
+          },
+          opts.ask ? { ask: true } : {},
+        ).contents,
     );
     const end = offset + count;
     if (end < total)
@@ -325,8 +331,11 @@ export async function handleMenuAction(
   actorId: string | undefined,
   groupId: string | undefined,
   deps: MenuDeps,
+  /** ask：タスクのカードに［担当に聞く］を足す（仕分ける人の 1対1 から押したときだけ渡す） */
+  opts: { ask?: boolean } = {},
 ): Promise<ListPage> {
   const g = groupId ?? null;
+  const listOpts = opts.ask ? { ask: true } : {};
   const inGroup = (t: MenuTask) => !g || t.origin === g;
   switch (action.op) {
     case "menu":
@@ -345,7 +354,7 @@ export async function handleMenuAction(
         (await deps.listToday(today, g)).filter(inGroup),
         today,
       );
-      return buildListPage("lt", tasks, action.offset, MSG_TODAY_EMPTY);
+      return buildListPage("lt", tasks, action.offset, MSG_TODAY_EMPTY, listOpts);
     }
     case "lm": {
       if (!actorId) return { text: MSG_MINE_EMPTY, pageIds: [] };
@@ -356,7 +365,7 @@ export async function handleMenuAction(
           (t) => !t.closed && inGroup(t),
         ),
       );
-      return buildListPage("lm", tasks, action.offset, MSG_MINE_EMPTY);
+      return buildListPage("lm", tasks, action.offset, MSG_MINE_EMPTY, listOpts);
     }
   }
 }

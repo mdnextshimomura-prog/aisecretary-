@@ -199,9 +199,15 @@ function taskButtons(pageId: string, title?: string): CardButton[] {
   ];
 }
 
-/** タスクのカード（5 つのボタンつき）。 */
-export function taskCard(info: CardInfo): FlexMessage {
-  return buildTaskCard(info, taskButtons(info.pageId, info.title));
+/**
+ * タスクのカード（5 つのボタンつき）。
+ * opts.ask：［担当に聞く］（v1|ka|<タスク>。staff-ask.ts）を6つ目に足す。仕分ける人の 1対1 に出すカードだけが渡す
+ * （渡さなければ今までと同じ JSON。グループに出すカードには付けない）。
+ */
+export function taskCard(info: CardInfo, opts: { ask?: boolean } = {}): FlexMessage {
+  const buttons = taskButtons(info.pageId, info.title);
+  if (opts.ask) buttons.push(cardButton("担当に聞く", `v1|ka|${info.pageId}`, pressedText("担当に聞く", info.title)));
+  return buildTaskCard(info, buttons);
 }
 
 /**
@@ -210,8 +216,8 @@ export function taskCard(info: CardInfo): FlexMessage {
  * 聞き返し中に押されたときの安全：済・不要は確認セッションを消す／担当変更はセッションの担当も合わせる／
  * 回答の前に処理済みか確かめる（route.ts の stopIfClosed）。
  */
-export function registeredCard(info: CardInfo): FlexMessage | undefined {
-  return buttonsActive() ? taskCard(info) : undefined;
+export function registeredCard(info: CardInfo, opts: { ask?: boolean } = {}): FlexMessage | undefined {
+  return buttonsActive() ? taskCard(info, opts) : undefined;
 }
 
 /** 受付の解析結果（ParsedTask）から：期日・担当は分かる範囲で（無ければカードに「未定」） */
@@ -223,16 +229,19 @@ export function registeredCardFor(
     dueTime: string | null;
     assignee: string | null;
   },
-  /** 物件名を1行足す（仕分ける人の1対1から登録したときだけ渡す） */
-  extra?: { property?: string | null },
+  /** 物件名を1行足す・［担当に聞く］を足す（どちらも、仕分ける人の1対1から登録したときだけ渡す） */
+  extra?: { property?: string | null; ask?: boolean },
 ): FlexMessage | undefined {
-  return registeredCard({
-    pageId,
-    title: parsed.title,
-    due: dueFromParsed(parsed),
-    assignee: parsed.assignee,
-    ...(extra?.property ? { property: extra.property } : {}),
-  });
+  return registeredCard(
+    {
+      pageId,
+      title: parsed.title,
+      due: dueFromParsed(parsed),
+      assignee: parsed.assignee,
+      ...(extra?.property ? { property: extra.property } : {}),
+    },
+    extra?.ask ? { ask: true } : {},
+  );
 }
 
 /** 延期の日付。今日より後でなければ null（金曜〜日曜の「今週金曜」など）。 */

@@ -115,6 +115,8 @@ import {
 } from "@/lib/task-status";
 import { statusDeps } from "@/lib/task-status-wire";
 import { recordInboxContext } from "@/lib/group-inbox-context";
+import { staffDigestOn } from "@/lib/staff-digest";
+import { handleStaffAskText } from "@/lib/staff-ask-wire";
 import { statusWhat } from "@/lib/staff-digest-reply";
 import { noteGroupReply, tapFound, tryDigestProgressReply } from "@/lib/staff-digest-reply-wire";
 import {
@@ -677,7 +679,8 @@ async function registerTaskFromText(
     reply,
     opts.buttons
       ? // 仕分ける人の1対1から登録したとき（noClarify）だけ、カードに物件名の行を足す（グループのカードは今のまま）
-        registeredCardFor(pageId, parsed, opts.noClarify ? { property: parsed.propertyName ?? null } : undefined)
+        // 担当へのまとめが on なら、同じカードに［担当に聞く］も足す
+        registeredCardFor(pageId, parsed, opts.noClarify ? { property: parsed.propertyName ?? null, ask: staffDigestOn() } : undefined)
       : undefined
   );
   const botMsgId = sent.textId;
@@ -975,6 +978,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       continue;
     }
 
+    // ①-1a 担当に聞く：［自分で書く］のあとの 1対1 の1通（STAFF_DIGEST=1・印 staffask:<userId> があるときだけ。
+    // off・グループ・印なしは false で下へ。グループの発言と off は KV も読まない）。
+    // 査定の差し戻し理由・［直す］・足りない項目の印、メールの下書きの確認は、この上で先に受ける（それらを横取りしない）
+    if (
+      await handleStaffAskText(
+        { userId: source.userId, groupId: source.groupId, text: event.message.text },
+        async (text) => {
+          await sendLineMessage(replyToken, text);
+        },
+      )
+    ) {
+      markCommitted();
+      continue;
+    }
+
     // ①-1b 担当へのまとめへの返信のうち、自由な文の進捗（段階3。STAFF_DIGEST=1 のときだけ。off なら KV も読まずに下へ）。
     // 受けるのは「まとめ（staffdigest:msg:*。担当ごとの通・催促）を引用している・グループ」の返信で、
     // 番号＋文（進捗）か、番号の無い文（引用した通のタスクが1件ならその進捗。2件以上なら番号を聞き返すだけ）。
@@ -985,6 +1003,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const sd = await tryDigestProgressReply({
         text: stripMentions(event.message),
         hasMention: (event.message.mention?.mentionees.length ?? 0) > 0,
+        mentionsBot: taskMentionState(event.message.mention?.mentionees, BOT_USER_ID).mentionsBot,
         quotedMessageId: event.message.quotedMessageId,
         groupId: source.groupId,
         userId: source.userId,

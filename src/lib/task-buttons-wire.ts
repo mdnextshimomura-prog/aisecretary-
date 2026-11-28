@@ -78,6 +78,8 @@ import {
 import { staffDigestOn } from "./staff-digest";
 import { parseSdData } from "./staff-digest-reply";
 import { handleStaffDigestPostback } from "./staff-digest-reply-wire";
+import { parseAskData } from "./staff-ask";
+import { askButtonFor, handleStaffAskPostback } from "./staff-ask-wire";
 
 const notion = new Client({ auth: process.env.NOTION_API_KEY });
 
@@ -402,6 +404,14 @@ export async function handleTaskPostbackEvent(
       });
       return;
     }
+    // 担当に聞く（v1|ka|・v1|kp|・v1|kw|。staff-ask.ts）。押せる人・二度押し・文は staff-ask.ts
+    const ask = parseAskData(data);
+    if (ask) {
+      await handleStaffAskPostback(ask, { userId: event.source.userId, webhookEventId: event.webhookEventId }, async (text, card) => {
+        await io.reply(replyToken, text, card);
+      });
+      return;
+    }
   }
   const op = parseButtonData(data)?.op ?? "invalid";
 
@@ -455,6 +465,8 @@ export async function handleTaskPostbackEvent(
             event.source.userId,
             event.source.groupId,
             io.deal ?? dealDeps(),
+            // 仕分ける人の 1対1 から開いた一覧だけ、カードに［担当に聞く］を足す（STAFF_DIGEST=1 のとき）
+            askButtonFor(event.source) ? { ask: true } : {},
           ),
         replyToken,
         io,
@@ -559,7 +571,8 @@ async function handleMenuPostback(
   const deps = io.menu ?? menuDeps();
   await replyListResult(
     action.op,
-    () => handleMenuAction(action, actorId, groupId, deps),
+    // 仕分ける人の 1対1 から開いた一覧だけ、カードに［担当に聞く］を足す（STAFF_DIGEST=1 のとき）
+    () => handleMenuAction(action, actorId, groupId, deps, askButtonFor({ userId: actorId, groupId }) ? { ask: true } : {}),
     replyToken,
     io,
   );

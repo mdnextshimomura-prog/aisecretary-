@@ -11,6 +11,7 @@ import { appendTaskNote, completeTask, findTaskByRemindNumber, jstDateStr } from
 import { uuidv5 } from "./satei-notify";
 import { DIGEST_GROUP_ID, staffDigestOn } from "./staff-digest";
 import {
+  askDoneKey,
   askNudge,
   chunkToMessage,
   flushForward,
@@ -23,9 +24,9 @@ import {
   type ReplyItem,
   type SdKv,
 } from "./staff-digest-reply";
-import { applyStatusCommand, followupEnabled, type StatusDeps } from "./task-status";
+import { applyStatusCommand, applyStatusToTask, followupEnabled, type StatusDeps } from "./task-status";
 import { parseCandidateCommand } from "./task-candidate";
-import { parseStatusCommand } from "./task-status-command";
+import { parseStatusBody, parseStatusCommand } from "./task-status-command";
 import { statusDeps } from "./task-status-wire";
 
 const FWD_LIST_MAX = 200;
@@ -34,6 +35,7 @@ const FWD_LIST_TTL_SEC = 3 * 24 * 60 * 60;
 const NOTE_TIMEOUT_MS = 3_000;
 
 const realKv: SdKv = {
+  // （担当に聞く staff-ask-wire.ts も同じ KV の部品を使う。下で sdRealKv として出す）
   get: (key) => kv.get(key),
   set: async (key, value, ex) => {
     await kv.set(key, value, { ex });
@@ -60,6 +62,9 @@ const realKv: SdKv = {
   },
   smembers: async (key) => (await kv.smembers(key)).map(String),
 };
+
+/** 本物の KV の部品（担当に聞く も使う） */
+export const sdRealKv: SdKv = realKv;
 
 const log = (line: string) => console.log(line);
 const pushOwner = (to: string, messages: unknown[], key: string) =>
@@ -96,7 +101,12 @@ export async function noteGroupReply(
   await noteItems(src.userId, items.map((t) => ({ id: t.id, title: t.title, what })), undefined);
 }
 
-async function noteItems(userId: string | null | undefined, items: ReplyItem[], name: string | null | undefined): Promise<void> {
+async function noteItems(
+  userId: string | null | undefined,
+  items: ReplyItem[],
+  name: string | null | undefined,
+  opts: { noForward?: boolean } = {}
+): Promise<void> {
   try {
     await within(
       (async () => {
@@ -110,6 +120,7 @@ async function noteItems(userId: string | null | undefined, items: ReplyItem[], 
             items,
             now: Date.now(),
             sameAsOwner: Boolean(owner && me?.userIds.includes(owner)),
+            noForward: opts.noForward,
           },
           { kv: realKv, owner, log }
         );
@@ -147,6 +158,8 @@ export async function tryDigestProgressReply(o: {
   text: string;
   /** 発言にメンションがあるか（あれば、番号の無い文は受けない） */
   hasMention?: boolean;
+  /** @AI秘書 あてか（「担当に聞く」への返事として受けない） */
+  mentionsBot?: boolean;
   quotedMessageId?: string | null;
   groupId?: string | null;
   userId?: string | null;
@@ -196,7 +209,33 @@ export async function tryDigestProgressReply(o: {
       reply: async (text) => {
         await sendLineMessage(o.replyToken, text);
       },
-      note: (items, name) => noteItems(o.userId, items, name),
+      note: (items, name, opts) => noteItems(o.userId, items, name, opts),
+      // 「担当に聞く」への返事：番号の無い今の言葉を、そのタスクに当てる（引用での完了・待ち・延期と同じ書き方）
+      applyToTask: async (task, body) => {
+        const st = followup ? parseStatusBody(body, today) : null;
+        if (st) {
+          const text = await applyStatusToTask(st, task, statusDeps());
+          return { text, changed: st.kind === "postpone" && !st.date ? [] : [{ ...task, what: statusWhat(st) }] };
+        }
+        if (isBareCompletion(`1 ${body}`)) {
+          await completeTask(task.id);
+          return { text: `☑️ 完了にしました\n📋 ${task.title}`, changed: [{ ...task, what: "済" }] };
+        }
+        return null;
+      },
+      notifyOwner: async (text, key) => {
+        const owner = inboxOwner();
+        if (!owner) return false;
+        const st = await pushOwner(owner, [{ type: "text", text }], key);
+        return st !== null && ((st >= 200 && st < 300) || st === 409);
+      },
+      askDone: (day, askId) => realKv.sadd(askDoneKey(day), [askId], 2 * 24 * 60 * 60),
+      isOwner: async (userId) => {
+        const owner = inboxOwner();
+        if (!owner || !userId) return false;
+        if (userId === owner) return true;
+        return Boolean((await roster()).find((m) => m.userIds.includes(userId))?.userIds.includes(owner));
+      },
       log,
     });
   } catch {

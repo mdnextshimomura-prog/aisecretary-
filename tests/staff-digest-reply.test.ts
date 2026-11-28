@@ -128,10 +128,14 @@ async function main() {
   await t("引用が無い・グループでない・雑談は、on でも KV を触らず今までどおり", async () => {
     const x = mkReply();
     x.m.set(digestMsgKey("D1"), { at: 1, slot: "am" });
-    for (const m of [msg("3 アポ取れました", null), msg("3 アポ取れました", "D1", null), msg("了解です"), msg("3済"), msg("👍"), msg("1 登録")]) {
+    for (const m of [msg("3 アポ取れました", null), msg("3 アポ取れました", "D1", null), msg("了解です"), msg("👍"), msg("1 登録")]) {
       assert.deepEqual(await R.handleDigestReply({ ...m }, { ...x.deps, isOther: (l) => /^\d+\s*(登録|なし)$/.test(l) }), { handled: false, committed: false });
     }
     assert.equal(x.ops.length + x.notes.length + x.replies.length + x.logs.length, 0);
+    // 今の言葉だけの返事（「3済」）は、引用先が「担当に聞く」のメッセージかを見るために KV を1回読むだけで、今までの流れへ
+    assert.deepEqual(await R.handleDigestReply(msg("3済"), x.deps), { handled: false, committed: false });
+    assert.deepEqual([x.ops.length, x.notes.length + x.replies.length + x.logs.length + x.known.length], [1, 0]);
+    x.ops.length = 0;
     // 番号の控えの無い古いまとめ（1通に全員ぶん）への番号なしの文は、KV を1回読むだけで受けない
     assert.deepEqual(await R.handleDigestReply(msg("3件アポ取れました"), x.deps), { handled: false, committed: false });
     assert.deepEqual([x.ops.length, x.notes.length + x.replies.length + x.logs.length], [1, 0]);
@@ -179,9 +183,14 @@ async function main() {
     assert.deepEqual(x.replies, ["どの番号の件か分かりませんでした。番号をつけて返信してください（例：「1 送りました」）"]);
     assert.deepEqual([x.notes.length, x.noted.length, x.logs], [0, 0, ["[staff-digest] reply no-number"]]);
     const ops = x.ops.length;
-    assert.deepEqual(await R.handleDigestReply({ ...msg("これお願いします"), hasMention: true }, x.deps), { handled: false, committed: false });
+    // @AI秘書 あて・あいづちは KV も読まない
+    assert.deepEqual(await R.handleDigestReply({ ...msg("これお願いします"), hasMention: true, mentionsBot: true }, x.deps), { handled: false, committed: false });
     assert.deepEqual(await R.handleDigestReply(msg("ありがとうございます"), x.deps), { handled: false, committed: false });
     assert.equal(x.ops.length, ops);
+    // 人へのメンションつきは、引用先が「担当に聞く」のメッセージかを見るために1回読むだけ（まとめなら受けない）
+    assert.deepEqual(await R.handleDigestReply({ ...msg("これお願いします"), hasMention: true }, x.deps), { handled: false, committed: false });
+    assert.equal(x.ops.length, ops + 1);
+    assert.equal(x.replies.length, 1);
   });
 
   await t("番号つきの返信：引用した通に載っていない番号でも、今のまとめの番号なら受ける（別の人の通を引用していても）", async () => {
