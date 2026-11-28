@@ -3,7 +3,7 @@
  * 下村さん「LINE とかで動きがあったものが、Notion に勝手に溜まっていくみたいな仕組み」「確認は Notion 上でしてもらう」。
  *
  *   ・溜めるのは、案件にひも付くと決められた発言だけ。決められないものは当てずっぽうにせず、溜めない（聞きもしない）
- *   ・決め方（AI は使わない）：a 本文に、進行中の案件ちょうど1件の名前（「｜」で分けた部分）が入っている
+ *   ・決め方（AI は使わない）：a 本文に、進行中の案件の名前・お客様・町名・建物名のどれかが入っていて、1件に決まる
  *                             b ひも付いた発言への引用
  *                             c ひも付いた発言のあと5分以内の、同じ人の画像・ファイル・動画
  *   ・ひも付いたら KV の列 deallog:q に1行（本文は頭300字）。2分に1回の見回りが、案件ごとに Notion のページ本文の末尾へ足す
@@ -83,8 +83,12 @@ const within = <T>(p: Promise<T>, ms: number): Promise<T> => {
 };
 
 // ── 名前の一致 ──
+// 進行中の案件名の実際の形（2026-11-28 に確かめた）は「｜」区切りではなく、
+//   住所「門真市月出町16-15」「川西市水明台3-1-16（村上様）」「枚方市出口町 戸建て」／建物＋号室「…中之島タワー618号（柏原様）」「…六甲の丘D304」／
+//   そのほか「嘉祥様」「武庫川団地」「大阪市内MT」。
+// 人は「月出町の件」「柏原様」「…レジデンスの502」と書くので、案件ごとに鍵を作って照らす（どれも物件の鍵と同じ規則でゆれを吸収してから）。
 
-// 案件名の部分としてよく付く、物件を指さない言葉（これだけの部分は照合に使わない）
+// 案件名（やその部分）としてよく付く、物件を指さない言葉（これだけの名前は照合に使わない）
 const GENERIC = new Set(
   [
     "売り", "買い", "売却", "購入", "買取", "仲介", "管理", "賃貸", "売買", "再販", "査定", "両手仲介", "片手仲介", "買取再販", "売買仲介",
@@ -93,40 +97,184 @@ const GENERIC = new Set(
   ].map((w) => normalizeProperty(w)),
 );
 const DIGIT = /[0-9]/;
-// 本文の括弧は外して中身を残す（鍵のほうは括弧の中を落としてあるので、「（天満ハイツ302）」も当たるように）
+const HAN = /[\u4e00-\u9fff]/;
+const BRACKETS = /[（(【［\[][^（(【［\[）)】］\]]*[）)】］\]]/g;
+const len = (s: string) => Array.from(s).length;
+// 本文の括弧は外して中身を残す（鍵のほうは括弧の中を落としてあるので、「（月出町）」も当たるように）
 const textKey = (text: string) => normalizeProperty((text ?? "").replace(/[（(【［\[）)】］\]]/g, " "));
+const usableFull = (k: string) => len(k) >= DL_KEY_MIN && !GENERIC.has(k) && !/^[0-9a-z.,]+$/.test(k) && !/^[0-9.,]+(万|億)?円?$/.test(k);
 
-/** 案件名を「｜」で分けた各部分のうち、照合に使える鍵（4字以上・一般的な言葉でない・数字や英数字だけでない） */
-export function dealTextKeys(name: string): string[] {
-  const keys = (name ?? "")
-    .split(/[｜|]/)
-    .map((p) => normalizeProperty(p))
-    .filter((k) => Array.from(k).length >= DL_KEY_MIN && !GENERIC.has(k) && !/^[0-9a-z.,]+$/.test(k) && !/^[0-9.,]+(万|億)?円?$/.test(k));
-  return keys.filter((k, i) => keys.indexOf(k) === i);
+/** 案件1件の鍵。full＝名前そのもの（強い）／customer＝お客様（弱い）／town＝町名（弱い）／building＝号室を除いた建物名（弱い。rooms と一緒なら強い） */
+export interface DlDealKeys {
+  full: string[];
+  customer: string[];
+  town: string | null;
+  /** 町名のあとに続く番地の数字（「月出町16-15」→「1615」）。本文の番地が食い違うときは町名で当てない */
+  townDigits: string;
+  building: string | null;
+  rooms: string[];
 }
 
-/** 鍵が本文に入っているか。数字の続き（302 と 3021、12 と 112）は別のものとして当てない */
-function hasKey(hay: string, key: string): boolean {
+const PERSON = /^[\u4e00-\u9fffぁ-んァ-ヶー々]{1,8}(?:[ 　]+[\u4e00-\u9fffぁ-んァ-ヶー々]{1,8})?(?:様|さん|社長)$/;
+const HONORIFIC = /(様|さん|社長)$/;
+/** 「村上様」「寺本 昌司様」「田中社長」→ 姓＋様・姓＋さん（社長は 姓＋社長 だけ）。姓は空白の前・2字以上 */
+function customerKeys(person: string): string[] {
+  const m = HONORIFIC.exec(person.trim());
+  if (!m) return [];
+  const body = person.trim().slice(0, -m[1].length).trim();
+  const surname = body.split(/[\s　]+/)[0] ?? "";
+  if (len(surname) < 2 || !/^[\u4e00-\u9fffぁ-んァ-ヶー々]+$/.test(surname)) return [];
+  const forms = m[1] === "社長" ? [`${surname}社長`] : [`${surname}様`, `${surname}さん`];
+  // 氏名で書かれたとき（「寺本昌司様」）も同じお客様
+  if (body !== surname) forms.push(`${body}${m[1]}`);
+  return forms.map((f) => normalizeProperty(f)).filter(Boolean);
+}
+
+const PREF = /^(東京都|北海道|(?:京都|大阪)府|[\u4e00-\u9fff]{2,3}県)/;
+const ADDR = /^([\u4e00-\u9fffぁ-んケヶノ]{1,6}?)市(.*)$/;
+const KIND_TAIL = /[\s　]*(一?戸建て?|土地|マンション|アパート|店舗|倉庫|駐車場)$/;
+const ROOM_GO = /^(.*?)[\s　]*([A-Za-z]?[0-9]{2,4})[\s　]*号室?$/;
+const ROOM_BARE = /^(.*?)[\s　]*([A-Za-z][0-9]{2,4}|[0-9]{3,4})$/;
+
+function keysOfPart(part: string, out: DlDealKeys): void {
+  const raw = (part ?? "").normalize("NFKC").trim();
+  if (!raw) return;
+  // 末尾の「（…様）」はお客様。「（青春）」「(2筆)」のような人でない括弧からは作らない
+  const tail = /[（(]([^（()）]*)[）)]\s*$/.exec(raw);
+  if (tail && HONORIFIC.test(tail[1].trim())) out.customer.push(...customerKeys(tail[1]));
+  // 頭の「（査定）」なども含め、括弧は中身ごと外して名前の本体にする
+  const base = raw.replace(BRACKETS, " ").replace(/\s+/g, " ").trim();
+  if (!base) return;
+  if (PERSON.test(base)) {
+    // 名前がお客様だけの案件（「嘉祥様」）。名前そのものも「お客様」の鍵として扱う（強い鍵にはしない）
+    out.customer.push(...customerKeys(base));
+    return;
+  }
+  const full = normalizeProperty(base);
+  if (usableFull(full)) out.full.push(full);
+
+  const addr = ADDR.exec(base.replace(PREF, ""));
+  if (addr) {
+    // 住所の形：種別の言葉を除いた形（「枚方市出口町 戸建て」→「枚方市出口町」）も名前そのものとして使う
+    const core = normalizeProperty(base.replace(KIND_TAIL, ""));
+    if (core !== full && usableFull(core)) out.full.push(core);
+    // 町名：最初の「市」（続く「…区」）のあとの、数字・空白・英字までのかな漢字。末尾の「二丁目」は落とす。3字以上
+    const rest = addr[2].replace(/^[\u4e00-\u9fff]{1,4}区/, "");
+    const run = (/^[\u4e00-\u9fffぁ-んァ-ヶ々]+/.exec(rest)?.[0] ?? "").replace(/[一二三四五六七八九十〇]+丁目$/, "");
+    const town = normalizeProperty(run);
+    if (len(run) >= 3 && town && !GENERIC.has(town) && !out.town) {
+      out.town = town;
+      const at = full.indexOf(town);
+      out.townDigits = at >= 0 ? full.slice(at + town.length).replace(/[^0-9]/g, "") : "";
+    }
+    return;
+  }
+  // 建物＋号室の形：号室を除いた建物名（5字以上）と、号室の数字
+  const room = ROOM_GO.exec(base) ?? ROOM_BARE.exec(base);
+  if (room && !out.building) {
+    const b = normalizeProperty(room[1]);
+    // 建物名＋号室の数字（「ジオ北浜1205」。「号」を書かない言い方・建物名が短いときのための、名前そのものと同じ強さの鍵）
+    const joined = b ? `${b}${room[2].toLowerCase()}` : "";
+    if (b && !GENERIC.has(b) && usableFull(joined) && !out.full.includes(joined)) out.full.push(joined);
+    if (len(b) >= 5 && !GENERIC.has(b) && !/^[0-9a-z.,]+$/.test(b)) {
+      out.building = b;
+      const tok = room[2].toLowerCase();
+      out.rooms = /^[a-z]/.test(tok) ? [tok, tok.slice(1)] : [tok];
+    }
+  }
+}
+
+/** 案件名から照合の鍵を作る（「｜」があれば各部分から。自動登録の「査定｜顧客未定｜物件名」のため） */
+export function dealTextKeys(name: string): DlDealKeys {
+  const out: DlDealKeys = { full: [], customer: [], town: null, townDigits: "", building: null, rooms: [] };
+  for (const part of (name ?? "").split(/[｜|]/)) keysOfPart(part, out);
+  out.full = out.full.filter((k, i) => out.full.indexOf(k) === i);
+  out.customer = out.customer.filter((k, i) => out.customer.indexOf(k) === i);
+  return out;
+}
+
+type KeyOk = (hay: string, at: number, key: string) => boolean;
+/** 鍵が本文に入っているか。数字の続き（302 と 3021、12 と 112）は別のものとして当てない。ok でさらに絞る */
+function hasKey(hay: string, key: string, ok?: KeyOk): boolean {
+  if (!key) return false;
   for (let i = hay.indexOf(key); i >= 0; i = hay.indexOf(key, i + 1)) {
     const before = i > 0 ? hay[i - 1] : "";
     const after = hay[i + key.length] ?? "";
     if (DIGIT.test(key[0]) && DIGIT.test(before)) continue;
     if (DIGIT.test(key[key.length - 1]) && DIGIT.test(after)) continue;
+    if (ok && !ok(hay, i, key)) continue;
     return true;
   }
   return false;
 }
+// お客様の鍵は、前が漢字なら当てない（「上村上様」の中の「村上様」）。よくある前置き（売主・買主・号室 など）のすぐ後ろは当てる
+const BEFORE_NAME = /(売主|買主|貸主|借主|家主|地主|施主|号|室|棟)$/;
+const noKanjiBefore: KeyOk = (hay, at) => !(at > 0 && HAN.test(hay[at - 1])) || BEFORE_NAME.test(hay.slice(Math.max(0, at - 2), at));
+// 号室の数字は、前が英数字なら当てない（「a304」の中の「304」）
+const roomStart: KeyOk = (hay, at) => !(at > 0 && /[0-9a-z]/.test(hay[at - 1]));
 
-/** 本文に名前の入っている進行中の案件（同じ ID は1回）。ちょうど1件かどうかは呼ぶ側が見る */
-export function matchDealsInText(text: string, deals: DealRef[]): DealRef[] {
+interface DlHit {
+  deal: DealRef;
+  strong: boolean;
+}
+function hitOf(hay: string, deal: DealRef, k: DlDealKeys): DlHit | null {
+  const full = k.full.some((key) => hasKey(hay, key));
+  const customer = k.customer.some((key) => hasKey(hay, key, noKanjiBefore));
+  // 町名：すぐ後ろに番地の数字が書いてあって、案件の番地と食い違うなら別の物件（「月出町20-1」は「月出町16-15」の案件に当てない）
+  const town =
+    k.town !== null &&
+    hasKey(hay, k.town, (h, at, key) => {
+      const d = /^[0-9]+/.exec(h.slice(at + key.length))?.[0] ?? "";
+      return !d || !k.townDigits || k.townDigits.startsWith(d) || d.startsWith(k.townDigits);
+    });
+  const roomInText = k.rooms.some((r) => hasKey(hay, r, roomStart));
+  // 建物名：すぐ後ろに別の号室が書いてあって、この案件の号室が本文のどこにも無いなら別の部屋（「…レジデンス805」は 502号 の案件に当てない）
+  const building =
+    k.building !== null &&
+    hasKey(hay, k.building, (h, at, key) => {
+      const r = /^(?:の)?([a-z]?[0-9]{2,4})(?![0-9])/.exec(h.slice(at + key.length))?.[1];
+      return !r || k.rooms.includes(r) || roomInText;
+    });
+  const room = building && roomInText;
+  if (!full && !customer && !town && !building) return null;
+  // 強い当たり：名前そのもの／建物名＋号室／町名とお客様の両方
+  return { deal, strong: full || room || (town && customer) };
+}
+
+const keyCache = new WeakMap<DealRef[], DlDealKeys[]>();
+function hitsInText(text: string, deals: DealRef[]): DlHit[] {
   const hay = textKey(text);
   if (!hay) return [];
-  const hits: DealRef[] = [];
-  for (const d of deals) {
-    if (hits.some((h) => h.id === d.id)) continue;
-    if (dealTextKeys(d.name).some((k) => hasKey(hay, k))) hits.push(d);
+  let keys = keyCache.get(deals);
+  if (!keys) {
+    keys = deals.map((d) => dealTextKeys(d.name));
+    keyCache.set(deals, keys);
   }
+  const hits: DlHit[] = [];
+  deals.forEach((d, i) => {
+    if (hits.some((h) => h.deal.id === d.id)) return;
+    const h = hitOf(hay, d, (keys as DlDealKeys[])[i]);
+    if (h) hits.push(h);
+  });
   return hits;
+}
+
+/** 本文がどれかの鍵で当たった進行中の案件（同じ ID は1回） */
+export function matchDealsInText(text: string, deals: DealRef[]): DealRef[] {
+  return hitsInText(text, deals).map((h) => h.deal);
+}
+
+/**
+ * 本文から案件を1件に決める。当たった案件がちょうど1件ならそれ。複数に当たったときは、強い当たり
+ * （名前そのもの／建物名＋号室／町名とお客様の両方）がちょうど1件のときだけそれ。ほかは決めない（pick は null）。
+ * 2件以上の案件が同じ鍵を持つ（同じ建物の 501 と 502・同じお客様）と、その鍵では必ず複数に当たるので、それだけでは決まらない。
+ */
+export function pickDealInText(text: string, deals: DealRef[]): { pick: DealRef | null; hits: DealRef[] } {
+  const hits = hitsInText(text, deals);
+  const all = hits.map((h) => h.deal);
+  if (hits.length === 1) return { pick: hits[0].deal, hits: all };
+  const strong = hits.filter((h) => h.strong);
+  return { pick: strong.length === 1 ? strong[0].deal : null, hits: all };
 }
 
 // ── 控える（webhook） ──
@@ -199,11 +347,11 @@ export async function captureDealLog(ev: DlEvent, d: DlCaptureDeps): Promise<DlO
     let via: DlVia = "name";
     if (!media) {
       const deals = await within(d.loadDeals(), d.loadTimeoutMs ?? DL_LOAD_TIMEOUT_MS);
-      const hits = matchDealsInText(ev.text ?? "", deals);
-      if (hits.length === 1) dealId = hits[0].id;
+      const { pick, hits } = pickDealInText(ev.text ?? "", deals);
+      if (pick) dealId = pick.id;
       else {
         const q = await quoted();
-        // 本文が2件以上を名指ししているときは、引用先がそのうちの1件のときだけ引用で決める
+        // 本文が複数の案件に当たって決められないときは、引用先がそのうちの1件のときだけ引用で決める
         if (q && (hits.length === 0 || hits.some((h) => h.id === q))) {
           dealId = q;
           via = "quote";

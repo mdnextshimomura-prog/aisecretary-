@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import {
   DL_FLUSH_GUARD_SEC, DL_HEADING, DL_Q, DL_ROW_TTL_MS, captureDealLog, dealLogOn, dlHeadKey, dlLastKey, dlMsgKey,
-  flushDealLog, formatDlRow, matchDealsInText, richChunks,
+  dealTextKeys, flushDealLog, formatDlRow, matchDealsInText, pickDealInText, richChunks,
   type DlCaptureDeps, type DlEvent, type DlFlushDeps, type DlRow,
 } from "../src/lib/deal-log";
 
@@ -18,10 +18,11 @@ const D1 = "11111111-1111-1111-1111-111111111111";
 const D2 = "22222222-2222-2222-2222-222222222222";
 const D3 = "33333333-3333-3333-3333-333333333333";
 const NOW = Date.UTC(2026, 10, 28, 7, 40); // JST 11/28 16:40
+// 案件名は本番の形（住所／建物＋号室（お客様）／お客様だけ）に合わせた作りものの名前
 const deals = [
-  { id: D1, name: "天満ハイツ302｜売り" },
-  { id: D2, name: "ジオ北浜1205｜山田様｜買い" },
-  { id: D3, name: "吹田市山手町四丁目" },
+  { id: D1, name: "天満ハイツ302号（青木様）" },
+  { id: D2, name: "ジオ北浜1205号（山田様）" },
+  { id: D3, name: "吹田市山手町2丁目土地" },
 ];
 
 /** 本物の Lua と同じ動きをする偽の KV（呼び出しを ops に控える） */
@@ -102,25 +103,110 @@ const flushDeps = (k: ReturnType<typeof mkKv>, nt: ReturnType<typeof mkNotion>, 
     assert.equal(dealLogOn({}), false);
   });
 
-  await t("名前の一致：案件名の各部分（4字以上）が本文に入っている案件", () => {
-    assert.deepEqual(matchDealsInText("天満ハイツ302の鍵を受け取りました", deals).map((d) => d.id), [D1]);
-    // 表記ゆれ（全角・空白・漢数字の丁目）は物件の鍵と同じ規則で吸収する
-    assert.deepEqual(matchDealsInText("天満ハイツ ３０２ 内覧OK", deals).map((d) => d.id), [D1]);
-    assert.deepEqual(matchDealsInText("吹田市山手町4丁目の測量が終わりました", deals).map((d) => d.id), [D3]);
-    assert.deepEqual(matchDealsInText("【至急】ジオ北浜1205 ローン通りました", deals).map((d) => d.id), [D2]);
-    // 「売り」「買い」「山田様」（短い）・一般的な言葉では当てない
-    assert.deepEqual(matchDealsInText("山田様から売りの相談です", deals), []);
-    assert.deepEqual(matchDealsInText("天満ハイツの件", deals), []);
-    assert.deepEqual(matchDealsInText("", deals), []);
-    // 2件に当たる
-    assert.deepEqual(matchDealsInText("天満ハイツ302とジオ北浜1205の資料", deals).map((d) => d.id).sort(), [D1, D2]);
+  await t("名前の一致：案件ごとの鍵（名前そのもの・お客様・町名・建物名＋号室）", () => {
+    assert.deepEqual(dealTextKeys("川西市緑風台3-1-16（村井様）"), {
+      full: ["川西市緑風台3116"], customer: ["村井様", "村井さん"], town: "緑風台", townDigits: "3116", building: null, rooms: [],
+    });
+    assert.deepEqual(dealTextKeys("ザ・リバーハウス中之島タワー618号（柏木様）"), {
+      full: ["リバハウス中之島タワ618号", "リバハウス中之島タワ618"], customer: ["柏木様", "柏木さん"], town: null, townDigits: "", building: "リバハウス中之島タワ", rooms: ["618"],
+    });
+    assert.deepEqual(dealTextKeys("ジークレスト六甲の丘D304").rooms, ["d304", "304"]);
+    assert.equal(dealTextKeys("サンコート津田沼3号棟 222号室").building, "サンコト津田沼3号棟");
+    assert.deepEqual(dealTextKeys("寺元 昌司様").customer, ["寺元様", "寺元さん", "寺元昌司様"]);
+    assert.deepEqual(dealTextKeys("田中社長").customer, ["田中社長"]);
+    // 短い町名（緑町・旭町）は町名の鍵にしない。人でない括弧からお客様の鍵を作らない。頭の「（査定）」は外す
+    assert.equal(dealTextKeys("守口市旭町9-7").town, null);
+    assert.deepEqual(dealTextKeys("（査定）堺市西区鳳東町（青春）"), { full: ["堺市西区鳳東町"], customer: [], town: "鳳東町", townDigits: "", building: null, rooms: [] });
+    assert.deepEqual(dealTextKeys("豊中市南蛍池 土地 (2筆)").customer, []);
+    assert.deepEqual(dealTextKeys("枚方市出口南町 戸建て").full, ["枚方市出口南町戸建て", "枚方市出口南町"]);
+    assert.equal(dealTextKeys("大阪市生野区大今里北（大坪様）").town, "大今里北");
+    assert.equal(dealTextKeys("尼崎市東園田二丁目15番11号（長谷部様）").town, "東園田");
+    // 市のあとが英字（大阪市内MT）は町名にしない。一般的な言葉・英数字だけの部分は鍵にしない
+    assert.deepEqual(dealTextKeys("大阪市内MT"), { full: ["大阪市内mt"], customer: [], town: null, townDigits: "", building: null, rooms: [] });
+    assert.deepEqual(dealTextKeys("両手仲介｜マンション｜買取再販｜1200万円｜ABC123"), { full: [], customer: [], town: null, townDigits: "", building: null, rooms: [] });
+    assert.deepEqual(dealTextKeys("査定｜顧客未定｜天満ハイツ302"), { full: ["天満ハイツ302"], customer: [], town: null, townDigits: "", building: "天満ハイツ", rooms: ["302"] });
   });
 
-  await t("名前の一致：数字の続きは別の部屋（302 は 3021 ではない）・一般的な言葉だけの部分は使わない", () => {
+  await t("名前の一致：表（町名・お客様・建物・同じ建物の2件・2件の名指し・短い町名）", () => {
+    const T = (i: number) => `${String(i).padStart(8, "0")}-0000-0000-0000-000000000000`;
+    const names = [
+      "門真市桜木町16-15", // 0
+      "川西市緑風台3-1-16（村井様）", // 1
+      "守口市旭町9-7", // 2
+      "グランコート福島レジデンス502号（朴田様）", // 3
+      "グランコート福島レジデンス501号（朴田様）", // 4
+      "ザ・リバーハウス中之島タワー618号（柏木様）", // 5
+      "ジークレスト六甲の丘D304", // 6
+      "嘉山様", // 7
+      "寺元 昌司様", // 8
+      "武庫西団地", // 9
+      "枚方市出口南町 戸建て", // 10
+      "大阪市生野区大今里北（大坪様）", // 11
+      "尼崎市東園田二丁目15番11号（長谷部様）", // 12
+      "（査定）堺市西区鳳東町（青春）", // 13
+    ];
+    const ds = names.map((name, i) => ({ id: T(i), name }));
+    // [本文, 決まる案件の番号（決まらなければ null）, 当たった案件の数]
+    const table: Array<[string, number | null, number]> = [
+      // 町名
+      ["桜木町の件、測量終わりました", 0, 1],
+      ["門真市桜木町16-15の謄本です", 0, 1],
+      ["桜木町20-1の資料です", null, 0], // 番地が違う＝別の物件
+      ["大今里北の件", 11, 1],
+      ["東園田2丁目の現地を見てきました", 12, 1],
+      ["東園田3丁目の現地", null, 0],
+      ["鳳東町の件", 13, 1],
+      ["出口南町の戸建て、内覧OKです", 10, 1],
+      ["枚方市出口南町の件", 10, 1],
+      // 短い町名は使わない（名前そのものなら当たる）
+      ["旭町の件どうなりました？", null, 0],
+      ["守口市旭町9-7の謄本", 2, 1],
+      // お客様
+      ["村井様から連絡ありました", 1, 1],
+      ["村井さんに折り返します", 1, 1],
+      ["上村井様から連絡ありました", null, 0], // 前が漢字＝別の名前
+      ["売主村井様より鍵を預かりました", 1, 1], // よくある前置きのあとは当てる
+      ["嘉山様の書類が届きました", 7, 1],
+      ["寺元さんに確認します", 8, 1],
+      ["青春の件", null, 0], // 人でない括弧
+      // 建物
+      ["リバーハウス中之島タワーの件", 5, 1],
+      ["ザ・リバーハウス中之島タワー618号 契約日決まりました", 5, 1],
+      ["ジークレスト六甲の丘 304 鍵あります", 6, 1],
+      ["武庫西団地の鍵を返しました", 9, 1],
+      // 同じ建物・同じお客様の2件：号室が無ければ決めない
+      ["グランコート福島レジデンスの件", null, 2],
+      ["朴田様に連絡しました", null, 2],
+      ["グランコート福島レジデンスの502 内覧OKです", 3, 1], // 501 の案件には当たらない
+      ["グランコート福島レジデンス501号 朴田様", 4, 2],
+      ["グランコート福島レジデンス 501号室と502号室", null, 2],
+      ["グランコート福島レジデンス805の資料", null, 0], // 別の部屋
+      // 2件を名指し：決めない。片方だけ強い（町名とお客様の両方）ならそちら
+      ["柏木さんの件と桜木町の件", null, 2],
+      ["緑風台の件、嘉山様にも伝えます", null, 2],
+      ["緑風台の村井様の件、桜木町はあとで", 1, 2],
+      // 当たらない
+      ["了解です", null, 0],
+      ["売りの相談でマンションの査定をお願いします", null, 0],
+      ["", null, 0],
+    ];
+    for (const [text, want, count] of table) {
+      const r = pickDealInText(text, ds);
+      assert.equal(r.pick?.id ?? null, want === null ? null : T(want), text);
+      assert.equal(r.hits.length, count, text);
+      assert.equal(matchDealsInText(text, ds).length, count, text);
+    }
+  });
+
+  await t("名前の一致：数字の続きは別の部屋（302 は 3021 ではない）・表記ゆれは物件の鍵と同じ規則で吸収", () => {
     const ds = [{ id: D1, name: "天満ハイツ30" }, { id: D2, name: "両手仲介｜マンション｜買取再販" }, { id: D3, name: "1200万円｜ABC123" }];
     assert.deepEqual(matchDealsInText("天満ハイツ302の件", ds), []);
     assert.deepEqual(matchDealsInText("天満ハイツ30の件", ds).map((d) => d.id), [D1]);
     assert.deepEqual(matchDealsInText("両手仲介のマンションで買取再販、1200万円 abc123", ds), []);
+    assert.equal(pickDealInText("天満ハイツ ３０２ 内覧OK", deals).pick?.id, D1);
+    assert.equal(pickDealInText("吹田市山手町二丁目の測量が終わりました", deals).pick?.id, D3);
+    assert.equal(pickDealInText("【至急】ジオ北浜1205 ローン通りました", deals).pick?.id, D2);
+    assert.equal(pickDealInText("天満ハイツ302とジオ北浜1205の資料", deals).pick, null);
   });
 
   await t("a 名前：ちょうど1件のときだけ控える（行の中身・印2つ）", async () => {
