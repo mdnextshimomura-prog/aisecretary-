@@ -15,7 +15,7 @@
  * ログに出すのは操作名・結果の符号・件数だけ（題名・本文・userId は出さない）。
  */
 import { loadMembers, type Member } from "./members";
-import { replyTextAndCard } from "./line";
+import { groupCardsOff, replyCardsOff, replyTextAndCard } from "./line";
 import {
   buildDigest,
   candidatesEnabled,
@@ -61,7 +61,8 @@ export function candidateCardsActive(): boolean {
  * TASK_CANDIDATE_INSTANT=1 かつ候補カードが on のときだけ。off なら今までどおり黙って控える（17時に聞く）。
  */
 export function instantCandidateActive(): boolean {
-  return candidateCardsActive() && process.env.TASK_CANDIDATE_INSTANT === "1";
+  // グループにカードを出さないあいだ（GROUP_NO_CARDS=1）は、その場では聞かない（黙って控え、17時のまとめで聞く）
+  return candidateCardsActive() && process.env.TASK_CANDIDATE_INSTANT === "1" && !groupCardsOff();
 }
 
 export type CandidateOp = "cr" | "ch" | "cx";
@@ -102,6 +103,9 @@ export const MSG_CAND_ONLY_GROUP = "候補は、控えたグループの中で�
 export const MSG_CAND_OFF = "いま候補の機能は止めています";
 export const MSG_CAND_ASKED =
   "📝 タスクにするか迷ったので、候補に控えました。タスクにするならボタンを押してください";
+/** グループにカードを出さないあいだ（GROUP_NO_CARDS=1）の文。ボタンが無いので、17時のまとめ（番号で返す）へ案内する */
+export const MSG_CAND_ASKED_PLAIN =
+  "📝 タスクにするか迷ったので、候補に控えました。17時のまとめで聞きます（すぐ登録するなら「@秘書 候補」で番号を見て「1 登録」）";
 /** メンションの無い依頼をその場で聞くときの文（押さなければ17時のまとめでも聞く） */
 export const MSG_CAND_INSTANT =
   "📝 タスクにしますか？登録するならボタンを押してください（押さなければ、17時のまとめでも聞きます）";
@@ -559,7 +563,7 @@ export async function replyCandidateCard(
   );
   await (over.reply ?? replyTextAndCard)(
     replyToken,
-    MSG_CAND_ASKED,
+    replyCardsOff(replyToken) ? MSG_CAND_ASKED_PLAIN : MSG_CAND_ASKED,
     candidateCard(c, nameResolver(members)),
   );
   console.log("[task-candidate] asked-card shown 1");

@@ -146,12 +146,14 @@ export function gsProposalCard(o: { tid: string; ver: number; no: number; rev: n
 
 const mention = (staffId: string) => ({ staff: { type: "mention", mentionee: { type: "user", userId: staffId } } });
 
-/** グループへの依頼（D9）：textV2 のメンション＋ボタンなしのカード。検査に通らなければ null（送らない） */
-export function gsCaseRequestMessages(o: { staffId: string; no: number; place: string | null; lines: string[]; deadline: number }): unknown[] | null {
+/** グループへの依頼（D9）：textV2 のメンション＋ボタンなしのカード（plain なら文字）。検査に通らなければ null（送らない） */
+export function gsCaseRequestMessages(o: { staffId: string; no: number; place: string | null; lines: string[]; deadline: number; plain?: boolean }): unknown[] | null {
   const subj = `受付 ${receiptOf(o.no)}`;
   const head = `査定の事例をお願いします（${subj}）`;
   const body = [`物件：${o.place ?? "（カードの条件で）"}`, ...o.lines, `期日：${gsDeadlineLabel(o.deadline)}`, "取れたら、このトークに PDF を貼ってください"];
   if (![head, ...body].every(gsSafeText)) return null;
+  // グループにカードを出さないあいだ（GROUP_NO_CARDS=1）：同じ中身を文字で（2通のまま＝控える ID の並びは変わらない）
+  if (o.plain) return [{ type: "textV2", text: `{staff} ${head}`, substitution: mention(o.staffId) }, { type: "text", text: body.join("\n") }];
   return [
     { type: "textV2", text: `{staff} ${head}`, substitution: mention(o.staffId) },
     {

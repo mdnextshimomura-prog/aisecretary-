@@ -19,6 +19,39 @@ export function verifyLineSignature(
   return timingSafeEqualStr(hash, signature);
 }
 
+// グループにカードを出さない（2026-11-28・下村さん決定「会社のグループにカードが乱立して見づらい」）。
+// GROUP_NO_CARDS=1 のあいだ、グループ・複数人トークあての送信からカード（Flex）だけを外す。文字は1文字も変えない。
+// 1対1（下村さんの個人 LINE）のカードは今までどおり。off なら送る中身は足す前と同じ。
+// reply は宛先が分からないので、受付の入口（webhook）が replyToken ごとに「どこからの発言か」を控える（noteReplyTarget）。
+// 控えの無い replyToken は外さない（1対1のボタンを消さないほうを優先）。
+export function groupCardsOff(env: Record<string, string | undefined> = process.env): boolean {
+  return env.GROUP_NO_CARDS === "1";
+}
+const replyTargets = new Map<string, boolean>();
+const REPLY_TARGETS_MAX = 2000;
+/** webhook の各イベントの先頭で呼ぶ。sourceType は LINE の source.type（user／group／room） */
+export function noteReplyTarget(replyToken: string | undefined, sourceType: string | undefined): void {
+  if (!replyToken) return;
+  if (replyTargets.size >= REPLY_TARGETS_MAX) replyTargets.clear();
+  replyTargets.set(replyToken, sourceType === "group" || sourceType === "room");
+}
+/** この reply はカードを外すか（スイッチ on かつ グループ・複数人トークからの発言への返事） */
+export function replyCardsOff(replyToken: string, env: Record<string, string | undefined> = process.env): boolean {
+  return groupCardsOff(env) && replyTargets.get(replyToken) === true;
+}
+/** この push はカードを外すか（スイッチ on かつ 宛先がグループ C…・複数人トーク R…） */
+export function pushCardsOff(to: string, env: Record<string, string | undefined> = process.env): boolean {
+  return groupCardsOff(env) && /^[CR]/.test(to);
+}
+const isFlex = (m: unknown) => typeof m === "object" && m !== null && (m as { type?: unknown }).type === "flex";
+/** グループあてならカードを外した messages を返す。外した結果 0 通なら空の配列（呼び手は送らない） */
+function messagesFor(to: string, messages: unknown[]): unknown[] {
+  if (!pushCardsOff(to)) return messages;
+  const kept = messages.filter((m) => !isFlex(m));
+  if (kept.length !== messages.length) console.log(`[group-no-cards] push stripped ${messages.length - kept.length}`);
+  return kept;
+}
+
 // LINEメッセージ送信。送ったメッセージのID（引用リプライの照合に使う）を返す。
 // card（タスクのカード。task-card.ts）を渡すと、text を1通目のまま、カードを2通目に足す
 // （Reply API は1回で最大5通）。返す ID は今までどおり sentMessages[0]＝1通目（text）。
@@ -39,6 +72,10 @@ export async function replyTextAndCard(
   text: string,
   card?: FlexMessage
 ): Promise<{ textId: string | null; cardId: string | null; status?: number }> {
+  if (card && replyCardsOff(replyToken)) {
+    console.log("[group-no-cards] reply stripped 1");
+    card = undefined;
+  }
   const res = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
     headers: {
@@ -107,6 +144,10 @@ export async function pushTextAndCard(
   text: string,
   card?: FlexMessage
 ): Promise<boolean> {
+  if (card && pushCardsOff(to)) {
+    console.log("[group-no-cards] push stripped 1");
+    card = undefined;
+  }
   if (!card) return pushLineMessage(to, text);
   const res = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
@@ -129,6 +170,11 @@ export async function pushTextAndCard(
 
 // カード（Flex）だけを push で1通（朝のリマインドのカード・2026-11-10）。本文・宛先はログに出さない。
 export async function pushCard(to: string, card: FlexMessage): Promise<boolean> {
+  // グループあてのカードを止めているあいだは送らない（文字の一覧は呼び手が先に送っている）。送れた扱いで返す
+  if (pushCardsOff(to)) {
+    console.log("[group-no-cards] push skipped 1");
+    return true;
+  }
   const res = await fetch("https://api.line.me/v2/bot/message/push", {
     method: "POST",
     headers: {
@@ -405,6 +451,10 @@ export async function pushMessagesWithRetryKey(
   timeoutMs: number = PUSH_TIMEOUT_MS,
   fetchImpl: typeof fetch = fetch
 ): Promise<number | null> {
+  const had = messages.length;
+  messages = messagesFor(to, messages);
+  // カードだけの送信だった（外したら 0 通）：送らずに「送れた」と同じ 200 を返す
+  if (had > 0 && messages.length === 0) return 200;
   try {
     const res = await fetchImpl("https://api.line.me/v2/bot/message/push", {
       method: "POST",
@@ -436,6 +486,9 @@ export async function pushMessagesWithRetryKeyIds(
   timeoutMs: number = PUSH_TIMEOUT_MS,
   fetchImpl: typeof fetch = fetch
 ): Promise<{ status: number | null; ids: string[] }> {
+  const had = messages.length;
+  messages = messagesFor(to, messages);
+  if (had > 0 && messages.length === 0) return { status: 200, ids: [] };
   let res: Response;
   try {
     res = await fetchImpl("https://api.line.me/v2/bot/message/push", {

@@ -9,6 +9,8 @@ import {
   replyLineMessageDetailed,
   pushLineMessageDetailed,
   pushLineMessageWithId,
+  noteReplyTarget,
+  replyCardsOff,
 } from "@/lib/line";
 import {
   parseTaskFromMessage,
@@ -128,7 +130,7 @@ import {
   taskStatusName,
 } from "@/lib/task-buttons-wire";
 import { statusForConfirmComplete } from "@/lib/task-closed";
-import { bareMentionMenu, menuWordEntry } from "@/lib/task-menu";
+import { bareMentionMenu, menuWordEntry, MSG_MENU_GROUP_OFF } from "@/lib/task-menu";
 import { dealWordEntry } from "@/lib/deal-card";
 import { maybeAskPhotoMention } from "@/lib/photo-ask";
 import { photoAskDeps } from "@/lib/photo-ask-wire";
@@ -723,6 +725,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // ⓪ 帯替え（設計 2026-10-09）。営業部の PDF を控え、帯替えの依頼はここで最後まで扱う。
   //    依頼は今までの流れ（メールの下書き・初動確認・タスク等）には渡さない（設計 8）。
   //    それ以外のイベントは元の順番のまま obi.rest に入り、下の今までのループで扱う。
+  // グループにカードを出さない（GROUP_NO_CARDS=1）ための控え：どの replyToken がグループからの発言か（line.ts が返事のカードを外すのに使う）
+  for (const e of body.events ?? []) noteReplyTarget(e?.replyToken, e?.source?.type);
   const obi = await dispatchObiEvents(body.events, obiEventDeps(startedAt));
 
   // 処理を完了できなかったイベントがあれば非2xxを返してLINEに再送させる。
@@ -863,7 +867,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         text: stripMentions(event.message),
       })
     ) {
-      await replyMenu(replyToken).catch(() =>
+      // グループにカードを出さないあいだは、メニューのカードの代わりに案内だけ返す
+      await (replyCardsOff(replyToken) ? sendLineMessage(replyToken, MSG_MENU_GROUP_OFF) : replyMenu(replyToken)).catch(() =>
         console.error("[task-menu] reply-failed menu")
       );
       continue;
@@ -1692,7 +1697,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         attachments: attachments.length,
       })
     ) {
-      await replyMenu(replyToken).catch(() =>
+      await (replyCardsOff(replyToken) ? sendLineMessage(replyToken, MSG_MENU_GROUP_OFF) : replyMenu(replyToken)).catch(() =>
         console.error("[task-menu] reply-failed menu")
       );
       continue;

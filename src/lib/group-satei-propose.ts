@@ -243,7 +243,7 @@ export async function answerGsProposal(
   }
   const staff = picked.id;
   if (picked.checked) deps.log(`[group-satei] gy staff picked ${receiptOf(no)} ${picked.index + 1}/${staffIds.length}`);
-  const messages = gsCaseRequestMessages({ staffId: staff, no, place, lines: p.lines, deadline });
+  const messages = gsCaseRequestMessages({ staffId: staff, no, place, lines: p.lines, deadline, plain: env.GROUP_NO_CARDS === "1" });
   if (!messages) {
     await closeManual(a.tid, tk, p.rev, deps, kv);
     return { text: msgGsCaseSendFailed(no, false, plain), code: `case-request unsafe ${receiptOf(no)}`, settled: true };

@@ -37,6 +37,8 @@ export function menuActive(): boolean {
 export const FLEX_JSON_MAX = 30_000;
 
 export const MENU_TEXT = "📋 メニューです。見たいものを押してください";
+/** グループにカードを出さないあいだ（GROUP_NO_CARDS=1）の「@秘書 メニュー」への返事 */
+export const MSG_MENU_GROUP_OFF = "📋 グループではメニューのカードを止めています。「@秘書 候補」「3済」などの文字の返事は今までどおり使えます";
 export const MSG_TODAY_EMPTY = "今日・期限切れのタスクはありません";
 export const MSG_MINE_EMPTY = "あなたが担当のタスクは見つかりませんでした";
 export const MSG_PREPARING = "準備中です";
