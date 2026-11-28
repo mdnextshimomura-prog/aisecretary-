@@ -102,7 +102,10 @@ export function pickPhotoAskImages(
 ): { ids: string[]; quoted: boolean } {
   const images = media.filter((m) => m.kind === "image");
   if (ev.quotedMessageId) {
-    return { ids: images.some((m) => m.messageId === ev.quotedMessageId) ? [ev.quotedMessageId] : [], quoted: true };
+    // 引用された資料は、画像だけでなくファイル（PDF）も読む（2026-11-28：PDF を引用した名指しが「画像を読めませんでした」になった件）。
+    // PDF かどうかは取り出した中身で確かめる（photo-ask-wire の loadPhotoAskImages）。引用の無いときは今までどおり画像だけ
+    const quotable = media.filter((m) => m.kind === "image" || m.kind === "file");
+    return { ids: quotable.some((m) => m.messageId === ev.quotedMessageId) ? [ev.quotedMessageId] : [], quoted: true };
   }
   const inWindow = images.filter(
     (m) => m.at === undefined || (m.at >= ev.timestamp - PHOTO_ASK_WINDOW_MS && m.at <= ev.timestamp + 60_000),
@@ -139,6 +142,11 @@ export interface PhotoAskDeps {
   gsEntry?: Promise<string>;
   gsClaimed?(groupId: string, senderId: string): Promise<boolean>;
   listGsTickets?(groupId: string): Promise<unknown[]>;
+  /**
+   * グループ全体の資料の控え（gsatei:media。GROUP_SATEI が on のグループだけ入っている）。
+   * 引用された資料が送り主の控えに無いとき（ほかの人が貼った資料を引用した名指し）に、ここで探す。無ければ今までどおり
+   */
+  listGroupMedia?(groupId: string): Promise<PhotoAskMedia[]>;
   /** 待つ上限の起点（webhook の開始の時刻）。無ければ呼ばれた時刻 */
   startedAt?: number;
   now?(): number;
@@ -184,17 +192,17 @@ async function yieldToGroupSatei(ev: PhotoAskEvent, groupId: string, senderId: s
     deps.log("[photo-ask] gs-check-failed");
     return false;
   }
-  const rows: GsMedia[] = imageIds.map((id) => ({ messageId: id, kind: "image", senderId, at: media.find((m) => m.messageId === id)?.at ?? ev.timestamp }));
+  const rows: GsMedia[] = imageIds.map((id) => ({ messageId: id, kind: media.find((m) => m.messageId === id)?.kind === "file" ? "pdf" : "image", senderId, at: media.find((m) => m.messageId === id)?.at ?? ev.timestamp }));
   return gsTicketsTakeImages(tickets, rows, groupId, deps.env ?? process.env);
 }
 
 const NAME_MAX = 60;
 const cut = (s: string, n: number) => Array.from(s).slice(0, n).join("");
 
-const HEAD = "📷 業務指示のグループで、画像つきで下村さんあての名指しがありました。";
+const HEAD = "📷 業務指示のグループで、資料つきで下村さんあての名指しがありました。";
 
 /** 読めなかったときの知らせ（黙らない） */
-export const MSG_PHOTO_ASK_UNREAD = `${HEAD}\n画像を読めませんでした。LINE のグループで確かめてください。`;
+export const MSG_PHOTO_ASK_UNREAD = `${HEAD}\n資料（画像・PDF）を読めませんでした。LINE のグループで確かめてください。`;
 
 export function photoAskText(o: {
   propertyName: string | null;
@@ -289,6 +297,18 @@ export async function maybeAskPhotoMention(ev: PhotoAskEvent, deps: PhotoAskDeps
   } catch {
     deps.log("[photo-ask] skip:kv-failed");
     return false;
+  }
+  // 引用された資料が送り主の控えに無い：ほかの人が貼った資料かもしれないので、グループ全体の控えでも探す（画像・PDF だけ）
+  if (picked.quoted && picked.ids.length === 0 && ev.quotedMessageId && deps.listGroupMedia) {
+    try {
+      const hit = (await deps.listGroupMedia(groupId)).find((m) => m.messageId === ev.quotedMessageId && (m.kind === "image" || m.kind === "file"));
+      if (hit) {
+        picked = { ids: [hit.messageId], quoted: true };
+        media = [...media, hit];
+      }
+    } catch {
+      // 読めなければ今までどおり（下で「読めませんでした」を知らせる）
+    }
   }
   // 引用でなく画像も無い＝ふつうの名指し。何もしない
   if (picked.ids.length === 0 && !picked.quoted) {

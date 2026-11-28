@@ -13,7 +13,7 @@ import { pushMessagesWithRetryKey } from "./line";
 import { PHOTO_ASK_RESERVE_TTL, type PhotoAskDeps } from "./photo-ask";
 import { uuidv5 } from "./satei-notify";
 import { loadActiveDeals } from "./task-record-wire";
-import { gsOpenKey, gsTicketKey, gsWaitKey } from "./group-satei-data";
+import { gsMediaKey, gsOpenKey, gsTicketKey, gsWaitKey } from "./group-satei-data";
 import { gsClaimExists } from "./group-satei-wire";
 
 // X-Line-Retry-Key の uuidv5 の名前空間（固定。変えると送り直しの二重防止が効かなくなる）
@@ -33,6 +33,26 @@ export async function listGsTicketsReal(groupId: string): Promise<unknown[]> {
   }
   if (ids.size === 0) return [];
   return (await kv.mget<unknown[]>(...Array.from(ids).map((tid) => gsTicketKey(tid)))) ?? [];
+}
+/** グループ全体の資料の控え（gsatei:media）を、photo-ask の形（image／file）で返す。PDF は file として返す。KV が無ければ空 */
+export async function listGroupMediaReal(groupId: string): Promise<Array<{ messageId: string; kind: string; at?: number }>> {
+  if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return [];
+  const rows = (await kv.lrange<unknown>(gsMediaKey(groupId), 0, -1)) ?? [];
+  const out: Array<{ messageId: string; kind: string; at?: number }> = [];
+  for (const r of rows) {
+    let v: unknown = r;
+    if (typeof r === "string") {
+      try {
+        v = JSON.parse(r);
+      } catch {
+        continue;
+      }
+    }
+    const m = v as { messageId?: unknown; kind?: unknown; at?: unknown } | null;
+    if (!m || typeof m.messageId !== "string" || (m.kind !== "image" && m.kind !== "pdf")) continue;
+    out.push({ messageId: m.messageId, kind: m.kind === "pdf" ? "file" : "image", ...(typeof m.at === "number" ? { at: m.at } : {}) });
+  }
+  return out;
 }
 // Claude に渡せる添付のサイズ上限（media.ts と同じ考え方）
 const MAX_BYTES = 3.5 * 1024 * 1024;
@@ -72,7 +92,15 @@ export async function loadPhotoAskImages(ids: string[], fetchImpl: typeof fetch 
     if (!res.ok) throw new Error("content");
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length === 0 || buf.length > MAX_BYTES) throw new Error("size");
-    out.push({ kind: "image", mediaType: imageMediaType(res.headers.get("content-type") ?? ""), base64: buf.toString("base64") });
+    // 引用された PDF も読む：中身の頭が %PDF なら PDF として渡す。画像でも PDF でもないファイル（Excel など）は読めなかった扱い
+    const ct = res.headers.get("content-type") ?? "";
+    if (buf.subarray(0, 5).toString("latin1") === "%PDF-") {
+      out.push({ kind: "pdf", mediaType: "application/pdf", base64: buf.toString("base64") });
+    } else if (/^image\//i.test(ct)) {
+      out.push({ kind: "image", mediaType: imageMediaType(ct), base64: buf.toString("base64") });
+    } else {
+      throw new Error("type");
+    }
   }
   return out;
 }
@@ -114,6 +142,7 @@ export function photoAskDeps(
     },
     log: (l) => console.log(l),
     listGsTickets: (groupId) => within(listGsTicketsReal(groupId), GS_TICKETS_TIMEOUT_MS),
+    listGroupMedia: (groupId) => within(listGroupMediaReal(groupId), GS_TICKETS_TIMEOUT_MS),
     gsClaimed: (groupId, senderId) => gsClaimExists(groupId, senderId),
     gsEntry: o.gsEntry,
     startedAt: o.startedAt,
