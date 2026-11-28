@@ -67,10 +67,30 @@ export interface AskRow {
   assignee: string | null;
   assigneeUserId: string | null;
   at: number;
+  /** 聞いたグループ（催促を出すグループと違う件は、グループの催促には載せない）。前の版の控えには無い */
+  group?: string | null;
+}
+/** KV が JSON の文字のまま返した行も読む */
+const unjson = (v: unknown): unknown => {
+  if (typeof v !== "string") return v;
+  try {
+    return JSON.parse(v);
+  } catch {
+    return null;
+  }
+};
+/** 時間切れなら投げる（KV が遅いとき、今までの流れを止めないため） */
+export const KV_READ_TIMEOUT_MS = 2_500;
+export function bounded<T>(p: Promise<T>, ms: number = KV_READ_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timeout")), ms);
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
 }
 function asAskRows(v: unknown): AskRow[] {
   if (!Array.isArray(v)) return [];
-  return v.filter(
+  return v.map(unjson).filter(
     (e): e is AskRow =>
       Boolean(e) && typeof e === "object" && typeof (e as AskRow).askId === "string" && typeof (e as AskRow).taskId === "string" && typeof (e as AskRow).title === "string"
   );
@@ -222,7 +242,19 @@ const PROGRESS_WHAT_MAX = 60;
 const ASK_ANSWER_MAX = 100;
 export const MSG_ASK_RECORDED = "📝 回答を記録しました";
 export const MSG_ASK_WRITE_FAILED = "⚠️ 回答を書き込めませんでした。もう一度お試しください。";
-const LEAD_NUM_RE = /^\d{1,2}\s*[.．:：）)、]?\s*/;
+/**
+ * 「担当に聞く」への返事の頭の番号を外す（そのタスク1件の返事なので番号は要らない）。
+ * 外すのは、進捗の読み方と同じ「番号＋必ず区切り（空白か . ． : ： ) ） 、）」の形だけ。記号のすぐ後ろが数字（「3.5万円」「10:30」）は外さない。
+ * 「10時に伺います」「2月末に決済予定」「12/3に決済」はそのまま。今の言葉（「3済」「3待ち …」＝isKnown）は番号を外す。
+ */
+const LEAD_STRICT_RE = /^\d{1,2}(\s*[.．:：）)、]\s*|\s+)(\S[\s\S]*)$/;
+const LEAD_KNOWN_RE = /^\d{1,2}(?:[\s,、，・]+\d{1,2})*\s*[.．:：）)、]?\s*/;
+export function stripAskLead(text: string, isKnown: (line: string) => boolean): string {
+  const m = text.match(LEAD_STRICT_RE);
+  if (m && !(/^[.．:：]$/.test(m[1]) && /^\d/.test(m[2]))) return m[2].trim();
+  if (!/\n/.test(text) && isKnown(text)) return text.replace(LEAD_KNOWN_RE, "").trim() || text;
+  return text;
+}
 
 /** 控えが「担当に聞く」のメッセージか（slot:"ask"・taskId つき） */
 function askOf(rec: unknown): { taskId: string; title: string; askId: string; at: number } | null {
@@ -273,7 +305,7 @@ async function handleAskAnswer(
     deps.log("[staff-digest] ask answer 0");
     return { handled: true, committed: false };
   }
-  if (ask.askId && deps.askDone) await deps.askDone(jstDay(ask.at || deps.now()), ask.askId).catch(() => undefined);
+  if (ask.askId && deps.askDone) await bounded(deps.askDone(jstDay(ask.at || deps.now()), ask.askId)).catch(() => undefined);
   const fromOwner = deps.isOwner ? await deps.isOwner(input.userId ?? null).catch(() => false) : false;
   let pushed = fromOwner;
   if (!fromOwner && deps.notifyOwner) {
@@ -313,6 +345,23 @@ export function freeTextOf(
   if ((joined.match(/[0-9A-Za-zぁ-んァ-ヶ一-龠々ー０-９Ａ-Ｚａ-ｚ]/g) ?? []).length < 2) return null;
   if (Array.from(joined).length <= ACK_MAX && ACK_RE.test(joined)) return null;
   return cut(joined, BODY_MAX);
+}
+
+export const MSG_SD_NO_TARGET = "どの件か分かりませんでした。聞かれたメッセージに返信するか、番号をつけて返信してください";
+
+/** 催促のメッセージの控えから、同じ通に載せた「聞いた件」を読む（無ければ空） */
+function askedOf(rec: unknown): Array<{ taskId: string; title: string; askId: string; at: number }> {
+  const list = (rec as { asks?: unknown } | null)?.asks;
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((r) => r as { taskId?: unknown; title?: unknown; askId?: unknown; at?: unknown } | null)
+    .filter((r): r is { taskId: string; title?: unknown; askId?: unknown; at?: unknown } => Boolean(r) && typeof r!.taskId === "string" && Boolean(r!.taskId))
+    .map((r) => ({
+      taskId: r.taskId,
+      title: typeof r.title === "string" ? r.title : "",
+      askId: typeof r.askId === "string" ? r.askId : "",
+      at: typeof r.at === "number" ? r.at : 0,
+    }));
 }
 
 /** 控えたまとめの1通から、載せた番号を読む（古い控え・形の違うものは null） */
@@ -357,7 +406,7 @@ export async function handleDigestReply(
   if (!entries && free === null && askBody === null) return pass;
   let rec: unknown;
   try {
-    rec = await deps.kv.get(digestMsgKey(input.quotedMessageId));
+    rec = await bounded(deps.kv.get(digestMsgKey(input.quotedMessageId)));
   } catch {
     deps.log("[staff-digest] reply kv-failed");
     return pass;
@@ -366,17 +415,22 @@ export async function handleDigestReply(
   const ask = askOf(rec);
   if (ask) {
     if (askBody === null) return pass;
-    // 頭の番号（「3 アポ取れました」の「3」）は、このタスク1件の返事なので外す
-    const body = askBody.replace(LEAD_NUM_RE, "").trim() || askBody;
-    return handleAskAnswer(ask, body, input, deps);
+    // 頭の番号（「3 アポ取れました」の「3」）は、このタスク1件の返事なので外す（「10時に…」「2月末…」は外さない）
+    return handleAskAnswer(ask, stripAskLead(askBody, deps.isKnown), input, deps);
   }
   if (!entries && free === null) return pass;
   if (!entries && free !== null) {
     const nums = numsOf(rec);
+    // 催促のメッセージは、番号つきの件（朝の分）と、番号の無い「聞いた件」を1通に載せる。合わせて1件のときだけ、番号の無い返事を受ける
+    const asked = askedOf(rec);
     // 番号の控えの無い古いまとめ（1通に全員ぶん）は、今までどおり受けない
-    if (!nums || nums.length === 0) return pass;
-    if (nums.length > 1) {
-      await deps.reply(MSG_SD_NO_NUMBER).catch(() => deps.log("[staff-digest] reply send-failed"));
+    if (!nums || nums.length + asked.length === 0) return pass;
+    if (nums.length === 0 && asked.length === 1) {
+      // 聞いた件が1件だけ：その件への返事として受ける（返事の印も付く）
+      return handleAskAnswer(asked[0], free, input, deps);
+    }
+    if (nums.length + asked.length > 1) {
+      await deps.reply(asked.length > 0 ? MSG_SD_NO_TARGET : MSG_SD_NO_NUMBER).catch(() => deps.log("[staff-digest] reply send-failed"));
       deps.log("[staff-digest] reply no-number");
       return { handled: true, committed: false };
     }
@@ -501,7 +555,7 @@ export async function recordReplies(
 }
 
 function asFwdRow(v: unknown): FwdRow | null {
-  const r = v as Partial<FwdRow> | null;
+  const r = unjson(v) as Partial<FwdRow> | null;
   if (!r || typeof r !== "object" || typeof r.title !== "string" || typeof r.what !== "string") return null;
   return { at: typeof r.at === "number" ? r.at : 0, who: typeof r.who === "string" && r.who ? r.who : null, title: r.title, what: r.what };
 }
@@ -641,11 +695,11 @@ const NUDGE_SUBJECT = "朝のまとめ";
 const flexText = (t: string, o: Record<string, unknown> = {}) => ({ type: "text", text: t, size: "sm", color: "#333333", wrap: true, ...o });
 
 /** 下村さんの 1対1 へ出す［催促する］のカード */
-export function nudgeAskCard(day: string, silent: AmEntry[], asks: AskRow[] = []): FlexMessage {
+export function nudgeAskCard(day: string, silent: AmEntry[], asks: AskRow[] = [], otherAsks: AskRow[] = []): FlexMessage {
   const head =
     silent.length > 0
       ? `朝のまとめに返事が無いタスクが ${silent.length}件あります`
-      : `聞いた件に、まだ返事がありません（${asks.length}件）`;
+      : `聞いた件に、まだ返事がありません（${asks.length + otherAsks.length}件）`;
   const { groups, unassigned } = groupByAssignee(silent);
   const body: unknown[] = [flexText(head, { weight: "bold", size: "md" })];
   let shown = 0;
@@ -668,6 +722,14 @@ export function nudgeAskCard(day: string, silent: AmEntry[], asks: AskRow[] = []
       body.push(flexText(`・${a.assignee ? `${a.assignee}さん` : "担当なし"}：（聞いた件）${cut(a.title, TITLE_MAX)}`));
     }
     if (asks.length > ASK_LINES_MAX) body.push(flexText(`ほか ${asks.length - ASK_LINES_MAX}件`, { color: "#555555" }));
+  }
+  // 別のグループで聞いた件：会社のグループの催促には載せない（カードで知らせるだけ）
+  if (otherAsks.length > 0) {
+    body.push(flexText("別のグループの件です。そのグループで聞き直してください", { weight: "bold", margin: "md" }));
+    for (const a of otherAsks.slice(0, ASK_LINES_MAX)) {
+      body.push(flexText(`・${a.assignee ? `${a.assignee}さん` : "担当なし"}：（聞いた件）${cut(a.title, TITLE_MAX)}`));
+    }
+    if (otherAsks.length > ASK_LINES_MAX) body.push(flexText(`ほか ${otherAsks.length - ASK_LINES_MAX}件`, { color: "#555555" }));
   }
   body.push(
     flexText("押すと、会社のグループで担当にメンションして声をかけます。押さなければ何も送りません", { color: "#555555", margin: "md" })
@@ -705,6 +767,8 @@ export interface NudgeAskDeps {
   kv: Pick<SdKv, "get" | "set" | "smembers" | "sadd" | "rpush"> & Partial<Pick<SdKv, "lrange">>;
   owner: string | null;
   now?(): number;
+  /** 催促を出すグループ（会社のグループ）。別のグループで聞いた件は、グループの催促には載せずカードにだけ出す */
+  group?: string | null;
   push(to: string, messages: unknown[], key: string): Promise<number | null>;
   log(line: string): void;
 }
@@ -727,20 +791,33 @@ export async function askNudge(
     const am = asAmEntries(await deps.kv.get(amKey(day)));
     // 担当に聞いて、まだ返事の無い件（読めなければ無いものとして続ける）
     let asks: AskRow[] = [];
+    // 別のグループで聞いた件（その担当が会社のグループにいるとは限らないので、グループの催促には載せない）
+    let otherAsks: AskRow[] = [];
+    // 今日そのタスクに最後に聞いた時刻（聞いたときに秘書が Notion へ「質問」を書くので、その分を「Notion で更新」と数えない）
+    const lastAskAt = new Map<string, number>();
+    const tid = (id: string) => id.replace(/-/g, "");
     try {
       const rows = deps.kv.lrange ? await deps.kv.lrange(askListKey(day), 0, -1) : [];
-      if (rows.length > 0) asks = openAsks(rows, await deps.kv.smembers(askDoneKey(day)));
+      for (const r of asAskRows(rows)) lastAskAt.set(tid(r.taskId), Math.max(lastAskAt.get(tid(r.taskId)) ?? 0, r.at));
+      if (rows.length > 0) {
+        const open = openAsks(rows, await deps.kv.smembers(askDoneKey(day)));
+        const here = (r: AskRow) => !r.group || !deps.group || r.group === deps.group;
+        asks = open.filter(here);
+        otherAsks = open.filter((r) => !here(r));
+      }
     } catch {
       asks = [];
+      otherAsks = [];
     }
-    if (am.length === 0 && asks.length === 0) return "none";
+    if (am.length === 0 && asks.length + otherAsks.length === 0) return "none";
     const answered = new Set(await deps.kv.smembers(answeredKey(day)));
     const cur = new Map(current.map((t) => [t.id, t]));
     // Notion で更新されたもの（まだ返事の印が無いものだけ）。印と知らせの控えに失敗しても、催促の判定は続ける
     const edited = am.filter((a) => {
       if (typeof a.at !== "number" || answered.has(a.id)) return false;
       const ms = Date.parse(cur.get(a.id)?.lastEdited ?? "");
-      return !Number.isNaN(ms) && ms > a.at + NOTION_EDIT_MARGIN_MS;
+      const since = Math.max(a.at, lastAskAt.get(tid(a.id)) ?? 0);
+      return !Number.isNaN(ms) && ms > since + NOTION_EDIT_MARGIN_MS;
     });
     if (edited.length > 0) {
       for (const a of edited) answered.add(a.id);
@@ -761,15 +838,15 @@ export async function askNudge(
       const c = cur.get(a.id);
       return Boolean(c) && c!.status === a.status && (c!.dueDate ?? "").slice(0, 10) === a.due && !answered.has(a.id);
     });
-    if (silent.length === 0 && asks.length === 0) return "none";
+    if (silent.length === 0 && asks.length + otherAsks.length === 0) return "none";
     await deps.kv.set(nudgeKey(day), silent, DAY_TTL_SEC);
     if (asks.length > 0) await deps.kv.set(askNudgeKey(day), asks, DAY_TTL_SEC);
-    const status = await deps.push(deps.owner, [nudgeAskCard(day, silent, asks)], `sd-nudge-ask:${day}`).catch(() => null);
+    const status = await deps.push(deps.owner, [nudgeAskCard(day, silent, asks, otherAsks)], `sd-nudge-ask:${day}`).catch(() => null);
     if (!sentOk(status)) {
       deps.log("[staff-digest] nudge ask-failed");
       return "failed";
     }
-    deps.log(`[staff-digest] nudge asked ${silent.length}${asks.length > 0 ? ` ask ${asks.length}` : ""}`);
+    deps.log(`[staff-digest] nudge asked ${silent.length}${asks.length + otherAsks.length > 0 ? ` ask ${asks.length + otherAsks.length}` : ""}`);
     return "asked";
   } catch {
     deps.log("[staff-digest] nudge ask-failed");
@@ -897,7 +974,18 @@ export async function handleSdPostback(a: { day: string }, src: { userId?: strin
     // 催促のメッセージへの返信も、まとめへの返信として受けられるようにする（控えられなくても催促は届いている）
     for (const id of r.ids) {
       await deps.kv
-        .set(digestMsgKey(id), { at: deps.now(), slot: "nudge", nums: list.map((e) => e.n), uid: null }, DIGEST_MSG_TTL_SEC)
+        .set(
+          digestMsgKey(id),
+          {
+            at: deps.now(),
+            slot: "nudge",
+            nums: list.map((e) => e.n),
+            uid: null,
+            // 同じ通に載せた「聞いた件」（番号は無い。番号の無い返事の行き先を決めるのに使う）
+            asks: asks.map((r) => ({ taskId: r.taskId, title: r.title, askId: r.askId, at: r.at })),
+          },
+          DIGEST_MSG_TTL_SEC
+        )
         .catch(() => undefined);
     }
     return say(msgSdSent(list.length + asks.length), "sent");

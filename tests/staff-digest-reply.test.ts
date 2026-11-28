@@ -507,7 +507,7 @@ async function main() {
     assert.deepEqual(x.logs, ["[staff-digest] nudge sent"]);
     assert.deepEqual(x.keys, [`sd-nudge:${DAY}`]);
     // 催促のメッセージへの返信も、まとめへの返信として受けられるよう ID と番号を控える
-    assert.deepEqual(x.m.get(digestMsgKey("N1")), { at: NOW, slot: "nudge", nums: [1, 3, 4, 2], uid: null });
+    assert.deepEqual(x.m.get(digestMsgKey("N1")), { at: NOW, slot: "nudge", nums: [1, 3, 4, 2], uid: null, asks: [] });
     await R.handleSdPostback({ day: DAY }, { userId: OWNER }, x.deps);
     assert.equal(x.group.length, 1);
     assert.equal(x.replies[1], "もう送ってあります");

@@ -34,6 +34,10 @@ const FWD_LIST_TTL_SEC = 3 * 24 * 60 * 60;
 /** 今ある返事のあとに足す控えは、ここまでしか待たない（KV・名簿が遅くても webhook を止めない） */
 const NOTE_TIMEOUT_MS = 3_000;
 
+const RPUSH_LUA =
+  "for i = 3, #ARGV do redis.call('RPUSH', KEYS[1], ARGV[i]) end redis.call('LTRIM', KEYS[1], -tonumber(ARGV[1]), -1) redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2])) return 1";
+const SADD_LUA =
+  "for i = 2, #ARGV do redis.call('SADD', KEYS[1], ARGV[i]) end redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1])) return 1";
 const realKv: SdKv = {
   // （担当に聞く staff-ask-wire.ts も同じ KV の部品を使う。下で sdRealKv として出す）
   get: (key) => kv.get(key),
@@ -44,12 +48,10 @@ const realKv: SdKv = {
   del: async (key) => {
     await kv.del(key);
   },
+  // 足す・切り詰める（送れない日が続いても列を伸ばし続けない）・期限を付けるを1回の呼び出しで行う（期限の無い列を残さない）
   rpush: async (key, values) => {
     if (values.length === 0) return;
-    await kv.rpush(key, ...values);
-    // 送れない日が続いても列を伸ばし続けない
-    await kv.ltrim(key, -FWD_LIST_MAX, -1);
-    await kv.expire(key, FWD_LIST_TTL_SEC);
+    await kv.eval(RPUSH_LUA, [key], [String(FWD_LIST_MAX), String(FWD_LIST_TTL_SEC), ...values.map((v) => JSON.stringify(v))]);
   },
   lrange: (key, start, stop) => kv.lrange(key, start, stop),
   ltrim: async (key, start, stop) => {
@@ -57,8 +59,7 @@ const realKv: SdKv = {
   },
   sadd: async (key, members, ex) => {
     if (members.length === 0) return;
-    await kv.sadd(key, members[0], ...members.slice(1));
-    await kv.expire(key, ex);
+    await kv.eval(SADD_LUA, [key], [String(ex), ...members]);
   },
   smembers: async (key) => (await kv.smembers(key)).map(String),
 };
@@ -255,7 +256,7 @@ export async function askNudgeBeforeEvening(
   day: string,
   all: Array<{ id: string; status: string; dueDate: string; lastEdited?: string }>
 ): Promise<void> {
-  await askNudge(day, all, { kv: realKv, owner: inboxOwner(), push: pushOwner, now: Date.now, log });
+  await askNudge(day, all, { kv: realKv, owner: inboxOwner(), push: pushOwner, now: Date.now, group: DIGEST_GROUP_ID, log });
 }
 
 /** 朝のまとめを送れたあとに：出したタスクを控える（催促の判定用） */

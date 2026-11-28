@@ -980,12 +980,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     // ①-1a 担当に聞く：［自分で書く］のあとの 1対1 の1通（STAFF_DIGEST=1・印 staffask:<userId> があるときだけ。
     // off・グループ・印なしは false で下へ。グループの発言と off は KV も読まない）。
+    // ここでは送らない：文を控えて確認のカード（［送る］［書き直す］［やめる］）を返すだけ。
+    // 「3済」「#新規…」「送信」など、ほかの機能への指示に見える1通は控えずに下へ流す。
     // 査定の差し戻し理由・［直す］・足りない項目の印、メールの下書きの確認は、この上で先に受ける（それらを横取りしない）
     if (
       await handleStaffAskText(
-        { userId: source.userId, groupId: source.groupId, text: event.message.text },
-        async (text) => {
-          await sendLineMessage(replyToken, text);
+        {
+          userId: source.userId,
+          groupId: source.groupId,
+          text: event.message.text,
+          mentionsBot: taskMentionState(event.message.mention?.mentionees, BOT_USER_ID).mentionsBot,
+        },
+        async (text, card) => {
+          await sendLineMessage(replyToken, text, card);
         },
       )
     ) {

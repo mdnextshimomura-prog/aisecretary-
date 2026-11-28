@@ -2,6 +2,7 @@
  * 担当に聞く（staff-ask.ts）を、本物の KV・LINE・Notion・名簿につなぐ。
  * どの入口も、STAFF_DIGEST が off なら KV・Notion・名簿・LINE の push を呼ばずに返る。例外は投げない。
  */
+import { randomUUID } from "node:crypto";
 import { Client } from "@notionhq/client";
 import { kv } from "@vercel/kv";
 import { inboxOwner } from "./candidate-card";
@@ -80,6 +81,7 @@ function askDeps(reply: (text: string, card?: FlexMessage) => Promise<void>): As
   return {
     now: Date.now,
     kv: sdRealKv,
+    token: () => randomUUID().replace(/-/g, "").slice(0, 16),
     isOwner: isInboxOwner,
     getTask: readAskTask,
     ownerName: async () => {
@@ -111,8 +113,8 @@ export async function handleStaffAskPostback(
 
 /** webhook の 1対1 の文字から：［自分で書く］のあとの1通なら扱って true。off・グループ・印なしは false（今までの流れへ） */
 export async function handleStaffAskText(
-  input: { userId?: string | null; groupId?: string | null; text: string },
-  reply: (text: string) => Promise<void>
+  input: { userId?: string | null; groupId?: string | null; text: string; mentionsBot?: boolean },
+  reply: (text: string, card?: FlexMessage) => Promise<void>
 ): Promise<boolean> {
   if (!staffDigestOn() || input.groupId || !input.userId) return false;
   try {

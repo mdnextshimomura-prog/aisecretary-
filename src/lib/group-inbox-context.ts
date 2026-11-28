@@ -42,11 +42,12 @@ export interface CtxKv {
   push(key: string, row: CtxRow, keep: number, ttlSec: number): Promise<void>;
   range(key: string): Promise<unknown[]>;
 }
+// 足す・切り詰める・期限を付けるを1回の呼び出しで行う（途中で待つのをやめても、期限の無い列を残さない＝発言の控えが残り続けない）
+const PUSH_LUA =
+  "redis.call('RPUSH', KEYS[1], ARGV[1]) redis.call('LTRIM', KEYS[1], -tonumber(ARGV[2]), -1) redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3])) return 1";
 const realKv: CtxKv = {
   push: async (key, row, keep, ttl) => {
-    await kv.rpush(key, row);
-    await kv.ltrim(key, -keep, -1);
-    await kv.expire(key, ttl);
+    await kv.eval(PUSH_LUA, [key], [JSON.stringify(row), String(keep), String(ttl)]);
   },
   range: (key) => kv.lrange(key, 0, -1),
 };
@@ -82,7 +83,16 @@ export async function recordInboxContext(
   }
 }
 
-function asRow(v: unknown): CtxRow | null {
+function asRow(raw: unknown): CtxRow | null {
+  let v = raw;
+  // KV が JSON の文字のまま返したときも読めるように
+  if (typeof v === "string") {
+    try {
+      v = JSON.parse(v);
+    } catch {
+      return null;
+    }
+  }
   const r = v as Partial<CtxRow> | null;
   if (!r || typeof r !== "object" || typeof r.t !== "string" || !r.t) return null;
   // 数字だけの ID は KV の読み出しで数に戻ることがあるので、文字にそろえる
