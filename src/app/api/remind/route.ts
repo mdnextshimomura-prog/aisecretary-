@@ -6,6 +6,9 @@ import { isCronAuthorized } from "@/lib/cron-auth";
 // vercel.json: { "crons": [{ "path": "/api/remind", "schedule": "0 23 * * *" }] }
 // ※ UTCで23時 = JST 08時
 
+// 朝のまとめ（個人あての分を含む）が途中で切られないよう、この入口の上限を明示する（毎分の見回りと同じ 60 秒）
+export const maxDuration = 60;
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   // Vercel Cron の認証ヘッダー検証。CRON_SECRET が未設定なら誰も通さない（`Bearer undefined` で通る書き方にしない）
   if (!isCronAuthorized(req.headers.get("authorization"))) {

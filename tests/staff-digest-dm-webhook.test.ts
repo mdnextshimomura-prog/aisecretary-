@@ -227,6 +227,21 @@ const quiet = () => aiCalls === 0 && linePushes.length === 0 && otherFetch.lengt
   await post(route, [again]);
   ok("届き直し：進捗は1回だけ書く", notionCalls.filter((c) => c.startsWith("append")).length === 1 && lineReplies.length === 1, JSON.stringify([notionCalls, replyTexts()]));
 
+  // 5b) 番号の無い文：送ってから3時間を過ぎたら受けない（案内）。その人あての 1対1 のまとめを引用していれば受ける
+  const STAFF2 = "U" + "e".repeat(32);
+  store.set(dmUserKey(STAFF2), JSON.stringify({ date: "2026-11-28", slot: "am", nums: [1], taskIds: [PAGE_A], at: Date.now() - 4 * 60 * 60 * 1000 }));
+  store.set("staffdigest:msg:dm-msg-1", JSON.stringify({ at: 1, slot: "am", nums: [1], uid: STAFF2, dm: true }));
+  store.set("staffdigest:msg:dm-msg-other", JSON.stringify({ at: 1, slot: "am", nums: [1], uid: STAFF, dm: true }));
+  reset();
+  await post(route, [text(STAFF2, "今日はお昼どうしますか")]);
+  ok("3時間を過ぎた番号の無い文：Notion に書かず、案内だけ", notionCalls.length === 0 && JSON.stringify(replyTexts()) === JSON.stringify([NOTICE]), JSON.stringify([notionCalls, replyTexts()]));
+  reset();
+  await post(route, [msg(STAFF2, { type: "text", text: "送りました", quotedMessageId: "dm-msg-other" })]);
+  ok("別の人あてのまとめを引用しても受けない", notionCalls.length === 0 && lineReplies.length === 0, JSON.stringify([notionCalls, replyTexts()]));
+  reset();
+  await post(route, [msg(STAFF2, { type: "text", text: "送りました", quotedMessageId: "dm-msg-1" })]);
+  ok("自分あての 1対1 のまとめを引用した番号の無い文：進捗として書く", JSON.stringify(notionCalls) === JSON.stringify(["query-number 1", `append ${PAGE_A}`]) && replyTexts()[0] === "📝 1 の進捗を記録しました", JSON.stringify([notionCalls, replyTexts()]));
+
   // 6) 控えの無い人：今までどおり読み飛ばし（KV は控えを1回読むだけ）
   reset();
   res = await post(route, [text(OUTSIDER, "1済")]);

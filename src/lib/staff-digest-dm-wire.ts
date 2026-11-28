@@ -9,7 +9,8 @@ import { GS_RETRY_NAMESPACE } from "./group-satei-data";
 import { pushMessagesWithRetryKeyIds, sendLineMessage } from "./line";
 import { appendTaskNote } from "./notion";
 import { uuidv5 } from "./satei-notify";
-import { fetchLikeMorning, realSendDeps, type DigestMessage, type DigestSlot, type DigestTask } from "./staff-digest";
+import type { Chunk } from "./chunk";
+import { DIGEST_GROUP_ID, digestMsgKey, fetchLikeMorning, realSendDeps, type DigestBuildCtx, type DigestMessage, type DigestSlot, type DigestTask } from "./staff-digest";
 import {
   asDmUserRec,
   DM_NOTICE_TTL_SEC,
@@ -23,7 +24,7 @@ import {
   staffDigestDmOn,
   type DmUserRec,
 } from "./staff-digest-dm";
-import { bounded } from "./staff-digest-reply";
+import { bounded, chunkToMessage } from "./staff-digest-reply";
 import { knownLineDeps, noteItems, sdRealKv, senderName } from "./staff-digest-reply-wire";
 import { followupEnabled } from "./task-status";
 import { checkSecretarySource } from "./webhook-source";
@@ -31,7 +32,29 @@ import { checkSecretarySource } from "./webhook-source";
 const log = (line: string) => console.log(line);
 const USER_RE = /^U[0-9a-f]{32}$/;
 const PROFILE_TIMEOUT_MS = 3_000;
-const DM_PUSH_TIMEOUT_MS = 8_000;
+const DM_PUSH_TIMEOUT_MS = 6_000;
+const ESC_PUSH_TIMEOUT_MS = 8_000;
+
+/**
+ * 張り出しをグループへ送る（5通までを1回の push。束ごとに retry key つき＝印を外してやり直しても、届いていれば LINE が重ねない）。
+ * 送れた通数（2xx・409）・渡した順のメッセージ ID・結果の分からなかった通数（時間切れ・5xx）を返す。例外は投げない。
+ */
+async function pushEscalation(chunks: Chunk[], key: string): Promise<{ sent: number; ids: Array<string | null>; unknown: number }> {
+  const ids: Array<string | null> = chunks.map(() => null);
+  let sent = 0;
+  let unknown = 0;
+  for (let at = 0; at < chunks.length; at += 5) {
+    const part = chunks.slice(at, at + 5);
+    const r = await pushMessagesWithRetryKeyIds(DIGEST_GROUP_ID, part.map(chunkToMessage), uuidv5(`${key}:${at / 5}`, GS_RETRY_NAMESPACE), ESC_PUSH_TIMEOUT_MS).catch(
+      () => ({ status: null as number | null, ids: [] as string[] })
+    );
+    if (r.status !== null && ((r.status >= 200 && r.status < 300) || r.status === 409)) {
+      sent += part.length;
+      if (r.ids.length === part.length) r.ids.forEach((id, i) => (ids[at + i] = id));
+    } else if (r.status === null || r.status >= 500) unknown += part.length;
+  }
+  return { sent, ids, unknown };
+}
 
 /**
  * 友だちか（LINE の GET /v2/bot/profile/{userId}）。200＝true、404＝false、ほか（5xx・401・時間切れ・例外・設定なし）＝null。
@@ -67,12 +90,12 @@ export async function lineFriendStatus(
 /** 朝・夕方のまとめを送る（友だちの担当は 1対1 へ、ほかは今までどおりグループへ）。STAFF_DIGEST_DM=1 の道からだけ呼ぶ */
 export async function sendDigestWithDmReal<T extends DigestTask>(
   slot: DigestSlot,
-  day: string,
+  ctx: DigestBuildCtx,
   messages: DigestMessage[],
   ordered: Array<{ task: T; n: number }>,
   now: number
 ): Promise<number> {
-  return sendDigestWithDm(slot, day, messages, ordered, now, {
+  return sendDigestWithDm(slot, ctx, messages, ordered, now, {
     ...realSendDeps,
     kv: sdRealKv,
     allowListed: (userId) => checkSecretarySource({ type: "user", userId }).ok,
@@ -93,6 +116,7 @@ export async function runStaffDigestDmEscalationOnTick(now: number): Promise<voi
   try {
     await runDmEscalationOnTick(now, process.env, {
       ...realSendDeps,
+      push: pushEscalation,
       followup: followupEnabled(),
       kv: sdRealKv,
       // 引けないときは営業日として扱う（朝・夕方のまとめと同じ fail-open）
@@ -108,7 +132,7 @@ interface PassageEvent {
   type?: string;
   replyToken?: string;
   source?: { type?: string; userId?: string };
-  message?: { id?: string; type?: string; text?: string };
+  message?: { id?: string; type?: string; text?: string; quotedMessageId?: string };
 }
 
 /**
@@ -155,6 +179,14 @@ export async function staffDmPassage(
         if (replyToken) await sendLineMessage(replyToken, text);
       },
       note: (items, name) => noteItems(userId, items, name),
+      // 引用先が、その人あての 1対1 のまとめか（番号の無い文のときだけ読む。2.5秒まで）
+      quotedNums: async () => {
+        const q = event.message?.quotedMessageId;
+        if (!q) return null;
+        const m = (await bounded(sdRealKv.get(digestMsgKey(q)))) as { dm?: unknown; uid?: unknown; nums?: unknown } | null;
+        if (!m || m.dm !== true || m.uid !== userId || !Array.isArray(m.nums)) return null;
+        return m.nums.filter((x): x is number => typeof x === "number");
+      },
       noticeOnce: async () => (await kv.set(dmNoticeKey(userId), 1, { nx: true, ex: DM_NOTICE_TTL_SEC })) === "OK",
       log,
     });

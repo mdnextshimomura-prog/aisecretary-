@@ -142,6 +142,14 @@ export interface DigestInput<T extends DigestTask> {
   ask?: string;
 }
 
+/** 通を組み直すときの材料（個人あてに出した分を除いて、グループの通を作り直すのに使う） */
+export interface DigestBuildCtx {
+  today: string;
+  tomorrow: string;
+  followup: boolean;
+  notionUrl?: string | null;
+}
+
 export interface DigestOutput<T extends DigestTask> {
   /** 担当ごとに1通（最初に出てきた順）。担当の決まっていないものは最後の1通。長すぎる人は見出しをくり返して分ける */
   messages: DigestMessage[];
@@ -320,8 +328,11 @@ export async function saveDigestMessages(
   now: number,
   store: DigestMsgKv = realMsgKv
 ): Promise<void> {
-  for (const r of rows) await store.set(digestMsgKey(r.id), { at: now, slot, nums: r.nums, uid: r.uid }, DIGEST_MSG_TTL_SEC);
+  // まとめて書く（1通ずつ順に待たない。毎分の見回りの持ち時間を使い切らないため）
+  await Promise.all(rows.map((r) => store.set(digestMsgKey(r.id), { at: now, slot, nums: r.nums, uid: r.uid }, DIGEST_MSG_TTL_SEC)));
 }
+/** 控えを書くのを待つ上限（過ぎたら待つのをやめる。まとめは届いている） */
+export const DIGEST_SAVE_TIMEOUT_MS = 3_000;
 
 // ── 送る ──
 
@@ -370,7 +381,7 @@ export async function sendDigestMessages(
     if (typeof id === "string" && id) rows.push({ id, nums: m.nums, uid: m.uid });
   });
   try {
-    await deps.saveMsgs(rows, slot, now);
+    await bounded(deps.saveMsgs(rows, slot, now), DIGEST_SAVE_TIMEOUT_MS);
   } catch {
     deps.log(`[staff-digest] ${slot} ids-save-failed`);
   }
@@ -412,11 +423,13 @@ export interface EveningDeps extends DigestSendDeps {
    * 個人 LINE へ先に送る（STAFF_DIGEST_DM=1 のときだけ本物が入る）。友だちの担当は 1対1 へ、ほかは今までどおりグループへ。
    * 無ければ今までどおり全部グループへ（sendDigestMessages）。送れた通数を返す
    */
-  sendSplit?(day: string, messages: DigestMessage[], ordered: Array<{ task: EveTask; n: number }>, now: number): Promise<number>;
+  sendSplit?(ctx: DigestBuildCtx, messages: DigestMessage[], ordered: Array<{ task: EveTask; n: number }>, now: number): Promise<number>;
 }
 
 /** 送る前の準備の上限。印を取ってから、ここまでに「送り始める」か「印を外す」 */
 const PRE_SEND_BUDGET_MS = 25_000;
+/** STAFF_DIGEST_DM=1 のときの上限（個人あての分の時間を空ける） */
+const PRE_SEND_BUDGET_DM_MS = 18_000;
 
 /** 時間切れなら TimeoutError で投げる（待っていた処理は止めないが、結果は使わない） */
 function bounded<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -447,8 +460,10 @@ function realEveningDeps(env: Env = process.env): EveningDeps {
     // 個人 LINE へ先に送る（STAFF_DIGEST_DM=1 のときだけ。off なら入れない＝今までどおり全部グループへ）
     ...(env.STAFF_DIGEST_DM === "1"
       ? {
-          sendSplit: async (day: string, messages: DigestMessage[], ordered: Array<{ task: EveTask; n: number }>, now: number) =>
-            (await import("./staff-digest-dm-wire")).sendDigestWithDmReal("eve", day, messages, ordered, now),
+          sendSplit: async (ctx: DigestBuildCtx, messages: DigestMessage[], ordered: Array<{ task: EveTask; n: number }>, now: number) =>
+            (await import("./staff-digest-dm-wire")).sendDigestWithDmReal("eve", ctx, messages, ordered, now),
+          // 個人あての分（12秒まで）を足しても毎分の見回りの 60 秒に収まるよう、送る前の準備を短くする
+          budgetMs: PRE_SEND_BUDGET_DM_MS,
         }
       : {}),
     followup: followupEnabled(),
@@ -536,6 +551,9 @@ export async function runStaffDigestEveningOnTick(
   }
 
   // 送り始めたあとは印を残す（届いたか分からないものを送り直さない）
-  if (d.sendSplit) return (await d.sendSplit(today, messages, ordered, now)) > 0 ? "sent" : "failed";
+  if (d.sendSplit) {
+    const ctx: DigestBuildCtx = { today, tomorrow, followup: d.followup, notionUrl: digestNotionUrl(env) };
+    return (await d.sendSplit(ctx, messages, ordered, now)) > 0 ? "sent" : "failed";
+  }
   return (await sendDigestMessages("eve", messages, count, now, d)) > 0 ? "sent" : "failed";
 }

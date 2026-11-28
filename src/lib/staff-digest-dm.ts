@@ -26,12 +26,14 @@ import {
   dmTextOf,
   sendDigestMessages,
   staffDigestOn,
+  type DigestBuildCtx,
   type DigestMessage,
   type DigestMsgRow,
   type DigestSendDeps,
   type DigestSlot,
   type DigestTask,
 } from "./staff-digest";
+import type { Chunk } from "./chunk";
 import {
   answeredKey,
   askListKey,
@@ -59,6 +61,8 @@ export const dmUserKey = (userId: string) => `staffdigest:dmuser:${userId}`;
 export const dmFriendKey = (userId: string) => `staffdigest:friend:${userId}`;
 /** 張り出しの「今日は済んだ」印（SET NX。2日） */
 export const dmEscKey = (day: string, slot: DigestSlot) => `staffdigest:esc:${day}:${slot}`;
+/** その日・その回の個人あてを始めた印（SET NX。2日。同じ日に朝の cron が2回動いても、個人あては1回だけ） */
+export const dmSentKey = (day: string, slot: DigestSlot) => `staffdigest:dmsent:${day}:${slot}`;
 /** 「このトークでは…」の案内を出した印（SET NX。1時間） */
 export const dmNoticeKey = (userId: string) => `staffdigest:dmnote:${userId}`;
 
@@ -67,8 +71,6 @@ export const DM_USER_TTL_SEC = 36 * 60 * 60;
 export const DM_FRIEND_TTL_SEC = 6 * 60 * 60;
 export const DM_NOTICE_TTL_SEC = 60 * 60;
 const KV_WAIT_MS = 2_500;
-const FRIEND_WAIT_MS = 3_500;
-const PUSH_WAIT_MS = 9_000;
 
 const USER_RE = /^U[0-9a-f]{32}$/;
 const JST_MS = 9 * 60 * 60 * 1000;
@@ -159,6 +161,8 @@ export function asDmUserRec(v: unknown): DmUserRec | null {
 export interface DmKv {
   get(key: string): Promise<unknown>;
   set(key: string, value: unknown, exSeconds: number): Promise<void>;
+  /** SET NX。取れたら true */
+  setNx(key: string, value: unknown, exSeconds: number): Promise<boolean>;
   del(key: string): Promise<void>;
 }
 
@@ -173,14 +177,22 @@ export interface DmSendDeps extends DigestSendDeps {
   profile(userId: string): Promise<boolean | null>;
   /** 1対1 へ retry key つきで文字を送る（key は retry key の元になる文字列）。HTTP の状態（結果不明は null）と送れたメッセージの ID */
   pushUser(userId: string, texts: string[], key: string): Promise<{ status: number | null; ids: string[] }>;
+  /** 個人あての分に使ってよい時間。省けば 12 秒（テスト用） */
+  budgetMs?: number;
 }
 
 const sentOk = (status: number | null) => status !== null && ((status >= 200 && status < 300) || status === 409);
 
+/** 個人あての分（友だちの確認・控え・1対1 の push）に使ってよい時間の合計。過ぎたら、まだ送っていない人は今回はグループへ */
+export const DM_PHASE_BUDGET_MS = 12_000;
+const FRIEND_CAP_MS = 4_000;
+const PUSH_CAP_MS = 6_000;
+const SAVE_CAP_MS = 3_000;
+
 /** 友だちか（KV の覚えが先。はっきり分かった答えだけ6時間覚える。分からないときは「友だちでない」＝グループへ） */
 async function isFriend(uid: string, deps: DmSendDeps): Promise<boolean> {
   try {
-    const hit = await bounded(deps.kv.get(dmFriendKey(uid)), KV_WAIT_MS);
+    const hit = await deps.kv.get(dmFriendKey(uid));
     if (hit === 1 || hit === "1") return true;
     if (hit === 0 || hit === "0") return false;
   } catch {
@@ -188,121 +200,146 @@ async function isFriend(uid: string, deps: DmSendDeps): Promise<boolean> {
   }
   let ans: boolean | null = null;
   try {
-    ans = await bounded(deps.profile(uid), FRIEND_WAIT_MS);
+    ans = await deps.profile(uid);
   } catch {
     ans = null;
   }
   if (ans === null) return false;
-  await bounded(deps.kv.set(dmFriendKey(uid), ans ? 1 : 0, DM_FRIEND_TTL_SEC), KV_WAIT_MS).catch(() => undefined);
+  // 覚えるのは待たない（書けなくても、次の回にもう一度聞くだけ）
+  void deps.kv.set(dmFriendKey(uid), ans ? 1 : 0, DM_FRIEND_TTL_SEC).catch(() => undefined);
   return ans;
 }
 
 /**
- * まとめ（担当ごとの通）を送る。友だちの担当の通は 1対1 へ、ほかはグループへ（今の sendDigestMessages）。送れた通数を返す。
+ * まとめ（担当ごとの通）を送る。友だちの担当のタスクは 1対1 へ、ほかはグループへ（今の sendDigestMessages）。送れた通数を返す。
+ *   ・1対1 に載せるのは、そのタスク自身の担当者ID がその人のものだけ（同じ名前でも、担当者ID の無いタスク・別のアカウントのタスクは
+ *     今までどおりグループの通に残す＝1人に 1対1 とグループの通の両方が出ることがある）
+ *   ・その日・その回の個人あては1回だけ（印 staffdigest:dmsent:<日付>:<slot>。朝の cron が2回動いた日の2回目は、
+ *     個人あてにせず控えも書き直さない＝全部グループへ）
  *   ・控え（その回の一覧 staffdigest:dm:<日付>:<slot>・その人の staffdigest:dmuser:<userId>）を書いてから 1対1 へ送る
  *     （書けなければ、その人の分はグループへ。送ったのに張り出し・返事の口が動かない、を作らない）
  *   ・1対1 は retry key つき。はっきり断られた・結果が分からない人の分は、同じ回のうちにグループへ回す
  *     （まれに個人とグループの両方に出る。黙って失くすよりよい）
+ *   ・個人あての分は合わせて12秒まで（友だちの確認4秒・控え・push 6秒）。過ぎたら、まだ送っていない人は今回はグループへ
+ *   ・グループへの送信を先に済ませ、メッセージ ID の控え・一覧の書き直しは最後（途中で切られても、失うのは控えだけ）
  * 例外は投げない（途中で失敗したら、まだ 1対1 に届いたと分かっていない分をグループへ送る）。
  */
 export async function sendDigestWithDm<T extends DigestTask>(
   slot: DigestSlot,
-  day: string,
+  ctx: DigestBuildCtx,
   messages: DigestMessage[],
   ordered: Array<{ task: T; n: number }>,
   now: number,
   deps: DmSendDeps
 ): Promise<number> {
-  const delivered = new Set<string>();
+  const day = ctx.today;
+  const started = Date.now();
+  const left = () => (deps.budgetMs ?? DM_PHASE_BUDGET_MS) - (Date.now() - started);
+  const numbers = new Map(ordered.map((o) => [o.task.id, o.n]));
+  const rebuild = (tasks: T[]) => buildStaffDigest({ slot, tasks, today: ctx.today, tomorrow: ctx.tomorrow, followup: ctx.followup, numbers, notionUrl: ctx.notionUrl }).messages;
+  type Plan = { uid: string; texts: string[]; nums: number[][]; row: DmRunRow };
+  const delivered: Plan[] = [];
+  const msgRows: DigestMsgRow[] = [];
+  let listed: Plan[] = [];
   let fallback = 0;
   try {
-    // 担当ごとに通をまとめる（長い人は2通以上に分かれている）
-    const byUid = new Map<string, DigestMessage[]>();
-    for (const m of messages) {
-      if (!m.uid || !USER_RE.test(m.uid)) continue;
-      byUid.set(m.uid, [...(byUid.get(m.uid) ?? []), m]);
+    // その人自身の担当者ID が付いたタスクだけを、その人の 1対1 に載せる
+    const own = new Map<string, Array<{ task: T; n: number }>>();
+    for (const o of ordered) {
+      const uid = o.task.assigneeUserId;
+      if (!uid || !USER_RE.test(uid) || deps.allowListed(uid)) continue;
+      own.set(uid, [...(own.get(uid) ?? []), o]);
     }
-    const byNum = new Map(ordered.map((o) => [o.n, o.task]));
-    type Plan = { uid: string; texts: string[]; msgs: DigestMessage[]; row: DmRunRow };
     const plans: Plan[] = [];
-    for (const [uid, msgs] of Array.from(byUid)) {
-      if (deps.allowListed(uid) || msgs.length > 5) continue;
-      const texts = msgs.map((m) => dmTextOf(m, slot));
-      if (texts.some((t) => t === null)) continue;
-      const tasks: DmTaskRef[] = [];
-      for (const n of msgs.flatMap((m) => m.nums)) {
-        const t = byNum.get(n);
-        if (t) tasks.push({ id: t.id, n, status: t.status, due: (t.dueDate ?? "").slice(0, 10) });
-      }
-      // 番号とタスクが合わない通は個人あてにしない（張り出しの判定ができないため）
-      if (tasks.length === 0 || tasks.length !== msgs.reduce((a, m) => a + m.nums.length, 0)) continue;
-      const name = byNum.get(tasks[0].n)?.assignee ?? null;
-      plans.push({ uid, texts: texts as string[], msgs, row: { uid, name, nums: tasks.map((t) => t.n), taskIds: tasks.map((t) => t.id), tasks, at: now } });
+    for (const [uid, list] of Array.from(own)) {
+      const msgs = rebuild(list.map((o) => o.task));
+      const texts = msgs.map((m) => (m.uid === uid ? dmTextOf(m, slot) : null));
+      if (msgs.length === 0 || msgs.length > 5 || texts.some((t) => t === null)) continue;
+      const tasks: DmTaskRef[] = list.map((o) => ({ id: o.task.id, n: o.n, status: o.task.status, due: (o.task.dueDate ?? "").slice(0, 10) }));
+      plans.push({
+        uid,
+        texts: texts as string[],
+        nums: msgs.map((m) => m.nums),
+        row: { uid, name: list[0].task.assignee ?? null, nums: tasks.map((t) => t.n), taskIds: tasks.map((t) => t.id), tasks, at: now },
+      });
     }
-    const friendly = (await Promise.all(plans.map(async (p) => ((await isFriend(p.uid, deps)) ? p : null)))).filter((p): p is Plan => p !== null);
 
     let ready: Plan[] = [];
-    if (friendly.length > 0) {
-      // 控えを先に書く。その回の一覧が書けなければ、誰にも個人あてにしない（全部グループへ）
-      const listed = await bounded(deps.kv.set(dmRunKey(day, slot), friendly.map((p) => p.row), DM_RUN_TTL_SEC), KV_WAIT_MS).then(
-        () => true,
-        () => false
-      );
-      if (!listed) deps.log("[staff-digest] dm record-failed");
-      else {
-        ready = (
-          await Promise.all(
-            friendly.map(async (p) => {
-              const rec: DmUserRec = { date: day, slot, nums: p.row.nums, taskIds: p.row.taskIds, at: now };
-              return bounded(deps.kv.set(dmUserKey(p.uid), rec, DM_USER_TTL_SEC), KV_WAIT_MS).then(
-                () => p,
-                () => null
-              );
-            })
-          )
-        ).filter((p): p is Plan => p !== null);
-      }
+    // その日・その回の個人あては1回だけ（2回目の実行は、個人あてにせず控えも書き直さない）
+    const first = plans.length > 0 && (await bounded(deps.kv.setNx(dmSentKey(day, slot), 1, DM_RUN_TTL_SEC), KV_WAIT_MS).catch(() => false));
+    if (plans.length > 0 && !first) deps.log("[staff-digest] dm skip:already");
+    if (first) {
+      const friendly = (
+        await Promise.all(plans.map((p) => bounded(isFriend(p.uid, deps), Math.min(FRIEND_CAP_MS, left())).then((ok) => (ok ? p : null), () => null)))
+      ).filter((p): p is Plan => p !== null);
+      if (friendly.length > 0 && left() > 2_000) {
+        // 控えを先に書く。その回の一覧が書けなければ、誰にも個人あてにしない（全部グループへ）
+        const wait = Math.min(KV_WAIT_MS, left());
+        const [ok, ...users] = await Promise.all([
+          bounded(deps.kv.set(dmRunKey(day, slot), friendly.map((p) => p.row), DM_RUN_TTL_SEC), wait).then(() => true, () => false),
+          ...friendly.map((p) => {
+            const rec: DmUserRec = { date: day, slot, nums: p.row.nums, taskIds: p.row.taskIds, at: now };
+            return bounded(deps.kv.set(dmUserKey(p.uid), rec, DM_USER_TTL_SEC), wait).then(() => true, () => false);
+          }),
+        ]);
+        if (!ok) deps.log("[staff-digest] dm record-failed");
+        else {
+          listed = friendly;
+          ready = friendly.filter((_, i) => users[i]);
+        }
+      } else if (friendly.length > 0) deps.log("[staff-digest] dm out-of-time");
     }
-
+    if (ready.length > 0 && left() <= 1_000) {
+      deps.log("[staff-digest] dm out-of-time");
+      ready = [];
+    }
+    const cap = Math.min(PUSH_CAP_MS, left());
     const results = await Promise.all(
       ready.map(async (p) => {
-        const r = await bounded(deps.pushUser(p.uid, p.texts, `sd-dm:${day}:${slot}:${p.uid}`), PUSH_WAIT_MS).catch(() => ({ status: null as number | null, ids: [] as string[] }));
+        const r = await bounded(deps.pushUser(p.uid, p.texts, `sd-dm:${day}:${slot}:${p.uid}`), cap).catch(() => ({ status: null as number | null, ids: [] as string[] }));
         return { p, r };
       })
     );
-    const rows: DigestMsgRow[] = [];
     for (const { p, r } of results) {
       if (!sentOk(r.status)) continue;
-      delivered.add(p.uid);
+      delivered.push(p);
       // 応答の並びで通と ID を合わせる（数が合わないとき・409 のときは控えない）
-      if (r.ids.length === p.msgs.length) p.msgs.forEach((m, i) => rows.push({ id: r.ids[i], nums: m.nums, uid: p.uid }));
+      if (r.ids.length === p.nums.length) p.nums.forEach((nums, i) => msgRows.push({ id: r.ids[i], nums, uid: p.uid }));
     }
-    fallback = ready.length - delivered.size;
-    for (const r of rows) {
-      await bounded(deps.kv.set(digestMsgKey(r.id), { at: now, slot, nums: r.nums, uid: r.uid, dm: true }, DIGEST_MSG_TTL_SEC), KV_WAIT_MS).catch(() =>
-        deps.log(`[staff-digest] ${slot} ids-save-failed`)
-      );
-    }
-    // その回の一覧を、実際に 1対1 へ送れた人だけに書き直す（グループへ回した人を、1時間後にもう一度張り出さない）
-    if (friendly.length > 0 && delivered.size < friendly.length) {
-      const kept = friendly.filter((p) => delivered.has(p.uid)).map((p) => p.row);
-      await bounded(kept.length > 0 ? deps.kv.set(dmRunKey(day, slot), kept, DM_RUN_TTL_SEC) : deps.kv.del(dmRunKey(day, slot)), KV_WAIT_MS).catch(() =>
-        deps.log("[staff-digest] dm record-failed")
-      );
-    }
+    fallback = ready.length - delivered.length;
   } catch {
     deps.log("[staff-digest] dm error");
   }
 
-  // グループへ：個人あてにしなかった通＋ 1対1 に届いたと分からなかった人の通（元の順のまま）
-  const rest = messages.filter((m) => !(m.uid && delivered.has(m.uid)));
+  // グループへ：1対1 に届いた番号を除いた通（1件も除かれなかった通は、元の文のまま）。順は元のまま
+  const byNum = new Map(ordered.map((o) => [o.n, o.task]));
+  const viaDm = new Set(delivered.flatMap((p) => p.row.nums));
+  const rest: DigestMessage[] = [];
+  for (const m of messages) {
+    if (!m.nums.some((x) => viaDm.has(x))) {
+      rest.push(m);
+      continue;
+    }
+    const keep = m.nums.filter((x) => !viaDm.has(x)).map((x) => byNum.get(x)).filter((t): t is T => Boolean(t));
+    if (keep.length > 0) rest.push(...rebuild(keep));
+  }
   let groupSent = 0;
   if (rest.length > 0) {
     groupSent = await sendDigestMessages(slot, rest, rest.reduce((a, m) => a + m.nums.length, 0), now, deps).catch(() => 0);
   }
-  deps.log(`[staff-digest] dm sent ${delivered.size} group ${groupSent}`);
+  deps.log(`[staff-digest] dm sent ${delivered.length} group ${groupSent}`);
   if (fallback > 0) deps.log(`[staff-digest] dm fallback ${fallback}`);
-  return delivered.size + groupSent;
+
+  // ここから先は控えだけ（途中で切られても、まとめは届いている）。まとめて書き、合わせて3秒まで
+  const tail: Array<Promise<void>> = msgRows.map((r) => deps.kv.set(digestMsgKey(r.id), { at: now, slot, nums: r.nums, uid: r.uid, dm: true }, DIGEST_MSG_TTL_SEC));
+  // その回の一覧を、実際に 1対1 へ送れた人だけに書き直す（グループへ回した人を、1時間後にもう一度張り出さない）
+  if (listed.length > 0 && delivered.length < listed.length) {
+    tail.push(delivered.length > 0 ? deps.kv.set(dmRunKey(day, slot), delivered.map((p) => p.row), DM_RUN_TTL_SEC) : deps.kv.del(dmRunKey(day, slot)));
+  }
+  if (tail.length > 0) {
+    await bounded(Promise.all(tail), SAVE_CAP_MS).catch(() => deps.log("[staff-digest] dm ids-save-failed"));
+  }
+  return delivered.length + groupSent;
 }
 
 // ── 2. 1時間後の張り出し ──
@@ -315,11 +352,17 @@ const ESC_HOUR: Record<DigestSlot, number> = { am: 9, eve: 18 };
  * 朝のまとめは Vercel の cron（8時台のどこかで動く）が送るので、8:55 に届いて 9:00 に張り出す、を避ける
  */
 export const ESC_MIN_WAIT_MS = 30 * 60 * 1000;
-const ESC_BUDGET_MS = 25_000;
+/** 送る前の準備（一覧・印・休業日・タスク・返事の印）の上限。毎分の見回りの 60 秒に収めるため短くしてある */
+const ESC_BUDGET_MS = 12_000;
 
 export type EscTask = DigestTask & { lastEdited?: string; nextCheck?: string | null };
 
-export interface EscDeps extends DigestSendDeps {
+export interface EscDeps extends Omit<DigestSendDeps, "push"> {
+  /**
+   * グループへ順に送る（5通までを1回の push）。送れた通数・渡した順のメッセージ ID に加えて、
+   * 結果の分からなかった通数（時間切れ・5xx。無ければ 0）を返す
+   */
+  push(chunks: Chunk[], key: string): Promise<{ sent: number; ids: Array<string | null>; unknown?: number }>;
   /** TASK_FOLLOWUP が on か */
   followup: boolean;
   kv: {
@@ -357,8 +400,9 @@ export function unansweredOf<T extends EscTask>(
   const out: Array<{ task: T; n: number }> = [];
   for (const ref of row.tasks) {
     const key = pageKey(ref.id);
+    // 控えたタスクの ID で見る（担当者ID を引き直して比べない＝1対1 に載せたタスクは、返事が無ければ必ず張り出す）
     const c = current.get(key);
-    if (!c || c.assigneeUserId !== row.uid) continue;
+    if (!c) continue;
     if (answered.has(key)) continue;
     if (c.status !== ref.status || (c.dueDate ?? "").slice(0, 10) !== ref.due) continue;
     const check = c.nextCheck ? c.nextCheck.slice(0, 10) : "";
@@ -383,6 +427,9 @@ export async function runDmEscalationOnTick(now: number, env: Env, deps: EscDeps
   if (!slot) return "skip";
   const today = jstDay(now);
   const tomorrow = jstDay(now + 86_400_000);
+  const started = Date.now();
+  const budget = deps.budgetMs ?? ESC_BUDGET_MS;
+  const left = () => budget - (Date.now() - started);
   let rows: DmRunRow[];
   try {
     rows = asDmRunRows(await bounded(deps.kv.get(dmRunKey(today, slot)), KV_WAIT_MS));
@@ -393,9 +440,6 @@ export async function runDmEscalationOnTick(now: number, env: Env, deps: EscDeps
   if (rows.length === 0) return "none";
   if (now < Math.max(...rows.map((r) => r.at)) + ESC_MIN_WAIT_MS) return "wait";
 
-  const started = Date.now();
-  const budget = deps.budgetMs ?? ESC_BUDGET_MS;
-  const left = () => budget - (Date.now() - started);
   try {
     if (!(await bounded(deps.kv.setNx(dmEscKey(today, slot), 1, DM_RUN_TTL_SEC), KV_WAIT_MS))) return "taken";
   } catch {
@@ -426,7 +470,8 @@ export async function runDmEscalationOnTick(now: number, env: Env, deps: EscDeps
       if (open.length === 0) continue;
       const built = buildStaffDigest({
         slot,
-        tasks: open.map((o) => o.task),
+        // 1対1 を送った相手にメンションする（そのあと担当が替わっていても、返事を待っているのはその人）
+        tasks: open.map((o) => ({ ...o.task, assignee: row.name ?? o.task.assignee, assigneeUserId: row.uid })),
         today,
         tomorrow,
         followup: deps.followup,
@@ -449,8 +494,16 @@ export async function runDmEscalationOnTick(now: number, env: Env, deps: EscDeps
   }
 
   // 送り始めたあとは印を残す（届いたか分からないものを送り直さない）
-  const r = await deps.push(out.map((m) => m.chunk)).catch(() => ({ sent: 0, ids: [] as Array<string | null> }));
+  const r = await deps
+    .push(out.map((m) => m.chunk), `sd-esc:${today}:${slot}`)
+    .catch(() => ({ sent: 0, ids: [] as Array<string | null>, unknown: out.length }));
   if (r.sent === 0) {
+    // 全部はっきり断られた（届いた・届いたかもしれない通が無い）ときだけ、印を外して次の見回りでやり直す
+    if ((r.unknown ?? 0) === 0) {
+      await bounded(deps.kv.del(dmEscKey(today, slot)), 3_000).catch(() => undefined);
+      deps.log(`[staff-digest] esc ${slot} push-rejected`);
+      return "failed";
+    }
     deps.log(`[staff-digest] esc ${slot} push-failed`);
     return "failed";
   }
@@ -459,7 +512,7 @@ export async function runDmEscalationOnTick(now: number, env: Env, deps: EscDeps
     const id = r.ids[i];
     if (typeof id === "string" && id) saved.push({ id, nums: m.nums, uid: m.uid });
   });
-  await deps.saveMsgs(saved, `${slot}-esc`, now).catch(() => deps.log(`[staff-digest] esc ${slot} ids-save-failed`));
+  await bounded(deps.saveMsgs(saved, `${slot}-esc`, now), SAVE_CAP_MS).catch(() => deps.log(`[staff-digest] esc ${slot} ids-save-failed`));
   if (r.sent < out.length) deps.log(`[staff-digest] esc ${slot} push-partial ${r.sent}/${out.length}`);
   deps.log(`[staff-digest] esc ${slot} sent ${r.sent}`);
   return "sent";
@@ -467,6 +520,8 @@ export async function runDmEscalationOnTick(now: number, env: Env, deps: EscDeps
 
 // ── 3. 担当の 1対1 の返事 ──
 
+/** 番号の無い文を受ける時間（1対1 のまとめを送ってから） */
+export const DM_FREE_TEXT_WINDOW_MS = 3 * 60 * 60 * 1000;
 export const MSG_DM_FOREIGN = "その番号は、あなたあての確認にはありません";
 export const MSG_DM_ONLY = "このトークでは、進捗の確認への返事だけ受け付けています。番号をつけて返信してください（例：「1済」）";
 
@@ -491,6 +546,11 @@ export interface DmReplyDeps {
   reply(text: string): Promise<void>;
   /** 動いたタスクを控える（返事の印 staffdigest:answered・下村さんへの知らせの列）。グループの返事と同じ */
   note(items: ReplyItem[], name: string | null): Promise<void>;
+  /**
+   * この1通が、その人あての 1対1 のまとめを引用しているか。していれば、その通に載せた番号（していなければ null）。
+   * 番号の無い文を受けるかどうかを決めるときだけ呼ぶ
+   */
+  quotedNums?(): Promise<number[] | null>;
   /** 「このトークでは…」の案内を出してよいか（1時間に1回。SET NX が取れたら true） */
   noticeOnce(): Promise<boolean>;
   log(line: string): void;
@@ -552,13 +612,19 @@ export async function handleDmReply(input: { kind: "text" | "other"; text?: stri
     if (!entries) {
       const free = freeTextOf({ text, hasMention: false }, deps.isKnown, deps.isOther);
       if (free === null) return await notice("chatter");
-      if (rec.nums.length !== 1) {
+      // 番号の無い文を受けるのは、①その人あての 1対1 のまとめを引用した返信か、②そのまとめを送ってから3時間以内だけ
+      // （控えは36時間生きるので、あとの雑談を進捗として Notion に書かないため）。ほかは案内（1時間に1回）
+      const quoted = deps.quotedNums ? await deps.quotedNums().catch(() => null) : null;
+      if (!quoted && deps.now() - rec.at > DM_FREE_TEXT_WINDOW_MS) return await notice("late");
+      // どのタスクか：引用した通に載せた番号が1件ならそれ。そうでなければ、その人あてのタスクが1件のときだけ
+      const target = quoted && quoted.length === 1 && rec.nums.includes(quoted[0]) ? quoted[0] : rec.nums.length === 1 ? rec.nums[0] : null;
+      if (target === null) {
         await say(MSG_SD_NO_NUMBER);
         deps.log("[staff-digest] dm reply no-number");
         return;
       }
       // 1件だけ：その番号を付けた返事として読む（「済」→ 完了、「待ち …」→ 状況の言葉、ほかは進捗）
-      const n = rec.nums[0];
+      const n = target;
       const synth = `${n} ${free}`;
       entries = deps.isKnown(synth) ? [{ kind: "known", raw: synth, numbers: [n] }] : [{ kind: "progress", numbers: [n], body: free }];
     }

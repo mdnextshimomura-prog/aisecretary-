@@ -15,6 +15,7 @@ const BOSS = "U" + "b".repeat(32);
 const TODAY = "2026-11-28";
 const TOMORROW = "2026-11-29";
 const MIN = 60_000;
+const CTX = { today: TODAY, tomorrow: TOMORROW, followup: true, notionUrl: null };
 // 2026-11-28 08:00 / 09:00 / 17:00 / 18:00 JST
 const AM8 = Date.UTC(2026, 10, 27, 23, 0);
 const AM9 = AM8 + 60 * MIN;
@@ -75,7 +76,7 @@ class FakeKv {
     D.buildStaffDigest({ slot, tasks, today: TODAY, tomorrow: TOMORROW, followup: true, notionUrl });
 
   /** 送るときのにせもの。friends＝友だちの人、pushStatus＝その人への 1対1 の push の結果 */
-  function sendFake(over: { friends?: Record<string, boolean | null>; pushStatus?: Record<string, number | null>; allow?: string[]; groupOk?: boolean } = {}) {
+  function sendFake(over: { friends?: Record<string, boolean | null>; pushStatus?: Record<string, number | null>; allow?: string[]; groupOk?: boolean; profileMs?: number; budgetMs?: number } = {}) {
     const kv = new FakeKv();
     const logs: string[] = [];
     const dms: Array<{ uid: string; texts: string[]; key: string }> = [];
@@ -85,7 +86,12 @@ class FakeKv {
     const deps = {
       kv,
       allowListed: (uid: string) => (over.allow ?? [BOSS]).includes(uid),
-      profile: async (uid: string) => { profiles.push(uid); return (over.friends ?? { [U1]: true, [U2]: false })[uid] ?? null; },
+      ...(over.budgetMs ? { budgetMs: over.budgetMs } : {}),
+      profile: async (uid: string) => {
+        profiles.push(uid);
+        if (over.profileMs) await new Promise((r) => setTimeout(r, over.profileMs));
+        return (over.friends ?? { [U1]: true, [U2]: false })[uid] ?? null;
+      },
       pushUser: async (uid: string, texts: string[], key: string) => {
         dms.push({ uid, texts, key });
         const st = over.pushStatus && uid in over.pushStatus ? over.pushStatus[uid] : 200;
@@ -93,6 +99,7 @@ class FakeKv {
       },
       push: async (chunks: Array<{ text: string; mentions: Record<string, string> }>) => {
         group.push(chunks);
+        kv.calls.push("group-push");
         return over.groupOk === false ? { sent: 0, ids: chunks.map(() => null) } : { sent: chunks.length, ids: chunks.map((_, i) => `g${i}`) };
       },
       saveMsgs: async (rows: unknown, slot: string, now: number) => { saved.push([rows, slot, now]); },
@@ -147,7 +154,7 @@ class FakeKv {
   await t("送る：友だちの担当は 1対1 へ、友だちでない・担当者ID なし・担当なし・許可リストの人（下村さん）は今までどおりグループへ", async () => {
     const d = build("am");
     const f = sendFake();
-    const sent = await M.sendDigestWithDm("am", TODAY, d.messages, d.ordered, AM8, f.deps);
+    const sent = await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, f.deps);
     // 1対1：小笠原さんだけ（retry key の元は 日付・回・相手）
     assert.deepEqual(f.dms.map((x) => [x.uid, x.key, x.texts.length]), [[U1, `sd-dm:${TODAY}:am:${U1}`, 1]]);
     assert.ok(f.dms[0].texts[0].startsWith("進捗の確認です。どうなりましたか？\n1. 天満の資料を送る"));
@@ -178,14 +185,14 @@ class FakeKv {
     const d = build("am");
     const f = sendFake({ friends: { [U1]: true, [U2]: null } });
     f.kv.store.set(M.dmFriendKey(U1), 1);
-    await M.sendDigestWithDm("am", TODAY, d.messages, d.ordered, AM8, f.deps);
+    await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, f.deps);
     assert.deepEqual(f.profiles, [U2]);
     assert.deepEqual(f.dms.map((x) => x.uid), [U1]);
     assert.equal(f.kv.store.has(M.dmFriendKey(U2)), false);
     // 「友だちでない」の覚えがあれば、聞かずにグループへ
     const g = sendFake({ friends: { [U1]: true, [U2]: true } });
     g.kv.store.set(M.dmFriendKey(U1), 0);
-    await M.sendDigestWithDm("am", TODAY, d.messages, d.ordered, AM8, g.deps);
+    await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, g.deps);
     assert.deepEqual([g.profiles, g.dms.map((x) => x.uid)], [[U2], [U2]]);
   });
 
@@ -193,7 +200,7 @@ class FakeKv {
     const d = build("am");
     for (const st of [400, null, 500] as const) {
       const f = sendFake({ friends: { [U1]: true, [U2]: true }, pushStatus: { [U1]: st } });
-      const sent = await M.sendDigestWithDm("am", TODAY, d.messages, d.ordered, AM8, f.deps);
+      const sent = await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, f.deps);
       assert.deepEqual(f.dms.map((x) => x.uid).sort(), [U1, U2]);
       // 小笠原さんの通は、元の文のままグループへ（元の順）
       assert.deepEqual(f.group[0].map((c) => c.text.split("\n")[0]), [
@@ -206,7 +213,7 @@ class FakeKv {
     }
     // 409（同じ retry key でもう受け付け済み）は送れた扱い（グループへ回さない）
     const h = sendFake({ pushStatus: { [U1]: 409 } });
-    await M.sendDigestWithDm("am", TODAY, d.messages, d.ordered, AM8, h.deps);
+    await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, h.deps);
     assert.equal(h.group[0].length, 4);
   });
 
@@ -214,12 +221,12 @@ class FakeKv {
     const d = build("am");
     const f = sendFake({ friends: { [U1]: true, [U2]: true } });
     f.kv.failSet = (key) => key === M.dmRunKey(TODAY, "am");
-    await M.sendDigestWithDm("am", TODAY, d.messages, d.ordered, AM8, f.deps);
+    await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, f.deps);
     assert.deepEqual([f.dms.length, f.group[0].length], [0, 5]);
     assert.ok(f.logs.includes("[staff-digest] dm record-failed"));
     const g = sendFake({ friends: { [U1]: true, [U2]: true } });
     g.kv.failSet = (key) => key === M.dmUserKey(U1);
-    await M.sendDigestWithDm("am", TODAY, d.messages, d.ordered, AM8, g.deps);
+    await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, g.deps);
     assert.deepEqual([g.dms.map((x) => x.uid), g.group[0].length], [[U2], 4]);
     assert.deepEqual((g.kv.store.get(M.dmRunKey(TODAY, "am")) as Array<{ uid: string }>).map((r) => r.uid), [U2]);
   });
@@ -227,8 +234,65 @@ class FakeKv {
   await t("全員が 1対1 に届いたら、グループには何も送らない", async () => {
     const d = build("am", TASKS.slice(0, 3));
     const f = sendFake({ friends: { [U1]: true, [U2]: true } });
-    const sent = await M.sendDigestWithDm("am", TODAY, d.messages, d.ordered, AM8, f.deps);
+    const sent = await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, f.deps);
     assert.deepEqual([sent, f.group.length, f.logs], [2, 0, ["[staff-digest] dm sent 2 group 0"]]);
+  });
+
+  await t("同じ名前でも、1対1 に載せるのは担当者ID がその人のタスクだけ。ID の無い・別のアカウントのタスクはグループの通に残す（番号は同じ）", async () => {
+    const mixed = [
+      row("a", "天満の資料を送る", "2026-11-26", OGA),
+      row("b", "売主へ電話", "2026-11-28", { assignee: "小笠原" }), // 担当者ID なし
+      row("c", "鍵の手配", "2026-11-28", { assignee: "小笠原", assigneeUserId: U3 }), // 別のアカウント（友だちでない）
+    ];
+    const d = build("am", mixed);
+    assert.deepEqual(d.messages.map((m) => [m.uid, m.nums]), [[U1, [1, 2, 3]]]);
+    const f = sendFake({ friends: { [U1]: true, [U3]: false } });
+    const sent = await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, f.deps);
+    assert.deepEqual(f.dms.map((x) => [x.uid, x.texts[0].split("\n").slice(0, 3)]), [[U1, ["進捗の確認です。どうなりましたか？", "1. 天満の資料を送る（2日超過）", ""]]]);
+    // グループ：残りの2件を1通で（メンションは、残ったタスクの担当者ID）。番号は元のまま
+    assert.deepEqual(f.group, [[{
+      text: [
+        "{m1} 進捗の確認です。どうなりましたか？", "2. 売主へ電話（本日期限）", "3. 鍵の手配（本日期限）", "",
+        "このメッセージに返信（リプライ）で答えてください", "例：「2済」「3 アポ取れました。来週火曜です」「3待ち 売主の書類 金曜」",
+      ].join("\n"),
+      mentions: { m1: U3 },
+    }]]);
+    assert.equal(sent, 2);
+    // 控えは 1対1 に載せたタスクだけ（張り出しは、この控えのタスクの ID で見る）
+    assert.deepEqual((f.kv.store.get(M.dmRunKey(TODAY, "am")) as Array<{ uid: string; taskIds: string[] }>).map((r) => [r.uid, r.taskIds]), [[U1, ["a"]]]);
+    assert.deepEqual(f.kv.store.get(M.dmUserKey(U1)), { date: TODAY, slot: "am", nums: [1], taskIds: ["a"], at: AM8 });
+  });
+
+  await t("同じ日・同じ回の2回目の実行（朝の cron が2回動いた）：個人あてにせず、控えも書き直さない（全部グループへ）", async () => {
+    const d = build("am");
+    const f = sendFake();
+    await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, f.deps);
+    const before = JSON.stringify([f.kv.store.get(M.dmRunKey(TODAY, "am")), f.kv.store.get(M.dmUserKey(U1))]);
+    f.kv.calls.length = 0;
+    const d2 = build("am", [TASKS[1], TASKS[0], ...TASKS.slice(2)]);
+    const sent = await M.sendDigestWithDm("am", CTX, d2.messages, d2.ordered, AM8 + 5 * MIN, f.deps);
+    assert.deepEqual([f.dms.length, f.group.length, f.group[1].length, sent], [1, 2, 5, 5]);
+    assert.deepEqual(f.group[1], d2.messages.map((m) => m.chunk));
+    assert.equal(JSON.stringify([f.kv.store.get(M.dmRunKey(TODAY, "am")), f.kv.store.get(M.dmUserKey(U1))]), before);
+    assert.deepEqual(f.kv.calls, [`setnx ${M.dmSentKey(TODAY, "am")}`, "group-push"]);
+    assert.ok(f.logs.includes("[staff-digest] dm skip:already"));
+    // 夕方は別の印
+    const e = build("eve");
+    await M.sendDigestWithDm("eve", CTX, e.messages, e.ordered, PM5, f.deps);
+    assert.equal(f.dms.length, 2);
+  });
+
+  await t("個人あての分の持ち時間を過ぎたら、まだ送っていない人は今回はグループへ（友だちの確認が遅い）。グループへの送信は、メッセージ ID の控えより先", async () => {
+    const d = build("am");
+    const slow = sendFake({ friends: { [U1]: true, [U2]: true }, profileMs: 300, budgetMs: 60 });
+    const sent = await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, slow.deps);
+    assert.deepEqual([slow.dms.length, slow.group[0].length, sent], [0, 5, 5]);
+    assert.deepEqual(slow.group[0], d.messages.map((m) => m.chunk));
+    assert.equal(slow.kv.store.has(M.dmRunKey(TODAY, "am")), false);
+    const f = sendFake();
+    await M.sendDigestWithDm("am", CTX, d.messages, d.ordered, AM8, f.deps);
+    const at = (k: string) => f.kv.calls.indexOf(k);
+    assert.ok(at("group-push") > at(`set ${M.dmUserKey(U1)}`) && at("group-push") < at(`set ${D.digestMsgKey("dm-1-0")}`), f.kv.calls.join(","));
   });
 
   await t("夕方の見回り：sendSplit があればそれで送る（無ければ今までどおり＝既存のテスト）。日付・通・番号つきのタスクを渡す", async () => {
@@ -244,10 +308,10 @@ class FakeKv {
       push: async (c) => { calls.push("group-push"); return { sent: c.length, ids: c.map(() => null) }; },
       saveMsgs: async () => undefined,
       log: () => undefined,
-      sendSplit: async (day, messages, ordered, now) => { seen.push([day, messages.length, ordered.map((o) => [o.task.id, o.n]), now]); return 1; },
+      sendSplit: async (ctx, messages, ordered, now) => { seen.push([ctx, messages.length, ordered.map((o) => [o.task.id, o.n]), now]); return 1; },
     };
     assert.equal(await D.runStaffDigestEveningOnTick(PM5, { STAFF_DIGEST: "1" }, deps), "sent");
-    assert.deepEqual([seen, calls], [[[TODAY, 1, [["a", 1]], PM5]], []]);
+    assert.deepEqual([seen, calls], [[[{ today: TODAY, tomorrow: TOMORROW, followup: true, notionUrl: null }, 1, [["a", 1]], PM5]], []]);
   });
 
   // ── 張り出し ──
@@ -257,7 +321,7 @@ class FakeKv {
     uid, name, nums: tasks.map((x) => x[1]), taskIds: tasks.map((x) => x[0]),
     tasks: tasks.map(([id, num, due]) => ({ id, n: num, status: "未着手", due: due ?? "2026-11-28" })), at,
   });
-  function escFake(over: { tasks?: Row[] | (() => Promise<Row[]>); closed?: boolean; rows?: unknown; slot?: "am" | "eve"; answered?: string[]; pushOk?: boolean } = {}) {
+  function escFake(over: { tasks?: Row[] | (() => Promise<Row[]>); closed?: boolean; rows?: unknown; slot?: "am" | "eve"; answered?: string[]; pushOk?: boolean; unknown?: number } = {}) {
     const kv = new FakeKv();
     const slot = over.slot ?? "am";
     if (over.rows !== null) {
@@ -271,19 +335,21 @@ class FakeKv {
     const pushed: Array<Array<{ text: string; mentions: Record<string, string> }>> = [];
     const saved: unknown[] = [];
     const calls: string[] = [];
+    const keys: string[] = [];
     const deps = {
       followup: true,
       kv,
       closedToday: async () => { calls.push("closed?"); return over.closed ?? false; },
       fetchTasks: async () => { calls.push("fetch"); return typeof over.tasks === "function" ? over.tasks() : (over.tasks ?? TASKS); },
-      push: async (chunks: Array<{ text: string; mentions: Record<string, string> }>) => {
+      push: async (chunks: Array<{ text: string; mentions: Record<string, string> }>, key: string) => {
         pushed.push(chunks);
-        return over.pushOk === false ? { sent: 0, ids: chunks.map(() => null) } : { sent: chunks.length, ids: chunks.map((_, i) => `e${i}`) };
+        keys.push(key);
+        return over.pushOk === false ? { sent: 0, ids: chunks.map(() => null), unknown: over.unknown ?? 0 } : { sent: chunks.length, ids: chunks.map((_, i) => `e${i}`), unknown: 0 };
       },
       saveMsgs: async (rows: unknown, s: string, now: number) => { saved.push([rows, s, now]); },
       log: (l: string) => { logs.push(l); },
     };
-    return { deps, kv, logs, pushed, saved, calls };
+    return { deps, kv, logs, pushed, saved, calls, keys };
   }
 
   await t("張り出し：off・9時台と18時台以外は KV も Notion も触らない", async () => {
@@ -323,13 +389,14 @@ class FakeKv {
     ]]);
     assert.deepEqual(f.saved, [[[{ id: "e0", nums: [1], uid: U1 }, { id: "e1", nums: [3], uid: U2 }], "am-esc", AM9]]);
     assert.deepEqual(f.logs, ["[staff-digest] esc am sent 2"]);
+    assert.deepEqual(f.keys, [`sd-esc:${TODAY}:am`]);
     assert.equal(await M.runDmEscalationOnTick(AM9 + MIN, ON, f.deps), "taken");
     assert.equal(await M.runDmEscalationOnTick(AM9 + 30 * MIN, ON, f.deps), "taken");
     assert.equal(f.pushed.length, 1);
     assert.equal(f.kv.ttl.get(M.dmEscKey(TODAY, "am")), 2 * 24 * 3600);
   });
 
-  await t("張り出しから外すもの：1対1 で返事済み・Notion で更新・完了（一覧に無い）・「次に確認する日」が先・状態や期日が変わった・担当が替わった", async () => {
+  await t("張り出しから外すもの：1対1 で返事済み・Notion で更新・完了（一覧に無い）・「次に確認する日」が先・状態や期日が変わった。担当者ID は引き直さない（控えたタスクの ID で見る）", async () => {
     const at = AM8;
     const iso = (ms: number) => new Date(ms).toISOString();
     const rows = [runRow(U1, "小笠原", [["a", 1], ["b", 2], ["c", 3], ["d", 4], ["e", 5], ["f", 6], ["g", 7], ["h", 8]], at)];
@@ -341,16 +408,16 @@ class FakeKv {
       base("d", { nextCheck: "2026-12-01" }), // 次に確認する日が先
       base("e", { status: "進行中" }), // 状態が変わった
       base("f", { dueDate: "2026-12-05" }), // 期日が変わった
-      base("g", { ...YAMA }), // 担当が替わった
+      base("g", { ...YAMA }), // 担当者ID がいまは別の人（Notion の更新は無い）→ 残す。メンションは 1対1 を送った相手
       base("h"), // 残る
     ];
     const f = escFake({ rows, tasks, answered: ["a"] });
     assert.equal(await M.runDmEscalationOnTick(AM9, ON, f.deps), "sent");
-    assert.deepEqual(f.pushed[0].map((c) => c.text.split("\n").slice(1, 3)), [["8. 件h（本日期限）", ""]]);
+    assert.deepEqual(f.pushed[0].map((c) => [c.mentions, c.text.split("\n").slice(1, 4)]), [[{ m1: U1 }, ["7. 件g（本日期限）", "8. 件h（本日期限）", ""]]]);
     assert.deepEqual(f.logs, ["[staff-digest] esc am sent 1"]);
     // 純粋な関数でも同じ（ページ ID のハイフンの有無は区別しない）
     const cur = new Map(tasks.map((x) => [M.pageKey(x.id), x]));
-    assert.deepEqual(M.unansweredOf(M.asDmRunRows(rows)[0], cur, new Set(["a"]), TODAY).map((o) => o.n), [8]);
+    assert.deepEqual(M.unansweredOf(M.asDmRunRows(rows)[0], cur, new Set(["a"]), TODAY).map((o) => o.n), [7, 8]);
   });
 
   await t("その日に担当に聞いたタスクは、聞いた時刻＋3分より後の更新だけを「Notion で更新」と数える", async () => {
@@ -399,10 +466,17 @@ class FakeKv {
     assert.deepEqual(f.logs, ["[staff-digest] esc am fetch-failed Error"]);
     assert.equal(f.kv.store.has(M.dmEscKey(TODAY, "am")), false);
     assert.equal(await M.runDmEscalationOnTick(AM9 + MIN, ON, f.deps), "sent");
-    const p = escFake({ pushOk: false });
+    // 結果の分からない通がある（届いたかもしれない）→ 印は残す＝送り直さない
+    const p = escFake({ pushOk: false, unknown: 1 });
     assert.equal(await M.runDmEscalationOnTick(AM9, ON, p.deps), "failed");
     assert.equal(await M.runDmEscalationOnTick(AM9 + MIN, ON, p.deps), "taken");
     assert.deepEqual([p.pushed.length, p.logs], [1, ["[staff-digest] esc am push-failed"]]);
+    // 全部はっきり断られた（届いた通が無い）→ 印を外して次の見回りでやり直す（同じ retry key）
+    const q = escFake({ pushOk: false });
+    assert.equal(await M.runDmEscalationOnTick(AM9, ON, q.deps), "failed");
+    assert.equal(q.kv.store.has(M.dmEscKey(TODAY, "am")), false);
+    assert.equal(await M.runDmEscalationOnTick(AM9 + MIN, ON, q.deps), "failed");
+    assert.deepEqual([q.pushed.length, q.keys, q.logs], [2, [`sd-esc:${TODAY}:am`, `sd-esc:${TODAY}:am`], ["[staff-digest] esc am push-rejected", "[staff-digest] esc am push-rejected"]]);
   });
 
   await t("準備が時間切れなら印を外してやり直す", async () => {
@@ -417,7 +491,7 @@ class FakeKv {
   const REC2 = { date: TODAY, slot: "am" as const, nums: [1, 2], taskIds: ["a", "b"], at: AM8 };
   const REC1 = { date: TODAY, slot: "am" as const, nums: [3], taskIds: ["c"], at: AM8 };
   const TITLES: Record<number, { id: string; title: string }> = { 1: { id: "a", title: "天満の資料を送る" }, 2: { id: "b", title: "売主へ電話" }, 3: { id: "c", title: "査定書を作る" }, 9: { id: "z", title: "別の人の件" } };
-  function replyFake(over: { noticeOk?: boolean[] } = {}) {
+  function replyFake(over: { noticeOk?: boolean[]; now?: number; quoted?: number[] | null } = {}) {
     const replies: string[] = [];
     const logs: string[] = [];
     const ran: string[] = [];
@@ -428,7 +502,8 @@ class FakeKv {
     const isDone = (l: string) => /^\d{1,2}(?:[,、]\d{1,2})*\s*(済|完了)$/.test(l);
     const isStatus = (l: string) => /^\d{1,2}\s*(待ち|延期|不要)(\s|$)/.test(l);
     const deps = {
-      now: () => AM8 + 10 * MIN,
+      now: () => over.now ?? AM8 + 10 * MIN,
+      quotedNums: async () => over.quoted ?? null,
       isKnown: (l: string) => isDone(l) || isStatus(l),
       isOther: (l: string) => /^\d+\s*(登録|なし)$/.test(l),
       numbersOf: (l: string) => (l.match(/^[\d,、]+/)?.[0].match(/\d+/g) ?? []).map(Number),
@@ -488,6 +563,32 @@ class FakeKv {
     assert.deepEqual(two.logs, ["[staff-digest] dm reply no-number"]);
   });
 
+  await t("番号の無い文を受けるのは、1対1 のまとめを送ってから3時間以内か、その人あての 1対1 のまとめを引用した返信だけ。番号つきは控えのあるあいだ受ける", async () => {
+    const LATE = AM8 + 3 * 60 * MIN + 1;
+    const late = replyFake({ now: LATE });
+    await M.handleDmReply({ kind: "text", text: "今日はお昼どうしますか" }, REC1, late.deps);
+    assert.deepEqual([late.notes, late.ran, late.noted], [[], [], []]);
+    assert.deepEqual(late.replies, ["このトークでは、進捗の確認への返事だけ受け付けています。番号をつけて返信してください（例：「1済」）"]);
+    assert.deepEqual(late.logs, ["[staff-digest] dm reply late"]);
+    const edge = replyFake({ now: AM8 + 3 * 60 * MIN });
+    await M.handleDmReply({ kind: "text", text: "アポ取れました" }, REC1, edge.deps);
+    assert.deepEqual(edge.notes.map((x) => x[0]), ["c"]);
+    // 引用していれば、3時間を過ぎていても受ける。2件あての人は、引用した通の番号が1件ならそのタスク
+    const q1 = replyFake({ now: LATE, quoted: [3] });
+    await M.handleDmReply({ kind: "text", text: "アポ取れました" }, REC1, q1.deps);
+    assert.deepEqual(q1.notes.map((x) => x[0]), ["c"]);
+    const q2 = replyFake({ now: LATE, quoted: [2] });
+    await M.handleDmReply({ kind: "text", text: "済" }, REC2, q2.deps);
+    assert.deepEqual(q2.ran, ["2 済"]);
+    const q3 = replyFake({ now: LATE, quoted: [1, 2] });
+    await M.handleDmReply({ kind: "text", text: "アポ取れました" }, REC2, q3.deps);
+    assert.deepEqual([q3.notes, q3.replies], [[], ["どの番号の件か分かりませんでした。番号をつけて返信してください（例：「1 送りました」）"]]);
+    // 番号つきは、3時間を過ぎていても受ける
+    const num = replyFake({ now: LATE });
+    await M.handleDmReply({ kind: "text", text: "3 アポ取れました" }, REC1, num.deps);
+    assert.deepEqual(num.notes.map((x) => x[0]), ["c"]);
+  });
+
   await t("ほか（文字でない・ほかの機能の言葉・あいづち・絵文字だけ）：1時間に1回だけ案内、あとは黙る。何も書かない", async () => {
     const f = replyFake({ noticeOk: [true, false, false, false, false, false, false] });
     const inputs: Array<{ kind: "text" | "other"; text?: string }> = [
@@ -540,7 +641,7 @@ class FakeKv {
     const fs = await import("node:fs");
     const remind = fs.readFileSync("src/lib/remind.ts", "utf8");
     // off なら足す前と同じ1行（sendDigestMessages）に落ちる
-    assert.ok(remind.includes('const sentAm = staffDigestDmOn()\n      ? await (await import("./staff-digest-dm-wire")).sendDigestWithDmReal("am", todayStr, digest.messages, digest.ordered, Date.now())\n      : await sendDigestMessages("am", digest.messages, order.length, Date.now());'));
+    assert.ok(remind.includes('const sentAm = staffDigestDmOn()\n      ? await (await import("./staff-digest-dm-wire")).sendDigestWithDmReal("am", { today: todayStr, tomorrow: tomorrowStr, followup, notionUrl: digestNotionUrl() }, digest.messages, digest.ordered, Date.now())\n      : await sendDigestMessages("am", digest.messages, order.length, Date.now());'));
     let fetches = 0;
     const origFetch = globalThis.fetch;
     globalThis.fetch = (async () => { fetches++; throw new Error("外へ出てはいけない"); }) as typeof fetch;

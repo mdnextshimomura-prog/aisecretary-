@@ -231,7 +231,7 @@ export async function sendDailyReminders(): Promise<void> {
     // STAFF_DIGEST_DM=1 のときだけ、友だちの担当の通は個人 LINE（1対1）へ先に送る（ほかは今までどおりグループへ。
     // 1対1 に送れなかった人の分は、その場でグループへ回す）。off なら足す前と同じ1行
     const sentAm = staffDigestDmOn()
-      ? await (await import("./staff-digest-dm-wire")).sendDigestWithDmReal("am", todayStr, digest.messages, digest.ordered, Date.now())
+      ? await (await import("./staff-digest-dm-wire")).sendDigestWithDmReal("am", { today: todayStr, tomorrow: tomorrowStr, followup, notionUrl: digestNotionUrl() }, digest.messages, digest.ordered, Date.now())
       : await sendDigestMessages("am", digest.messages, order.length, Date.now());
     // 段階3：送れた朝だけ、出したタスクを KV に控える（夕方の前の「返事が無い」の判定用。失敗しても投げない）
     if (sentAm > 0) {
