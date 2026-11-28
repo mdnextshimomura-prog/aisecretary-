@@ -143,6 +143,8 @@ export interface ReplyItem {
 export interface DigestReplyInput {
   /** メンションを除いた本文 */
   text: string;
+  /** 発言にメンションがあるか（@AI秘書 あての依頼・人への声かけ）。あれば、番号の無い文は受けない */
+  hasMention?: boolean;
   quotedMessageId?: string | null;
   groupId?: string | null;
   userId?: string | null;
@@ -169,11 +171,50 @@ export interface DigestReplyDeps {
 }
 
 const PROGRESS_WHAT_MAX = 60;
+export const MSG_SD_NO_NUMBER = "どの番号の件か分かりませんでした。番号をつけて返信してください（例：「1 送りました」）";
+
+// あいづちだけの返事（「了解です」「ありがとうございます」）。番号の無い文としては受けない
+const ACK_RE = /^(了解|りょうかい|承知|かしこまり|わかりました|分かりました|ok|okay|オーケー|はい|ありがとう|お疲れ|おつかれ|すみません|よろしく|お願いします)/i;
+const ACK_MAX = 16;
 
 /**
- * まとめを引用した返信のうち、番号＋自由な文を進捗として受ける。
- * 受ける条件：STAFF_DIGEST on・グループ・引用先がまとめ（staffdigest:msg:*）・読める行が番号で始まる・進捗の行が1つ以上。
- * どれか欠ければ {handled:false}（今までの流れへ）。off・引用なし・雑談は KV も読まない。
+ * 番号の無い文として読むか（まとめを引用した返信で、番号つきとして読めなかったとき）。
+ * 読むのは：メンションが無い・今の言葉や候補の言葉の行が無い・文字（字か数字）が2字以上・あいづちだけでない
+ * （番号を付ければ今の言葉になる「済」「完了しました」は1字でも読む）。
+ * 読めれば、行を空白でつないだ文を返す。スタンプ代わりの絵文字だけ・1字・あいづちは null（今までの流れへ）。
+ */
+export function freeTextOf(
+  input: Pick<DigestReplyInput, "text" | "hasMention">,
+  isKnown: (line: string) => boolean,
+  isOther?: (line: string) => boolean
+): string | null {
+  if (input.hasMention) return null;
+  const lines = input.text.split(/\r?\n/).map(normalize).filter((l) => l.length > 0);
+  if (lines.length === 0) return null;
+  if (lines.some((l) => isKnown(l) || Boolean(isOther?.(l)))) return null;
+  const joined = lines.join(" ");
+  // 番号を付ければ今の言葉になる短い返事（「済」「完了」「待ち 売主の書類 金曜」）は、字数に関わらず読む
+  if (isKnown(`1 ${joined}`)) return cut(joined, BODY_MAX);
+  // 字（かな・カナ・漢字・英数字）が2字以上あること（絵文字・記号だけは読まない）
+  if ((joined.match(/[0-9A-Za-zぁ-んァ-ヶ一-龠々ー０-９Ａ-Ｚａ-ｚ]/g) ?? []).length < 2) return null;
+  if (Array.from(joined).length <= ACK_MAX && ACK_RE.test(joined)) return null;
+  return cut(joined, BODY_MAX);
+}
+
+/** 控えたまとめの1通から、載せた番号を読む（古い控え・形の違うものは null） */
+function numsOf(rec: unknown): number[] | null {
+  const nums = (rec as { nums?: unknown } | null)?.nums;
+  if (!Array.isArray(nums)) return null;
+  return nums.filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= 99);
+}
+
+/**
+ * まとめ（担当ごとの通・催促）を引用した返信を受ける。
+ *   ・番号＋自由な文（「3 アポ取れました」）→ 進捗。番号は、引用した通に載っていなくても、今のまとめの番号なら受ける
+ *   ・番号の無い文 → 引用した通のタスクが1件だけなら、そのタスクの進捗（「済」「完了しました」「待ち 売主の書類 金曜」は
+ *     その番号を付けた今の言葉として処理）。2件以上なら「どの番号の件か…」と1回返すだけ（何も書かない）
+ * 受ける条件：STAFF_DIGEST on・グループ・引用先がまとめ（staffdigest:msg:*）。どれか欠ければ {handled:false}（今までの流れへ）。
+ * off・引用なし・今の言葉だけの返事・あいづち・絵文字だけは KV も読まない。
  */
 export async function handleDigestReply(
   input: DigestReplyInput,
@@ -188,13 +229,31 @@ export async function handleDigestReply(
   } catch {
     return pass;
   }
-  if (!entries) return pass;
+  // 番号つきとして読めなかったら、番号の無い文として読めるかを見る（読めなければ今までの流れへ。KV も読まない）
+  const free = entries ? null : freeTextOf(input, deps.isKnown, deps.isOther);
+  if (!entries && free === null) return pass;
+  let rec: unknown;
   try {
-    if (!(await deps.kv.get(digestMsgKey(input.quotedMessageId)))) return pass;
+    rec = await deps.kv.get(digestMsgKey(input.quotedMessageId));
   } catch {
     deps.log("[staff-digest] reply kv-failed");
     return pass;
   }
+  if (!rec) return pass;
+  if (!entries && free !== null) {
+    const nums = numsOf(rec);
+    // 番号の控えの無い古いまとめ（1通に全員ぶん）は、今までどおり受けない
+    if (!nums || nums.length === 0) return pass;
+    if (nums.length > 1) {
+      await deps.reply(MSG_SD_NO_NUMBER).catch(() => deps.log("[staff-digest] reply send-failed"));
+      deps.log("[staff-digest] reply no-number");
+      return { handled: true, committed: false };
+    }
+    // 1件だけの通：その番号を付けた返事として読む（「済」→「3 済」＝完了、「待ち …」→ 状況の言葉、ほかは進捗）
+    const synth = `${nums[0]} ${free}`;
+    entries = deps.isKnown(synth) ? [{ kind: "known", raw: synth }] : [{ kind: "progress", numbers: [nums[0]], body: free }];
+  }
+  if (!entries) return pass;
 
   const name = await deps.senderName(input.userId ?? null).catch(() => null);
   const stamp = `進捗（${mdOf(jstDay(deps.now()))} ${name || "担当"}）：`;
@@ -630,7 +689,9 @@ export async function handleSdPostback(a: { day: string }, src: { userId?: strin
     await deps.kv.set(nudgedKey(a.day), "sent", DAY_TTL_SEC).catch(() => undefined);
     // 催促のメッセージへの返信も、まとめへの返信として受けられるようにする（控えられなくても催促は届いている）
     for (const id of r.ids) {
-      await deps.kv.set(digestMsgKey(id), { at: deps.now(), slot: "nudge" }, DIGEST_MSG_TTL_SEC).catch(() => undefined);
+      await deps.kv
+        .set(digestMsgKey(id), { at: deps.now(), slot: "nudge", nums: list.map((e) => e.n), uid: null }, DIGEST_MSG_TTL_SEC)
+        .catch(() => undefined);
     }
     return say(msgSdSent(list.length), "sent");
   } catch {

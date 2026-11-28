@@ -957,12 +957,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     // ①-1b 担当へのまとめへの返信のうち、自由な文の進捗（段階3。STAFF_DIGEST=1 のときだけ。off なら KV も読まずに下へ）。
-    // 受けるのは「まとめ（staffdigest:msg:*）を引用している・グループ・行の頭が番号・進捗の行が1つ以上」のときだけ。
-    // 引用の無い「3 …」、今の言葉だけの返事（「3済」「3待ち …」）は handled=false で、今までの流れがそのまま扱う。
+    // 受けるのは「まとめ（staffdigest:msg:*。担当ごとの通・催促）を引用している・グループ」の返信で、
+    // 番号＋文（進捗）か、番号の無い文（引用した通のタスクが1件ならその進捗。2件以上なら番号を聞き返すだけ）。
+    // 引用の無い「3 …」、今の言葉だけの返事（「3済」「3待ち …」）、あいづち・絵文字だけ・メンションつきの番号なしの文は
+    // handled=false で、今までの流れがそのまま扱う。
     // ここに置くのは、①-2（初動確認への回答）と②（「1済\n2 まだです」を1・2 の完了と読む）に先に取られないため。
     {
       const sd = await tryDigestProgressReply({
         text: stripMentions(event.message),
+        hasMention: (event.message.mention?.mentionees.length ?? 0) > 0,
         quotedMessageId: event.message.quotedMessageId,
         groupId: source.groupId,
         userId: source.userId,

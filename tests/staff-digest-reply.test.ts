@@ -128,10 +128,67 @@ async function main() {
   await t("引用が無い・グループでない・雑談は、on でも KV を触らず今までどおり", async () => {
     const x = mkReply();
     x.m.set(digestMsgKey("D1"), { at: 1, slot: "am" });
-    for (const m of [msg("3 アポ取れました", null), msg("3 アポ取れました", "D1", null), msg("了解です"), msg("3済"), msg("3件アポ取れました")]) {
-      assert.deepEqual(await R.handleDigestReply(m, x.deps), { handled: false, committed: false });
+    for (const m of [msg("3 アポ取れました", null), msg("3 アポ取れました", "D1", null), msg("了解です"), msg("3済"), msg("👍"), msg("1 登録")]) {
+      assert.deepEqual(await R.handleDigestReply({ ...m }, { ...x.deps, isOther: (l) => /^\d+\s*(登録|なし)$/.test(l) }), { handled: false, committed: false });
     }
     assert.equal(x.ops.length + x.notes.length + x.replies.length + x.logs.length, 0);
+    // 番号の控えの無い古いまとめ（1通に全員ぶん）への番号なしの文は、KV を1回読むだけで受けない
+    assert.deepEqual(await R.handleDigestReply(msg("3件アポ取れました"), x.deps), { handled: false, committed: false });
+    assert.deepEqual([x.ops.length, x.notes.length + x.replies.length + x.logs.length], [1, 0]);
+  });
+
+  await t("番号の無い文として読むもの・読まないもの（あいづち・絵文字だけ・1字・メンションつき・今の言葉は読まない）", () => {
+    const f = (text: string, hasMention = false) => R.freeTextOf({ text, hasMention }, isKnown, (l) => /^\d+\s*(登録|なし)$/.test(l));
+    assert.equal(f("先方に送りました"), "先方に送りました");
+    assert.equal(f("送りました\n返事待ちです"), "送りました 返事待ちです");
+    assert.equal(f("済"), "済"); // 番号を付ければ今の言葉（「1 済」）になるものは、1字でも読む
+    assert.equal(f("完了しました"), "完了しました");
+    assert.equal(f("了解です。明日の10時に内見に行きます"), "了解です。明日の10時に内見に行きます");
+    for (const s of ["了解です", "承知しました！", "ありがとうございます", "OK", "はい", "👍", "🙏🙏", "！？", "あ", "", "3済", "1 登録"]) assert.equal(f(s), null, s);
+    assert.equal(f("これタスクにして", true), null);
+  });
+
+  await t("番号の無い返信：引用した通のタスクが1件だけなら、そのタスクの進捗として記録する", async () => {
+    const x = mkReply();
+    x.m.set(digestMsgKey("D1"), { at: 1, slot: "am", nums: [3], uid: OGA });
+    assert.deepEqual(await R.handleDigestReply(msg("先方に送りました。\n返事待ちです"), x.deps), { handled: true, committed: true });
+    assert.deepEqual(x.notes, [{ id: "p3", lines: ["進捗（11/28 小笠原）：先方に送りました。 返事待ちです"] }]);
+    assert.deepEqual(x.replies, ["📝 3 の進捗を記録しました"]);
+    assert.deepEqual(x.logs, ["[staff-digest] reply progress 1"]);
+  });
+
+  await t("番号の無い返信（1件の通）：「完了しました」「終わりました」はその番号の完了として今の処理へ（進捗には書かない）", async () => {
+    const x = mkReply();
+    x.m.set(digestMsgKey("D1"), { at: 1, slot: "am", nums: [3], uid: OGA });
+    // 本物のつなぎと同じ見分け（番号＋完了の言葉だけ）
+    const deps = { ...x.deps, isKnown: R.isBareCompletion };
+    assert.deepEqual(await R.handleDigestReply(msg("完了しました"), deps), { handled: true, committed: true });
+    assert.deepEqual(await R.handleDigestReply(msg("終わりました"), deps), { handled: true, committed: true });
+    assert.deepEqual(await R.handleDigestReply(msg("済"), deps), { handled: true, committed: true });
+    assert.deepEqual(x.known, ["3 完了しました", "3 終わりました", "3 済"]);
+    assert.equal(x.notes.length, 0);
+    // 文になっていれば進捗（「契約済みです」）
+    await R.handleDigestReply(msg("契約済みです"), deps);
+    assert.deepEqual(x.notes, [{ id: "p3", lines: ["進捗（11/28 小笠原）：契約済みです"] }]);
+  });
+
+  await t("番号の無い返信：引用した通のタスクが2件以上なら、番号を聞き返すだけ（何も書かない）。メンションつき・あいづちは今までどおり", async () => {
+    const x = mkReply();
+    x.m.set(digestMsgKey("D1"), { at: 1, slot: "eve", nums: [2, 3], uid: OGA });
+    assert.deepEqual(await R.handleDigestReply(msg("先方に送りました"), x.deps), { handled: true, committed: false });
+    assert.deepEqual(x.replies, ["どの番号の件か分かりませんでした。番号をつけて返信してください（例：「1 送りました」）"]);
+    assert.deepEqual([x.notes.length, x.noted.length, x.logs], [0, 0, ["[staff-digest] reply no-number"]]);
+    const ops = x.ops.length;
+    assert.deepEqual(await R.handleDigestReply({ ...msg("これお願いします"), hasMention: true }, x.deps), { handled: false, committed: false });
+    assert.deepEqual(await R.handleDigestReply(msg("ありがとうございます"), x.deps), { handled: false, committed: false });
+    assert.equal(x.ops.length, ops);
+  });
+
+  await t("番号つきの返信：引用した通に載っていない番号でも、今のまとめの番号なら受ける（別の人の通を引用していても）", async () => {
+    const x = mkReply();
+    x.m.set(digestMsgKey("D1"), { at: 1, slot: "am", nums: [7], uid: YAMA });
+    assert.deepEqual(await R.handleDigestReply(msg("3 アポ取れました"), x.deps), { handled: true, committed: true });
+    assert.deepEqual(x.notes.map((n) => n.id), ["p3"]);
   });
 
   await t("引用先がまとめでなければ受けない（KV を1回読むだけ）", async () => {
@@ -372,8 +429,8 @@ async function main() {
     assert.deepEqual(x.replies, ["📣 グループへ催促を送りました（4件）"]);
     assert.deepEqual(x.logs, ["[staff-digest] nudge sent"]);
     assert.deepEqual(x.keys, [`sd-nudge:${DAY}`]);
-    // 催促のメッセージへの返信も、まとめへの返信として受けられるよう ID を控える
-    assert.ok(x.m.has(digestMsgKey("N1")));
+    // 催促のメッセージへの返信も、まとめへの返信として受けられるよう ID と番号を控える
+    assert.deepEqual(x.m.get(digestMsgKey("N1")), { at: NOW, slot: "nudge", nums: [1, 3, 4, 2], uid: null });
     await R.handleSdPostback({ day: DAY }, { userId: OWNER }, x.deps);
     assert.equal(x.group.length, 1);
     assert.equal(x.replies[1], "もう送ってあります");

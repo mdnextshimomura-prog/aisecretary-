@@ -145,6 +145,8 @@ export function tapFound(deps: StatusDeps): { deps: StatusDeps; hits: Array<{ id
  */
 export async function tryDigestProgressReply(o: {
   text: string;
+  /** 発言にメンションがあるか（あれば、番号の無い文は受けない） */
+  hasMention?: boolean;
   quotedMessageId?: string | null;
   groupId?: string | null;
   userId?: string | null;

@@ -2,7 +2,9 @@
  * 担当へのまとめ（段階2・2026-11-28 下村さん決定）。スイッチは STAFF_DIGEST=1（既定 off）。
  *
  * 朝8時のリマインドと夕方17時台の1回、会社グループへ「担当ごとの箇条書き」を文字だけで送る：
- *   ・担当のいるもの＝「{担当} どうなりましたか？」、担当の決まっていないもの＝「どうしますか？」
+ *   ・担当1人につき1通（2026-11-28 下村さん「小笠原に送るやつは小笠原のまとめで1通」）。
+ *     「{担当} 進捗の確認です。どうなりましたか？」＋その人の箇条書き＋返信の案内。担当の決まっていないものは最後に1通「どうしますか？」
+ *   ・送信は、5通までを1回の push にまとめる（LINE の数え方では1回の push＝宛先1人につき1通）
  *   ・番号は全体の通し番号（今の「3済」「3待ち …」の返事がそのまま使える）
  * off のあいだ、送る文・KV・Notion・ログは足す前と同じ（remind.ts は今の文のまま。夕方は KV も読まない）。
  *
@@ -11,10 +13,10 @@
  * ログは符号と件数だけ（本文・題名・userId・groupId・messageId は出さない）。
  */
 import { kv } from "@vercel/kv";
-import { buildChunks, type Chunk, type ChunkItem } from "./chunk";
+import type { Chunk } from "./chunk";
 import { STATUS_PENDING } from "./clarify";
 import { closureOn, loadClosures } from "./closures";
-import { pushLineChunksWithIds, sanitizeForTextV2 } from "./line";
+import { pushChunksBatchedWithIds, sanitizeForTextV2 } from "./line";
 import { getUpcomingTasks, setRemindNumber } from "./notion";
 import { bucketOf, shouldRemind } from "./remind-select";
 import { splitForGroup } from "./task-origin";
@@ -43,12 +45,14 @@ export interface DigestTask {
   propertyName?: string | null;
 }
 
-const HEADERS: Record<DigestSlot, string> = {
-  am: "📋 進捗の確認です",
-  eve: "📋 夕方の進捗の確認です",
+const ASK: Record<DigestSlot, string> = {
+  am: "進捗の確認です。どうなりましたか？",
+  eve: "夕方の進捗の確認です。どうなりましたか？",
 };
-const ASK_ASSIGNED = "どうなりましたか？";
-const ASK_UNASSIGNED = "担当が決まっていないもの：どうしますか？";
+const UNASSIGNED_HEAD = "担当が決まっていないもの：どうしますか？";
+const UNASSIGNED_FOOT = "どなたが進めるか、このメッセージに返信で教えてください";
+// 5000が上限。メンションの展開で膨らむ余地を見て余裕を持たせる（chunk.ts と同じ）
+const MAX_CHARS = 4200;
 
 function daysBetween(from: string, to: string): number {
   const a = Date.parse(`${from}T00:00:00Z`);
@@ -78,17 +82,24 @@ function taskLine(n: number, t: DigestTask, today: string, tomorrow: string, fol
   return line;
 }
 
-function footerOf(followup: boolean): string {
-  // 例は、いま受け付ける言葉だけを載せる。自由な文の進捗（段階3）は、このまとめを引用した返信だけ受ける
+/** 担当1人ぶんの返信の案内（人ごとに繰り返すので短く。例の番号は、その通に載せた番号を使う） */
+function personFooter(nums: number[], followup: boolean): string {
+  const a = nums[0];
+  const b = nums[1] ?? nums[0];
   return (
-    "\n\n──────────\n" +
-    "このメッセージに返信（リプライ）で、番号をつけて答えてください\n" +
-    "例：「1済」「1,2完了」" +
-    (followup
-      ? "\n相手待ち：「2待ち 売主の書類 金曜」\n期日を変える：「3延期 10/20」\nやらなくてよい：「3不要」"
-      : "") +
-    "\n進み具合を書く：「3 アポ取れました。来週火曜です」（番号のあとに空白）"
+    "このメッセージに返信（リプライ）で答えてください\n" +
+    `例：「${a}済」「${b} アポ取れました。来週火曜です」` +
+    (followup ? `「${b}待ち 売主の書類 金曜」` : "")
   );
+}
+
+/** まとめの1通（担当1人ぶん、または担当の決まっていないもの） */
+export interface DigestMessage {
+  chunk: Chunk;
+  /** この通に載せたタスクの番号 */
+  nums: number[];
+  /** 誰あてか（担当の userId。名前だけの担当・担当なしは null） */
+  uid: string | null;
 }
 
 export interface DigestInput<T extends DigestTask> {
@@ -105,12 +116,13 @@ export interface DigestInput<T extends DigestTask> {
 }
 
 export interface DigestOutput<T extends DigestTask> {
-  chunks: Chunk[];
+  /** 担当ごとに1通（最初に出てきた順）。担当の決まっていないものは最後の1通。長すぎる人は見出しをくり返して分ける */
+  messages: DigestMessage[];
   /** 本文に載せた順と、その番号 */
   ordered: Array<{ task: T; n: number }>;
 }
 
-/** まとめの文を組み立てる（純粋な関数。5000字・メンション20件の上限は buildChunks が分ける） */
+/** まとめの文を組み立てる（純粋な関数。番号は全体の通し番号のまま、担当ごとに1通に分ける） */
 export function buildStaffDigest<T extends DigestTask>(input: DigestInput<T>): DigestOutput<T> {
   const { slot, tasks, today, tomorrow, followup, numbers } = input;
 
@@ -133,35 +145,37 @@ export function buildStaffDigest<T extends DigestTask>(input: DigestInput<T>): D
     numbers ? [...list].sort((a, b) => (numbers.get(a.id) ?? 0) - (numbers.get(b.id) ?? 0)) : list;
 
   const ordered: Array<{ task: T; n: number }> = [];
-  const items: ChunkItem[] = [];
-  const pushTasks = (list: T[]) => {
+  const messages: DigestMessage[] = [];
+  // 1人ぶんを1通に組む。4200字を超えるときだけ、見出しと案内をくり返して次の通に分ける
+  const emit = (head: string, mentions: Record<string, string>, uid: string | null, list: T[], foot: (nums: number[]) => string) => {
+    let lines: string[] = [];
+    let nums: number[] = [];
+    const flush = () => {
+      if (nums.length === 0) return;
+      messages.push({ chunk: { text: [head, ...lines, "", foot(nums)].join("\n"), mentions }, nums, uid });
+      lines = [];
+      nums = [];
+    };
     for (const t of byNumber(list)) {
       const n = numbers?.get(t.id) ?? ordered.length + 1;
       ordered.push({ task: t, n });
-      items.push({ text: taskLine(n, t, today, tomorrow, followup) });
+      const line = taskLine(n, t, today, tomorrow, followup);
+      const size = head.length + lines.reduce((a, l) => a + l.length + 1, 0) + line.length + 200;
+      if (nums.length > 0 && size > MAX_CHARS) flush();
+      lines.push(line);
+      nums.push(n);
     }
-  };
-  const gap = () => {
-    if (items.length > 0) items.push({ text: "" });
+    flush();
   };
 
   for (const g of Array.from(groups.values())) {
-    gap();
     // userId が無い担当はメンションできないので名前で呼ぶ
-    items.push(
-      g.userId
-        ? { text: ASK_ASSIGNED, userId: g.userId, mentionFirst: true }
-        : { text: `${sanitizeForTextV2(g.name ?? "")}さん ${ASK_ASSIGNED}` }
-    );
-    pushTasks(g.tasks);
+    if (g.userId) emit(`{m1} ${ASK[slot]}`, { m1: g.userId }, g.userId, g.tasks, (nums) => personFooter(nums, followup));
+    else emit(`${sanitizeForTextV2(g.name ?? "")}さん ${ASK[slot]}`, {}, null, g.tasks, (nums) => personFooter(nums, followup));
   }
-  if (unassigned.length > 0) {
-    gap();
-    items.push({ text: ASK_UNASSIGNED });
-    pushTasks(unassigned);
-  }
+  if (unassigned.length > 0) emit(UNASSIGNED_HEAD, {}, null, unassigned, () => UNASSIGNED_FOOT);
 
-  return { chunks: buildChunks(HEADERS[slot], items, footerOf(followup)), ordered };
+  return { messages, ordered };
 }
 
 // ── 夕方に出すもの・番号 ──
@@ -231,14 +245,21 @@ const realMsgKv: DigestMsgKv = {
   },
 };
 
-/** 送ったまとめのメッセージ ID を控える。ID が無ければ KV を触らない */
-export async function saveDigestMessageIds(
-  ids: string[],
+/** 送れたまとめの1通（メッセージ ID・載せた番号・誰あてか） */
+export interface DigestMsgRow {
+  id: string;
+  nums: number[];
+  uid: string | null;
+}
+
+/** 送ったまとめを1通ずつ控える：staffdigest:msg:<id> = {at, slot, nums, uid}。無ければ KV を触らない */
+export async function saveDigestMessages(
+  rows: DigestMsgRow[],
   slot: DigestSlot,
   now: number,
   store: DigestMsgKv = realMsgKv
 ): Promise<void> {
-  for (const id of ids) await store.set(digestMsgKey(id), { at: now, slot }, DIGEST_MSG_TTL_SEC);
+  for (const r of rows) await store.set(digestMsgKey(r.id), { at: now, slot, nums: r.nums, uid: r.uid }, DIGEST_MSG_TTL_SEC);
 }
 
 // ── 送る ──
@@ -249,40 +270,50 @@ const LINE_GROUP_ID =
 export const DIGEST_GROUP_ID = LINE_GROUP_ID;
 
 export interface DigestSendDeps {
-  /** グループへ順に送り、送れた通数とメッセージ ID を返す */
-  push(chunks: Chunk[]): Promise<{ sent: number; ids: string[] }>;
-  saveIds(ids: string[], slot: DigestSlot, now: number): Promise<void>;
+  /**
+   * グループへ順に送る（5通までを1回の push にまとめる）。送れた通数と、渡した順のメッセージ ID
+   * （送れなかった・分からなかった通は null）を返す
+   */
+  push(chunks: Chunk[]): Promise<{ sent: number; ids: Array<string | null> }>;
+  saveMsgs(rows: DigestMsgRow[], slot: DigestSlot, now: number): Promise<void>;
   log(line: string): void;
 }
-/** まとめの送信は1通ごとにここまで（毎分の見回り・朝の cron を止めない） */
-const DIGEST_PUSH_TIMEOUT_MS = 10_000;
+/** まとめの送信は1回の push ごとにここまで（毎分の見回り・朝の cron を止めない） */
+const DIGEST_PUSH_TIMEOUT_MS = 8_000;
 const realSendDeps: DigestSendDeps = {
-  push: (chunks) => pushLineChunksWithIds(LINE_GROUP_ID, chunks, DIGEST_PUSH_TIMEOUT_MS),
-  saveIds: (ids, slot, now) => saveDigestMessageIds(ids, slot, now),
+  push: (chunks) => pushChunksBatchedWithIds(LINE_GROUP_ID, chunks, DIGEST_PUSH_TIMEOUT_MS),
+  saveMsgs: (rows, slot, now) => saveDigestMessages(rows, slot, now),
   log: (l) => console.log(l),
 };
 
 /**
- * まとめを送り、メッセージ ID を控える（朝・夕方の共通）。送れた通数を返す。
- * ID を控えられなくても投げない（まとめは届いている。段階3 の引用の照合ができなくなるだけ）。
+ * まとめ（担当ごとの通）を送り、1通ずつ ID・番号を控える（朝・夕方の共通）。送れた通数を返す。
+ * 控えられなくても投げない（まとめは届いている。段階3 の引用の照合ができなくなるだけ）。
  */
-export async function sendDigestChunks(
+export async function sendDigestMessages(
   slot: DigestSlot,
-  chunks: Chunk[],
+  messages: DigestMessage[],
   taskCount: number,
   now: number,
   deps: DigestSendDeps = realSendDeps
 ): Promise<number> {
-  const r = await deps.push(chunks);
+  const r = await deps.push(messages.map((m) => m.chunk));
   if (r.sent === 0) {
     deps.log(`[staff-digest] ${slot} push-failed`);
     return 0;
   }
+  const rows: DigestMsgRow[] = [];
+  messages.forEach((m, i) => {
+    const id = r.ids[i];
+    if (typeof id === "string" && id) rows.push({ id, nums: m.nums, uid: m.uid });
+  });
   try {
-    await deps.saveIds(r.ids, slot, now);
+    await deps.saveMsgs(rows, slot, now);
   } catch {
     deps.log(`[staff-digest] ${slot} ids-save-failed`);
   }
+  // 一部の push だけ送れなかった（送り直さない。その担当の分は夕方・次の朝に出る）
+  if (r.sent < messages.length) deps.log(`[staff-digest] ${slot} push-partial ${r.sent}/${messages.length}`);
   deps.log(`[staff-digest] ${slot} sent ${taskCount}`);
   return r.sent;
 }
@@ -390,7 +421,7 @@ export async function runStaffDigestEveningOnTick(
   const left = () => budget - (Date.now() - started);
   if (!(await d.claim(today))) return "taken";
 
-  let chunks: Chunk[];
+  let messages: DigestMessage[];
   let count: number;
   let all: EveTask[];
   try {
@@ -410,7 +441,7 @@ export async function runStaffDigestEveningOnTick(
     // 番号を Notion に書いてから送る（先に返信されても引けるように。朝と同じ順）
     await bounded(Promise.all(fresh.map((f) => d.setNumber(f.id, f.n))), left() - slice);
     const built = buildStaffDigest({ slot: "eve", tasks: selected, today, tomorrow, followup: d.followup, numbers });
-    chunks = built.chunks;
+    messages = built.messages;
     count = built.ordered.length;
   } catch (err) {
     // まだ何も送っていないので、印を外して次の見回りでやり直す（17時台のあいだ）
@@ -429,5 +460,5 @@ export async function runStaffDigestEveningOnTick(
   }
 
   // 送り始めたあとは印を残す（届いたか分からないものを送り直さない）
-  return (await sendDigestChunks("eve", chunks, count, now, d)) > 0 ? "sent" : "failed";
+  return (await sendDigestMessages("eve", messages, count, now, d)) > 0 ? "sent" : "failed";
 }

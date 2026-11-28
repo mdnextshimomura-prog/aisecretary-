@@ -18,7 +18,7 @@ import { listTasks } from "./notion";
 import { pushCard } from "./line";
 import { sendRemindCards } from "./remind-cards";
 import { splitForGroup } from "./task-origin";
-import { buildStaffDigest, sendDigestChunks, staffDigestOn } from "./staff-digest";
+import { buildStaffDigest, sendDigestMessages, staffDigestOn } from "./staff-digest";
 
 /**
  * 送信に失敗した「担当者への引き渡し」を送り直す。
@@ -214,9 +214,8 @@ export async function sendDailyReminders(): Promise<void> {
     ? buildStaffDigest({ slot: "am", tasks, today: todayStr, tomorrow: tomorrowStr, followup })
     : null;
   const order: UpcomingTask[] = digest ? digest.ordered.map((o) => o.task) : shown;
-  const chunks = digest
-    ? digest.chunks
-    : buildChunks("🔔 本日のリマインドです", items, footer);
+  // まとめ（digest）は担当ごとの通を別に送るので、今の1通の文は組まない
+  const chunks = digest ? [] : buildChunks("🔔 本日のリマインドです", items, footer);
 
   // 本文に載せた順で番号を確定させてから送る。
   // 送信後に番号を振ると、先に返信されたときに引けないため順序が重要。
@@ -227,8 +226,8 @@ export async function sendDailyReminders(): Promise<void> {
   }
   await Promise.all(order.map((t, i) => setRemindNumber(t.id, i + 1)));
   if (digest) {
-    // まとめは、送ったメッセージの ID を KV に控える（引用した返信の照合用）。ログは件数だけ
-    const sentAm = await sendDigestChunks("am", chunks, order.length, Date.now());
+    // まとめは担当ごとに1通（5通までを1回の push にまとめる）。送ったメッセージの ID と番号を KV に控える（引用した返信の照合用）。ログは件数だけ
+    const sentAm = await sendDigestMessages("am", digest.messages, order.length, Date.now());
     // 段階3：送れた朝だけ、出したタスクを KV に控える（夕方の前の「返事が無い」の判定用。失敗しても投げない）
     if (sentAm > 0) {
       const { saveMorningSnapshotReal } = await import("./staff-digest-reply-wire");

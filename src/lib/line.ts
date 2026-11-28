@@ -190,6 +190,66 @@ export async function pushCard(to: string, card: FlexMessage): Promise<boolean> 
   return true;
 }
 
+// まとめ（担当ごとの通）を、batchSize 通まで（LINE の上限は5）を1回の push にまとめて順に送る
+// （担当へのまとめ STAFF_DIGEST。LINE は1回の push を、宛先1人につき1通と数える）。
+// 返すのは、送れた通数と、渡した順のメッセージ ID（応答の sentMessages の並び。送れなかった・読めなかった通は null）。
+// 失敗した push は送り直さず、次の束へ進む。例外は投げない。本文・宛先はログに出さない。
+export async function pushChunksBatchedWithIds(
+  to: string,
+  chunks: Array<{ text: string; mentions: Record<string, string> }>,
+  timeoutMs: number = PUSH_BATCH_TIMEOUT_MS,
+  batchSize: number = 5
+): Promise<{ sent: number; ids: Array<string | null> }> {
+  const size = Math.min(5, Math.max(1, Math.floor(batchSize)));
+  const ids: Array<string | null> = chunks.map(() => null);
+  let sent = 0;
+  for (let at = 0; at < chunks.length; at += size) {
+    const part = chunks.slice(at, at + size);
+    const messages = part.map((c) => {
+      const keys = Object.keys(c.mentions);
+      return keys.length === 0
+        ? { type: "text", text: c.text }
+        : {
+            type: "textV2",
+            text: c.text,
+            substitution: Object.fromEntries(
+              keys.map((k) => [k, { type: "mention", mentionee: { type: "user", userId: c.mentions[k] } }])
+            ),
+          };
+    });
+    try {
+      const res = await fetch("https://api.line.me/v2/bot/message/push", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${ACCESS_TOKEN}`,
+        },
+        body: JSON.stringify({ to, messages }),
+        signal: AbortSignal.timeout(timeoutMs),
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        console.error("LINE push失敗:", res.status);
+        continue;
+      }
+      sent += part.length;
+      try {
+        const data = (await res.json()) as { sentMessages?: Array<{ id?: unknown }> };
+        part.forEach((_, i) => {
+          const id = data.sentMessages?.[i]?.id;
+          if (typeof id === "string" && id) ids[at + i] = id;
+        });
+      } catch {
+        // 応答が読めない（送信は成功。ID は控えられない）
+      }
+    } catch (err) {
+      console.error("LINE push の結果が分からない:", (err as { name?: string })?.name ?? "Error");
+    }
+  }
+  return { sent, ids };
+}
+const PUSH_BATCH_TIMEOUT_MS = 10_000;
+
 // LINEメンション付きPush送信（textV2形式）。
 // 通常の text メッセージに mention を付けても送信時は無視される（受信専用の仕様）ため、
 // 本物のメンション（相手に通知が飛び、青くハイライトされる）には textV2 の

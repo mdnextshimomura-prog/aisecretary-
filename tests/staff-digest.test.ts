@@ -45,73 +45,113 @@ const SAMPLE: Row[] = [
     assert.deepEqual(head, [{ text: "H\n\n{m1} どうなりましたか？F", mentions: { m1: U1 } }]);
   });
 
-  await t("朝：担当ごとにまとめ、通し番号を振る（担当なしは最後）", () => {
+  await t("朝：担当1人につき1通（通し番号はそのまま）。担当の決まっていないものは最後に1通", () => {
     const d = D.buildStaffDigest({ slot: "am", tasks: SAMPLE, today: TODAY, tomorrow: TOMORROW, followup: true });
-    assert.equal(d.chunks.length, 1);
-    assert.equal(
-      d.chunks[0].text,
-      [
-        "📋 進捗の確認です",
-        "",
-        "{m1} どうなりましたか？",
-        "1. 天満の資料を送る（2日超過）［天満ハイツ］",
-        "2. 売主へ電話（本日期限）（待ち：売主の書類）",
-        "",
-        "山口さん どうなりましたか？",
-        "3. 査定書を作る（明日期限）",
-        "",
-        "担当が決まっていないもの：どうしますか？",
-        "4. 鍵の手配（期日 12/3）",
-        "5. 看板の確認（期日なし）",
-        "",
-        "──────────",
-        "このメッセージに返信（リプライ）で、番号をつけて答えてください",
-        "例：「1済」「1,2完了」",
-        "相手待ち：「2待ち 売主の書類 金曜」",
-        "期日を変える：「3延期 10/20」",
-        "やらなくてよい：「3不要」",
-        "進み具合を書く：「3 アポ取れました。来週火曜です」（番号のあとに空白）",
-      ].join("\n")
-    );
-    assert.deepEqual(d.chunks[0].mentions, { m1: U1 });
+    assert.deepEqual(d.messages, [
+      {
+        chunk: {
+          text: [
+            "{m1} 進捗の確認です。どうなりましたか？",
+            "1. 天満の資料を送る（2日超過）［天満ハイツ］",
+            "2. 売主へ電話（本日期限）（待ち：売主の書類）",
+            "",
+            "このメッセージに返信（リプライ）で答えてください",
+            "例：「1済」「2 アポ取れました。来週火曜です」「2待ち 売主の書類 金曜」",
+          ].join("\n"),
+          mentions: { m1: U1 },
+        },
+        nums: [1, 2],
+        uid: U1,
+      },
+      {
+        chunk: {
+          text: [
+            "山口さん 進捗の確認です。どうなりましたか？",
+            "3. 査定書を作る（明日期限）",
+            "",
+            "このメッセージに返信（リプライ）で答えてください",
+            "例：「3済」「3 アポ取れました。来週火曜です」「3待ち 売主の書類 金曜」",
+          ].join("\n"),
+          mentions: {},
+        },
+        nums: [3],
+        uid: null,
+      },
+      {
+        chunk: {
+          text: [
+            "担当が決まっていないもの：どうしますか？",
+            "4. 鍵の手配（期日 12/3）",
+            "5. 看板の確認（期日なし）",
+            "",
+            "どなたが進めるか、このメッセージに返信で教えてください",
+          ].join("\n"),
+          mentions: {},
+        },
+        nums: [4, 5],
+        uid: null,
+      },
+    ]);
     assert.deepEqual(d.ordered.map((o) => [o.task.id, o.n]), [["a", 1], ["d", 2], ["c", 3], ["b", 4], ["e", 5]]);
   });
 
-  await t("夕方：見出しが変わる。渡した番号をそのまま使い、担当の中は番号の小さい順", () => {
+  await t("夕方：見出しが変わる。渡した番号をそのまま使い、担当の中は番号の小さい順。例の番号はその通の番号", () => {
     const numbers = new Map([["a", 4], ["d", 1], ["b", 7]]);
     const d = D.buildStaffDigest({ slot: "eve", tasks: [SAMPLE[0], SAMPLE[1], SAMPLE[3]], today: TODAY, tomorrow: TOMORROW, followup: true, numbers });
-    const lines = d.chunks[0].text.split("\n");
-    assert.equal(lines[0], "📋 夕方の進捗の確認です");
-    assert.deepEqual(lines.slice(2, 5), ["{m1} どうなりましたか？", "1. 売主へ電話（本日期限）（待ち：売主の書類）", "4. 天満の資料を送る（2日超過）［天満ハイツ］"]);
-    assert.equal(lines[7], "7. 鍵の手配（期日 12/3）");
+    assert.equal(d.messages.length, 2);
+    assert.deepEqual(d.messages[0].chunk.text.split("\n"), [
+      "{m1} 夕方の進捗の確認です。どうなりましたか？",
+      "1. 売主へ電話（本日期限）（待ち：売主の書類）",
+      "4. 天満の資料を送る（2日超過）［天満ハイツ］",
+      "",
+      "このメッセージに返信（リプライ）で答えてください",
+      "例：「1済」「4 アポ取れました。来週火曜です」「4待ち 売主の書類 金曜」",
+    ]);
+    assert.deepEqual([d.messages[0].nums, d.messages[1].nums], [[1, 4], [7]]);
+    assert.equal(d.messages[1].chunk.text.split("\n")[1], "7. 鍵の手配（期日 12/3）");
   });
 
-  await t("文の細部：{ } は全角に・TASK_FOLLOWUP off は待ちと例を出さない・題名に物件名があれば重ねない・要確認は「回答待ち」", () => {
+  await t("文の細部：{ } は全角に・TASK_FOLLOWUP off は待ちと待ちの例を出さない・題名に物件名があれば重ねない・要確認は「回答待ち」", () => {
     const d = D.buildStaffDigest({
       slot: "am",
       today: TODAY,
       tomorrow: TOMORROW,
       followup: false,
       tasks: [
-        row("x", "{m1}の件", TODAY, { note: "先方{待ち}", propertyName: "A{B}" }),
-        row("y", "天満ハイツの鍵", TODAY, { propertyName: "天満ハイツ" }),
-        row("z", "条件の確認", TODAY, { status: "要確認" }),
+        row("x", "{m1}の件", TODAY, { assignee: "山{口}", note: "先方{待ち}", propertyName: "A{B}" }),
+        row("y", "天満ハイツの鍵", TODAY, { assignee: "山{口}", propertyName: "天満ハイツ" }),
+        row("z", "条件の確認", TODAY, { assignee: "山{口}", status: "要確認" }),
       ],
     });
-    const text = d.chunks[0].text;
-    assert.ok(text.includes("1. （m1）の件（本日期限）［A（B）］\n2. 天満ハイツの鍵（本日期限）\n3. 条件の確認（回答待ち）"));
-    assert.ok(!text.includes("待ち："));
-    assert.ok(text.endsWith("例：「1済」「1,2完了」\n進み具合を書く：「3 アポ取れました。来週火曜です」（番号のあとに空白）"));
-    assert.deepEqual(d.chunks[0].mentions, {});
+    assert.equal(d.messages.length, 1);
+    assert.equal(
+      d.messages[0].chunk.text,
+      "山（口）さん 進捗の確認です。どうなりましたか？\n1. （m1）の件（本日期限）［A（B）］\n2. 天満ハイツの鍵（本日期限）\n3. 条件の確認（回答待ち）\n\nこのメッセージに返信（リプライ）で答えてください\n例：「1済」「2 アポ取れました。来週火曜です」"
+    );
+    assert.deepEqual(d.messages[0].chunk.mentions, {});
   });
 
-  await t("同じ担当は userId のある行・無い行が混ざっても1つにまとめ、メンションする", () => {
+  await t("同じ担当は userId のある行・無い行が混ざっても1通にまとめ、メンションする", () => {
     const d = D.buildStaffDigest({
       slot: "am", today: TODAY, tomorrow: TOMORROW, followup: true,
       tasks: [row("p", "一", TODAY, { assignee: "小笠原" }), row("q", "二", TODAY, OGA)],
     });
-    assert.equal(d.chunks[0].text.split("どうなりましたか？").length, 2);
-    assert.deepEqual(d.chunks[0].mentions, { m1: U1 });
+    assert.equal(d.messages.length, 1);
+    assert.deepEqual([d.messages[0].chunk.mentions, d.messages[0].nums, d.messages[0].uid], [{ m1: U1 }, [1, 2], U1]);
+  });
+
+  await t("1人ぶんが長すぎるときだけ、見出しと案内をくり返して分ける（どの通も5000字に収まり、番号は続く）", () => {
+    const long = "あ".repeat(180);
+    const tasks = Array.from({ length: 40 }, (_, i) => row(`t${i}`, `${long}${i}`, TODAY, OGA));
+    const d = D.buildStaffDigest({ slot: "am", tasks, today: TODAY, tomorrow: TOMORROW, followup: true });
+    assert.ok(d.messages.length >= 2);
+    for (const m of d.messages) {
+      assert.ok(m.chunk.text.length <= 4500);
+      assert.ok(m.chunk.text.startsWith("{m1} 進捗の確認です。どうなりましたか？\n"));
+      assert.ok(m.chunk.text.includes(`例：「${m.nums[0]}済」`));
+      assert.deepEqual(m.chunk.mentions, { m1: U1 });
+    }
+    assert.deepEqual(d.messages.flatMap((m) => m.nums), Array.from({ length: 40 }, (_, i) => i + 1));
   });
 
   await t("夕方の対象：朝の番号が残っているもの＋本日期限・期限超過。明日以降で番号なしは出さない", () => {
@@ -143,7 +183,7 @@ const SAMPLE: Row[] = [
     const logs: string[] = [];
     const claimed = new Set(over.taken ?? []);
     const pushed: Array<{ text: string; mentions: Record<string, string> }[]> = [];
-    const saved: Array<[string[], string, number]> = [];
+    const saved: Array<[Array<{ id: string; nums: number[]; uid: string | null }>, string, number]> = [];
     const numbered: Array<[string, number]> = [];
     const deps = {
       followup: true,
@@ -153,7 +193,7 @@ const SAMPLE: Row[] = [
       fetchTasks: async () => { calls.push("fetch"); return typeof over.tasks === "function" ? over.tasks() : (over.tasks ?? []); },
       setNumber: async (id: string, num: number) => { numbered.push([id, num]); },
       push: async (chunks: { text: string; mentions: Record<string, string> }[]) => { calls.push("push"); pushed.push(chunks); return { sent: chunks.length, ids: chunks.map((_, i) => `mid${i}`) }; },
-      saveIds: async (ids: string[], slot: string, now: number) => { saved.push([ids, slot, now]); },
+      saveMsgs: async (rows: Array<{ id: string; nums: number[]; uid: string | null }>, slot: string, now: number) => { saved.push([rows, slot, now]); },
       log: (l: string) => { logs.push(l); },
     };
     return { deps, calls, logs, pushed, saved, numbered, claimed };
@@ -183,9 +223,14 @@ const SAMPLE: Row[] = [
     ];
     assert.deepEqual(out, ["sent", "taken", "taken"]);
     assert.equal(f.pushed.length, 1);
-    assert.ok(f.pushed[0][0].text.startsWith("📋 夕方の進捗の確認です\n\n{m1} どうなりましたか？\n1. 天満の資料を送る（2日超過）\n\n担当が決まっていないもの：どうしますか？\n2. 今日入った本日期限（本日期限）"));
+    // 担当ごとに1通（小笠原さんの通・担当の決まっていないものの通）を、1回の送信に渡す
+    assert.deepEqual(f.pushed[0].map((c) => c.text.split("\n").slice(0, 2)), [
+      ["{m1} 夕方の進捗の確認です。どうなりましたか？", "1. 天満の資料を送る（2日超過）"],
+      ["担当が決まっていないもの：どうしますか？", "2. 今日入った本日期限（本日期限）"],
+    ]);
     assert.deepEqual(f.numbered, [["b", 2]]);
-    assert.deepEqual(f.saved, [[["mid0"], "eve", EVE]]);
+    // 1通ずつ、ID・載せた番号・誰あてかを控える
+    assert.deepEqual(f.saved, [[[{ id: "mid0", nums: [1], uid: U1 }, { id: "mid1", nums: [2], uid: null }], "eve", EVE]]);
     assert.deepEqual(Array.from(f.claimed), ["2026-11-28"]);
     assert.deepEqual(f.logs, ["[staff-digest] eve sent 2"]);
     assert.equal(await D.runStaffDigestEveningOnTick(EVE + 24 * 60 * MIN, ON, f.deps), "sent");
@@ -242,7 +287,7 @@ const SAMPLE: Row[] = [
     const f = fake({ tasks: EVE_TASKS });
     assert.equal(await D.runStaffDigestEveningOnTick(EVE, ON, { ...f.deps, morningMax: async () => 5 }), "sent");
     assert.deepEqual(f.numbered, [["b", 6]]);
-    assert.ok(f.pushed[0][0].text.includes("6. 今日入った本日期限"));
+    assert.ok(f.pushed[0][1].text.includes("6. 今日入った本日期限"));
     // 朝の控えを読めなくても送る（引いてきたタスクの番号だけで決める）
     const g = fake({ tasks: EVE_TASKS });
     assert.equal(await D.runStaffDigestEveningOnTick(EVE, ON, { ...g.deps, morningMax: async () => { throw new Error("kv"); } }), "sent");
@@ -286,26 +331,56 @@ const SAMPLE: Row[] = [
     assert.ok(!all.includes("天満") && !all.includes(U1) && !all.includes("mid0"));
   });
 
-  await t("まとめのメッセージ ID の控え：staffdigest:msg:<id> = {at, slot}（3日）。ID が無ければ KV を触らない", async () => {
+  await t("まとめの控え：staffdigest:msg:<id> = {at, slot, nums, uid}（3日）。無ければ KV を触らない", async () => {
     const sets: Array<[string, unknown, number]> = [];
     const kv = { set: async (k: string, v: unknown, ex: number) => { sets.push([k, v, ex]); } };
-    await D.saveDigestMessageIds(["111", "222"], "am", 1000, kv);
+    await D.saveDigestMessages([{ id: "111", nums: [1, 2], uid: U1 }, { id: "222", nums: [3], uid: null }], "am", 1000, kv);
     assert.deepEqual(sets, [
-      ["staffdigest:msg:111", { at: 1000, slot: "am" }, 3 * 24 * 60 * 60],
-      ["staffdigest:msg:222", { at: 1000, slot: "am" }, 3 * 24 * 60 * 60],
+      ["staffdigest:msg:111", { at: 1000, slot: "am", nums: [1, 2], uid: U1 }, 3 * 24 * 60 * 60],
+      ["staffdigest:msg:222", { at: 1000, slot: "am", nums: [3], uid: null }, 3 * 24 * 60 * 60],
     ]);
     sets.length = 0;
-    await D.saveDigestMessageIds([], "eve", 1000, kv);
+    await D.saveDigestMessages([], "eve", 1000, kv);
     assert.equal(sets.length, 0);
   });
 
-  await t("朝の送信：送って ID を控え、件数だけログに出す。控えに失敗しても投げない", async () => {
-    const f = fake();
-    f.deps.saveIds = async () => { throw new Error("kv down"); };
+  await t("朝の送信：担当ごとの通を送って控え、件数だけログに出す。控えに失敗しても投げない。ID の取れなかった通は控えない", async () => {
     const d = D.buildStaffDigest({ slot: "am", tasks: SAMPLE, today: TODAY, tomorrow: TOMORROW, followup: true });
-    const sent = await D.sendDigestChunks("am", d.chunks, d.ordered.length, 5, f.deps);
-    assert.equal(sent, 1);
+    const f = fake();
+    assert.equal(await D.sendDigestMessages("am", d.messages, d.ordered.length, 5, { ...f.deps, saveMsgs: async () => { throw new Error("kv down"); } }), 3);
     assert.deepEqual(f.logs, ["[staff-digest] am ids-save-failed", "[staff-digest] am sent 5"]);
+    // 2通目の束が送れなかった（ID は null）：送れた通だけ控え、送り直さない
+    const g = fake();
+    const sent = await D.sendDigestMessages("am", d.messages, d.ordered.length, 5, { ...g.deps, push: async () => ({ sent: 2, ids: ["x1", null, "x3"] }) });
+    assert.equal(sent, 2);
+    assert.deepEqual(g.saved, [[[{ id: "x1", nums: [1, 2], uid: U1 }, { id: "x3", nums: [4, 5], uid: null }], "am", 5]]);
+    assert.deepEqual(g.logs, ["[staff-digest] am push-partial 2/3", "[staff-digest] am sent 5"]);
+  });
+
+  await t("pushChunksBatchedWithIds：5通までを1回の push にまとめ、渡した順の ID を返す。失敗した束は null のまま次へ", async () => {
+    const bodies: Array<{ to: string; messages: Array<{ type: string; text: string }> }> = [];
+    let failAt = -1;
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      const b = JSON.parse(init.body);
+      bodies.push(b);
+      if (bodies.length - 1 === failAt) return new Response("{}", { status: 500 });
+      return new Response(JSON.stringify({ sentMessages: b.messages.map((m: { text: string }) => ({ id: `id-${m.text}` })) }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const L = await import("../src/lib/line");
+    const chunks = Array.from({ length: 7 }, (_, i) => ({ text: `t${i}`, mentions: i === 0 ? { m1: U1 } : ({} as Record<string, string>) }));
+    const r = await L.pushChunksBatchedWithIds(G, chunks);
+    assert.deepEqual(bodies.map((b) => b.messages.length), [5, 2]);
+    assert.deepEqual([bodies[0].to, bodies[0].messages[0].type, bodies[0].messages[1].type], [G, "textV2", "text"]);
+    assert.deepEqual(r, { sent: 7, ids: chunks.map((c) => `id-${c.text}`) });
+    bodies.length = 0;
+    failAt = 0;
+    const errs: unknown[] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => { errs.push(a); };
+    const r2 = await L.pushChunksBatchedWithIds(G, chunks);
+    console.error = orig;
+    assert.deepEqual(r2, { sent: 2, ids: [null, null, null, null, null, "id-t5", "id-t6"] });
+    assert.ok(!JSON.stringify(errs).includes(G));
   });
 
   // ── line.ts：ID を返す送り方（pushLineChunks は変えない） ──
