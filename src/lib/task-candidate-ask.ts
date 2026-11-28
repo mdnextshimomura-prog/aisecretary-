@@ -21,7 +21,7 @@ import {
   heldIds,
   numberCandidates,
 } from "./task-candidate-store";
-import { digestWithCards, nameResolver } from "./candidate-card";
+import { digestWithCards, groupInboxOn, inboxCarousel, inboxOwner, msgInboxDigest, nameResolver, visibleEntries } from "./candidate-card";
 import { menuActive } from "./task-menu";
 import type { FlexMessage } from "./task-card";
 
@@ -96,6 +96,14 @@ export async function askCandidatesIfDue(
       members = await (deps.members ?? (async () => []))().catch(
         () => [] as Member[],
       );
+    }
+    // GROUP_INBOX on：グループには出さず、仕分ける人の1対1へ（カードだけで仕分ける。番号の言葉は使わない）
+    if (groupInboxOn()) {
+      const cs = visibleEntries(numbered, held).map((e) => e.c);
+      const page = inboxCarousel(cs, nameResolver(members));
+      const owner = inboxOwner();
+      if (!page || !owner) return "empty";
+      return (await deps.push(owner, msgInboxDigest(cs.length, cs.length - page.shown), page.card)) ? "sent" : "send-failed";
     }
     const r = digestWithCards(numbered, held, nameResolver(members));
     if (!r.text) return "empty";

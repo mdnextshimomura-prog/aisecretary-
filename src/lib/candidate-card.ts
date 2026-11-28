@@ -15,7 +15,7 @@
  * ログに出すのは操作名・結果の符号・件数だけ（題名・本文・userId は出さない）。
  */
 import { loadMembers, type Member } from "./members";
-import { groupCardsOff, replyCardsOff, replyTextAndCard } from "./line";
+import { groupCardsOff, pushTextAndCard, replyCardsOff, replyTextAndCard } from "./line";
 import {
   buildDigest,
   candidatesEnabled,
@@ -62,8 +62,28 @@ export function candidateCardsActive(): boolean {
  */
 export function instantCandidateActive(): boolean {
   // グループにカードを出さないあいだ（GROUP_NO_CARDS=1）は、その場では聞かない（黙って控え、17時のまとめで聞く）
-  return candidateCardsActive() && process.env.TASK_CANDIDATE_INSTANT === "1" && !groupCardsOff();
+  return candidateCardsActive() && process.env.TASK_CANDIDATE_INSTANT === "1" && !groupCardsOff() && !groupInboxOn();
 }
+
+/**
+ * グループの依頼を下村さんの個人 LINE で仕分ける（2026-11-28）。`GROUP_INBOX=1` かつ候補カードが on かつ
+ * 仕分ける人（`TASK_BUTTONS_ADMIN_IDS` の先頭）が正しい形のときだけ。off なら今までと同じ。
+ * on のあいだ：候補を控えたらその場で仕分ける人の1対1にカード（［タスクにする］［登録しない］）、
+ * 17時のまとめもグループではなく1対1へ。グループには何も出さない。
+ */
+export function inboxOwner(env: Record<string, string | undefined> = process.env): string | null {
+  const id = (env.TASK_BUTTONS_ADMIN_IDS ?? "").split(",").map((x) => x.trim()).find((x) => /^U[0-9a-f]{32}$/.test(x));
+  return id ?? null;
+}
+export function groupInboxOn(env: Record<string, string | undefined> = process.env): boolean {
+  return candidateCardsActive() && env.GROUP_INBOX === "1" && inboxOwner(env) !== null;
+}
+export const MSG_INBOX_NEW = "📥 グループに依頼が来ました。タスクにしますか？";
+export const msgInboxDigest = (n: number, more: number) =>
+  `📥 まだ仕分けていない依頼が ${n}件あります` + (more > 0 ? `（ほか ${more}件は、片付いたら次のまとめで出します）` : "");
+/** @秘書 あてで迷った依頼への、グループでの返事（on のあいだ） */
+export const MSG_INBOX_ASKED = "📝 タスクにするか迷ったので、下村さんに確認します";
+const INBOX_TEXT_MAX = 120;
 
 export type CandidateOp = "cr" | "ch" | "cx";
 const OPS: CandidateOp[] = ["cr", "ch", "cx"];
@@ -264,6 +284,79 @@ export function candidateBubble(
   };
 }
 
+/** 仕分け用のカード（1対1だけ）。本文の頭も見せる。ボタンは［タスクにする］［登録しない］ */
+export function inboxBubble(c: Candidate, nameOf: NameOf): Record<string, unknown> {
+  const requester = c.senderId ? (nameOf(c.senderId) ?? "不明") : "不明";
+  const mentioned = mentionedOf(c).map((id) => nameOf(id) ?? (id === c.assigneeUserId ? c.assignee : null) ?? "不明");
+  const to = mentioned.length > 0 ? mentioned.filter((v, i) => mentioned.indexOf(v) === i).join("・") : c.assignee?.trim() || "未定";
+  const said = c.text.replace(/\s+/g, " ").trim();
+  return {
+    type: "bubble",
+    body: {
+      type: "box",
+      layout: "vertical",
+      contents: [
+        { type: "text", text: "グループの依頼", size: "xs", color: "#888888" },
+        { type: "text", text: cutEllipsis(c.title.trim() || "（無題）", CARD_TITLE_MAX), weight: "bold", size: "md", wrap: true, margin: "sm" },
+        {
+          type: "box",
+          layout: "vertical",
+          margin: "md",
+          spacing: "sm",
+          contents: [row("依頼者", requester), row("担当", to), row("発言", formatSaidAt(c.createdAt)), ...(said ? [row("本文", cutEllipsis(said, INBOX_TEXT_MAX))] : [])],
+        },
+      ],
+    },
+    footer: {
+      type: "box",
+      layout: "vertical",
+      spacing: "sm",
+      contents: [
+        button("タスクにする", encodeCandidateData("cr", c.id), pressedText("タスクにする", c.title), true),
+        button("登録しない", encodeCandidateData("cx", c.id), pressedText("登録しない", c.title)),
+      ],
+    },
+  };
+}
+export function inboxCard(c: Candidate, nameOf: NameOf): FlexMessage {
+  return { type: "flex", altText: cut(`【グループの依頼】${c.title}`, ALT_TEXT_MAX), contents: inboxBubble(c, nameOf) };
+}
+/** 仕分けていない依頼のまとめ（最大10枚。30KB 以上なら後ろを減らす）。出す分が無ければ undefined */
+export function inboxCarousel(cs: Candidate[], nameOf: NameOf): { card: FlexMessage; shown: number } | undefined {
+  if (cs.length === 0) return undefined;
+  let count = Math.min(MENU_PAGE_SIZE, cs.length);
+  for (;;) {
+    const card: FlexMessage = {
+      type: "flex",
+      altText: cut(`【グループの依頼】${cs.length}件`, ALT_TEXT_MAX),
+      contents: { type: "carousel", contents: cs.slice(0, count).map((c) => inboxBubble(c, nameOf)) },
+    };
+    if (Buffer.byteLength(JSON.stringify(card.contents), "utf8") < FLEX_JSON_MAX || count === 1) return { card, shown: count };
+    count--;
+  }
+}
+/**
+ * 候補を新しく控えたとき、仕分ける人の1対1へ文字＋カードを push（1通ぶんの送信枠）。
+ * 送れなくても候補は残り、17時のまとめで出る。例外は投げない。ログは符号だけ。
+ */
+export async function notifyInboxNew(
+  c: Candidate,
+  over: { push?: (to: string, text: string, card: FlexMessage) => Promise<boolean>; members?: () => Promise<Member[]>; log?: (l: string) => void; env?: Record<string, string | undefined> } = {},
+): Promise<"sent" | "failed" | "off"> {
+  const log = over.log ?? ((l: string) => console.log(l));
+  const owner = inboxOwner(over.env ?? process.env);
+  if (!owner) return "off";
+  try {
+    const members = await (over.members ?? loadMembers)().catch(() => [] as Member[]);
+    const ok = await (over.push ?? pushTextAndCard)(owner, MSG_INBOX_NEW, inboxCard(c, nameResolver(members)));
+    log(ok ? "[group-inbox] new sent 1" : "[group-inbox] new push-failed");
+    return ok ? "sent" : "failed";
+  } catch {
+    log("[group-inbox] new push-failed");
+    return "failed";
+  }
+}
+
 /** 候補1枚だけのカード（迷った依頼への返事） */
 export function candidateCard(c: Candidate, nameOf: NameOf): FlexMessage {
   return {
@@ -449,19 +542,24 @@ export async function handleCandidateAction(
   };
   let c: Candidate | null;
   let members: Member[];
+  let regGroup = groupId ?? "";
   try {
     const now = deps.now();
     c = await deps.get(action.id, now);
     // 別のグループ・1対1からは、あることも見せない
+    // 仕分ける人の1対1（GROUP_INBOX on）からは、控えたグループの候補として扱う
+    const ownerDm = !groupId && groupInboxOn() && Boolean(actorId) && actorId === inboxOwner();
     if (
       !c ||
-      !groupId ||
-      !isCandidateGroup(groupId) ||
-      deps.groupOf(c) !== groupId
+      (!ownerDm &&
+        (!groupId ||
+          !isCandidateGroup(groupId) ||
+          deps.groupOf(c) !== groupId))
     ) {
       await say(MSG_CAND_NOT_FOUND, "not-found");
       return;
     }
+    regGroup = groupId ?? deps.groupOf(c);
     members = await deps.members().catch(() => [] as Member[]);
     if (!canOperateCandidate(actorId, c, members)) {
       await say(MSG_CAND_FORBIDDEN, "forbidden");
@@ -496,7 +594,7 @@ export async function handleCandidateAction(
   }
   let r: RegisterResult;
   try {
-    r = await deps.register(c, replyToken, groupId);
+    r = await deps.register(c, replyToken, regGroup);
   } catch {
     await deps.releaseRegister(c.id).catch(() => undefined);
     await say(MSG_CAND_ERROR, "error");

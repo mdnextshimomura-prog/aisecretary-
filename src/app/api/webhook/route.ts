@@ -173,6 +173,9 @@ import {
   defaultCandidateTextDeps,
   handleCandidateTextCommand,
   instantCandidateActive,
+  groupInboxOn,
+  notifyInboxNew,
+  MSG_INBOX_ASKED,
   replyCandidateCard,
   replyInstantCandidateCard,
   replyCandidateList,
@@ -1623,6 +1626,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             // TASK_CANDIDATE_INSTANT=1：控えたらその場の返事で候補カード1枚（off なら今までどおり黙って控える）。
             // 新しく控えたときだけ（同じ発言の2度目は出さない）。送れなくても候補は残り、17時に聞く
             // 発言から50秒を過ぎそうなら送らない（replyToken の期限）。結果のログは関数の中で1回だけ出す
+            // GROUP_INBOX=1：グループには出さず、下村さんの1対1へ仕分けのカード（送れなくても候補は残り、17時のまとめで出る）
+            if (added && groupInboxOn()) await notifyInboxNew(cand);
             if (added && instantCandidateActive()) {
               replyTokenUsed = true;
               await replyInstantCandidateCard(replyToken, cand, event.timestamp);
@@ -1851,7 +1856,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         if (candidateResult === "failed") console.error("候補の控えに失敗（何もしない）");
         const added = candidateResult === "added";
         // TASK_MENU on：その場の返事で候補カード1枚（off なら今までどおり返事はしない）
-        if (added && candidateCardsActive()) {
+        if (added && groupInboxOn()) {
+          // GROUP_INBOX=1：グループには一言だけ返し、仕分けのカードは下村さんの1対1へ
+          await sendLineMessage(replyToken, MSG_INBOX_ASKED).catch(() =>
+            console.error("[task-candidate] reply-failed asked-card")
+          );
+          await notifyInboxNew(cand);
+        } else if (added && candidateCardsActive()) {
           await replyCandidateCard(replyToken, cand).catch(() =>
             console.error("[task-candidate] reply-failed asked-card")
           );
