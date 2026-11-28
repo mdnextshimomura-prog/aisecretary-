@@ -13,7 +13,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { kv } from "@vercel/kv";
 import { parseTaskFromMessage, type TaskAttachment } from "./claude";
 import { GS_B_JUDGE_PER_DAY, GS_CLAIM_TTL, GS_MIN, GS_RETRY_NAMESPACE, gsBJudgeKey, gsClaimKey, groupSateiActive, groupSateiOn, groupSateiPrepOn, groupSateiStage2On, ticketIdOf } from "./group-satei-data";
-import { gsEntryAOk, gsEntryBGate, gsMediaRow, looksLikeSateiWords } from "./group-satei-gate";
+import { gsEntryAOk, gsEntryBGate, gsMediaRow, hasStrongSateiWord, looksLikeSateiWords } from "./group-satei-gate";
 import {
   attachLateMedia, openGroupSatei, recordGroupSateiMedia, runRereadWorker, sweepGroupSatei,
   type GsKv, type GsOpenDeps, type GsRereadKv, type GsWorkerDeps,
@@ -499,7 +499,8 @@ export async function maybeOpenGroupSateiB(
       return;
     }
     // AI に聞く回数の1日の上限（KV の数。超えたら聞かずに黙る＝受付票は開かない）。KV が無い・数えられないときは今までどおり聞く
-    if (await bJudgeOverCap()) {
+    // 強い言葉（「査定」「買取金額」など）の発言は上限の外：弱い言葉が多い日でも「査定お願いします」を取りこぼさない
+    if (!hasStrongSateiWord(p.text) && (await bJudgeOverCap())) {
       report("skip");
       log("[group-satei] skip:b-cap");
       return;
