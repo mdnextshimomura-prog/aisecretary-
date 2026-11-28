@@ -114,6 +114,7 @@ import {
   followupEnabled,
 } from "@/lib/task-status";
 import { statusDeps } from "@/lib/task-status-wire";
+import { recordInboxContext } from "@/lib/group-inbox-context";
 import { statusWhat } from "@/lib/staff-digest-reply";
 import { noteGroupReply, tapFound, tryDigestProgressReply } from "@/lib/staff-digest-reply-wire";
 import {
@@ -674,7 +675,10 @@ async function registerTaskFromText(
   const sent = await replyTextAndCard(
     replyToken,
     reply,
-    opts.buttons ? registeredCardFor(pageId, parsed) : undefined
+    opts.buttons
+      ? // 仕分ける人の1対1から登録したとき（noClarify）だけ、カードに物件名の行を足す（グループのカードは今のまま）
+        registeredCardFor(pageId, parsed, opts.noClarify ? { property: parsed.propertyName ?? null } : undefined)
+      : undefined
   );
   const botMsgId = sent.textId;
   // 元の発言の ID も残す（Bot の返信の ID だけで上書きすると、二重登録の確認と
@@ -826,6 +830,21 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       userId: event.source.userId,
       groupId: event.source.groupId,
     };
+
+    // 仕分けのカード（GROUP_INBOX）の「直前のやりとり」用に、グループの文字・画像・ファイルを1行控える
+    // （候補を受け付けるグループで on のあいだだけ。off・対象外は KV を触らない。待たずに始め、返す直前にまとめて待つ。投げない）
+    if (source.groupId && (event.message.type === "text" || event.message.type === "image" || event.message.type === "file")) {
+      gsJobs.push(
+        recordInboxContext({
+          groupId: source.groupId,
+          messageId: event.message.id,
+          senderId: source.userId,
+          kind: event.message.type,
+          text: event.message.type === "text" ? stripMentions(event.message) : undefined,
+          at: event.timestamp ?? Date.now(),
+        })
+      );
+    }
 
     // 画像 → 通常は黙って「直近メディア」として控えるだけ（返信しない）。
     // ただし下書きの宛先待ち中は、その場で名刺として読み宛先に設定して返信する。
@@ -1659,6 +1678,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
               // B1 Task 2（TASK_MENU off のあいだは置き場が書かない）
               groupId: source.groupId ?? null,
               mentionedUserIds: mentioned.map((x) => x.userId as string),
+              // GROUP_INBOX：仕分けのカードの「物件」に出す（off のあいだは控えの中身を変えない）
+              ...(groupInboxOn() ? { propertyName: parsedCand.propertyName ?? null } : {}),
             };
             const added = await addCandidate(cand);
             markCommitted();
@@ -1666,7 +1687,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             // 新しく控えたときだけ（同じ発言の2度目は出さない）。送れなくても候補は残り、17時に聞く
             // 発言から50秒を過ぎそうなら送らない（replyToken の期限）。結果のログは関数の中で1回だけ出す
             // GROUP_INBOX=1：グループには出さず、下村さんの1対1へ仕分けのカード（送れなくても候補は残り、17時のまとめで出る）
-            if (added && groupInboxOn()) await notifyInboxNew(cand);
+            if (added && groupInboxOn()) await notifyInboxNew(cand, { quotedMessageId: event.message.quotedMessageId });
             if (added && instantCandidateActive()) {
               replyTokenUsed = true;
               await replyInstantCandidateCard(replyToken, cand, event.timestamp);
@@ -1890,6 +1911,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           mentionedUserIds: (event.message.mention?.mentionees ?? [])
             .filter((m) => m.type === "user" && m.userId && m.userId !== BOT_USER_ID)
             .map((m) => m.userId as string),
+          // GROUP_INBOX：仕分けのカードの「物件」に出す（off のあいだは控えの中身を変えない）
+          ...(groupInboxOn() ? { propertyName: parsed.propertyName ?? null } : {}),
         };
         candidateResult = await addCandidateResult(cand);
         if (candidateResult === "failed") console.error("候補の控えに失敗（何もしない）");
@@ -1900,7 +1923,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           await sendLineMessage(replyToken, MSG_INBOX_ASKED).catch(() =>
             console.error("[task-candidate] reply-failed asked-card")
           );
-          await notifyInboxNew(cand);
+          await notifyInboxNew(cand, { quotedMessageId: event.message.quotedMessageId });
         } else if (added && candidateCardsActive()) {
           await replyCandidateCard(replyToken, cand).catch(() =>
             console.error("[task-candidate] reply-failed asked-card")

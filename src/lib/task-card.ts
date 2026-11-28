@@ -51,6 +51,8 @@ export interface CardInfo {
   title: string;
   due: string | null;
   assignee: string | null;
+  /** 物件名（仕分ける人の1対1に出すカードだけが渡す。渡さなければ行を足さない＝今までと同じ） */
+  property?: string | null;
 }
 
 export interface FlexMessage {
@@ -151,6 +153,7 @@ export function buildTaskCard(
       margin: "md",
       spacing: "sm",
       contents: [
+        ...(info.property?.trim() ? [row("物件", cutEllipsis(info.property.trim(), 60))] : []),
         row("期日", formatDue(info.due) ?? UNKNOWN),
         row("担当", info.assignee?.trim() || UNKNOWN),
       ],

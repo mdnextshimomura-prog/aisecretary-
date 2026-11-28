@@ -42,6 +42,10 @@ import {
   type ListPage,
 } from "./task-menu";
 import { MENU_PAGE_SIZE } from "./task-buttons";
+import { loadInboxContext, type InboxContext } from "./group-inbox-context";
+import { normalizeProperty } from "./property";
+import { matchDeals, type DealRef } from "./task-record";
+import { loadActiveDeals } from "./task-record-wire";
 import {
   ALT_TEXT_MAX,
   CARD_TITLE_MAX,
@@ -83,7 +87,11 @@ export const msgInboxDigest = (n: number, more: number) =>
   `📥 まだ仕分けていない依頼が ${n}件あります` + (more > 0 ? `（ほか ${more}件は、片付いたら次のまとめで出します）` : "");
 /** @秘書 あてで迷った依頼への、グループでの返事（on のあいだ） */
 export const MSG_INBOX_ASKED = "📝 タスクにするか迷ったので、下村さんに確認します";
-const INBOX_TEXT_MAX = 120;
+/** 仕分けのカードの本文（前は120字。グループを開かなくても読めるように） */
+const INBOX_TEXT_MAX = 400;
+const INBOX_TEXT_SHORT = 120;
+const INBOX_NAME_MAX = 60;
+export const MSG_INBOX_NO_PROPERTY = "（発言からは分かりません）";
 
 export type CandidateOp = "cr" | "ch" | "cx";
 const OPS: CandidateOp[] = ["cr", "ch", "cx"];
@@ -284,12 +292,41 @@ export function candidateBubble(
   };
 }
 
-/** 仕分け用のカード（1対1だけ）。本文の頭も見せる。ボタンは［タスクにする］［登録しない］ */
-export function inboxBubble(c: Candidate, nameOf: NameOf): Record<string, unknown> {
+/** 仕分けのカードに足す、控えの外の材料（知らせのときだけ。17時のまとめでは付けない） */
+export interface InboxExtra {
+  /** 進行中の案件に1件だけ完全一致したときの案件名 */
+  deal?: string | null;
+  /** 依頼の発言の前のやりとり（group-inbox-context.ts） */
+  context?: InboxContext | null;
+}
+
+/** 進行中の案件のうち、物件の鍵が完全一致するものが1件だけなら、その案件名（部分一致・複数は出さない） */
+export function inboxDealName(propertyName: string | null | undefined, deals: DealRef[]): string | null {
+  const m = matchDeals(normalizeProperty(propertyName) || null, deals);
+  return m.dealId ? (m.names[0] ?? null) : null;
+}
+
+/**
+ * 仕分け用のカード（仕分ける人の1対1だけ）。グループを開かなくても分かるように、
+ * 物件（AI が発言から読んだ名前。無ければ「（発言からは分かりません）」）・案件・依頼者・担当・発言の時刻・本文（400字まで）と、
+ * 引用された発言・直前のやりとりを出す。ボタンは［タスクにする］［登録しない］
+ */
+export function inboxBubble(c: Candidate, nameOf: NameOf, extra: InboxExtra = {}, textMax: number = INBOX_TEXT_MAX): Record<string, unknown> {
   const requester = c.senderId ? (nameOf(c.senderId) ?? "不明") : "不明";
   const mentioned = mentionedOf(c).map((id) => nameOf(id) ?? (id === c.assigneeUserId ? c.assignee : null) ?? "不明");
   const to = mentioned.length > 0 ? mentioned.filter((v, i) => mentioned.indexOf(v) === i).join("・") : c.assignee?.trim() || "未定";
   const said = c.text.replace(/\s+/g, " ").trim();
+  const property = (c.propertyName ?? "").replace(/\s+/g, " ").trim();
+  const deal = (extra.deal ?? "").trim();
+  const ctx = extra.context;
+  const who = (u: string | null) => (u ? (nameOf(u) ?? "不明") : "不明");
+  const line = (text: string) => ({ type: "text", text, size: "xs", color: "#555555", wrap: true });
+  const ctxLines = ctx
+    ? [
+        ...(ctx.quoted ? [line(`引用｜${who(ctx.quoted.u)}：${ctx.quoted.t}`)] : []),
+        ...ctx.before.map((r) => line(`${who(r.u)}：${r.t}`)),
+      ]
+    : [];
   return {
     type: "bubble",
     body: {
@@ -303,8 +340,22 @@ export function inboxBubble(c: Candidate, nameOf: NameOf): Record<string, unknow
           layout: "vertical",
           margin: "md",
           spacing: "sm",
-          contents: [row("依頼者", requester), row("担当", to), row("発言", formatSaidAt(c.createdAt)), ...(said ? [row("本文", cutEllipsis(said, INBOX_TEXT_MAX))] : [])],
+          contents: [
+            row("物件", property ? cutEllipsis(property, INBOX_NAME_MAX) : MSG_INBOX_NO_PROPERTY),
+            ...(deal ? [row("案件", cutEllipsis(deal, INBOX_NAME_MAX))] : []),
+            row("依頼者", requester),
+            row("担当", to),
+            row("発言", formatSaidAt(c.createdAt)),
+            ...(said ? [row("本文", cutEllipsis(said, textMax))] : []),
+          ],
         },
+        ...(ctxLines.length > 0
+          ? [
+              { type: "separator", margin: "md" },
+              { type: "text", text: "直前のやりとり", size: "xs", color: "#888888", margin: "md" },
+              { type: "box", layout: "vertical", margin: "sm", spacing: "xs", contents: ctxLines },
+            ]
+          : []),
       ],
     },
     footer: {
@@ -318,8 +369,13 @@ export function inboxBubble(c: Candidate, nameOf: NameOf): Record<string, unknow
     },
   };
 }
-export function inboxCard(c: Candidate, nameOf: NameOf): FlexMessage {
-  return { type: "flex", altText: cut(`【グループの依頼】${c.title}`, ALT_TEXT_MAX), contents: inboxBubble(c, nameOf) };
+/** 1枚のカード。大きすぎるとき（maxBytes 以上）は、直前のやりとり → 本文（120字）の順に削る */
+export function inboxCard(c: Candidate, nameOf: NameOf, extra: InboxExtra = {}, maxBytes: number = FLEX_JSON_MAX): FlexMessage {
+  const fits = (b: Record<string, unknown>) => Buffer.byteLength(JSON.stringify(b), "utf8") < maxBytes;
+  let contents = inboxBubble(c, nameOf, extra);
+  if (!fits(contents)) contents = inboxBubble(c, nameOf, { ...extra, context: null });
+  if (!fits(contents)) contents = inboxBubble(c, nameOf, { ...extra, context: null }, INBOX_TEXT_SHORT);
+  return { type: "flex", altText: cut(`【グループの依頼】${c.title}`, ALT_TEXT_MAX), contents };
 }
 /** 仕分けていない依頼のまとめ（最大10枚。30KB 以上なら後ろを減らす）。出す分が無ければ undefined */
 export function inboxCarousel(cs: Candidate[], nameOf: NameOf): { card: FlexMessage; shown: number } | undefined {
@@ -339,9 +395,29 @@ export function inboxCarousel(cs: Candidate[], nameOf: NameOf): { card: FlexMess
  * 候補を新しく控えたとき、仕分ける人の1対1へ文字＋カードを push（1通ぶんの送信枠）。
  * 送れなくても候補は残り、17時のまとめで出る。例外は投げない。ログは符号だけ。
  */
+/** 本物の案件の照合（物件名が無ければ CRM を読まない。CRM_DEALS_DB_ID が無い・読めないときは投げる＝呼び手が握る） */
+async function realInboxDeal(c: Candidate): Promise<string | null> {
+  if (!normalizeProperty(c.propertyName)) return null;
+  return inboxDealName(c.propertyName, await loadActiveDeals());
+}
 export async function notifyInboxNew(
   c: Candidate,
-  over: { push?: (to: string, text: string, card: FlexMessage) => Promise<boolean>; members?: () => Promise<Member[]>; log?: (l: string) => void; env?: Record<string, string | undefined>; membersTimeoutMs?: number; pushTimeoutMs?: number } = {},
+  over: {
+    push?: (to: string, text: string, card: FlexMessage) => Promise<boolean>;
+    members?: () => Promise<Member[]>;
+    log?: (l: string) => void;
+    env?: Record<string, string | undefined>;
+    membersTimeoutMs?: number;
+    pushTimeoutMs?: number;
+    /** 依頼の発言が引用していた発言の ID（直前のやりとりの「引用」に使う） */
+    quotedMessageId?: string | null;
+    /** 案件名（進行中の案件に1件だけ完全一致したとき）。省けば本物の CRM（5分の覚え） */
+    deal?: (c: Candidate) => Promise<string | null>;
+    /** 直前のやりとり。省けば本物の控え（KV） */
+    context?: (c: Candidate) => Promise<InboxContext | null>;
+    /** 案件・やりとりを待つ上限（既定2秒。過ぎたら付けずに送る） */
+    extraTimeoutMs?: number;
+  } = {},
 ): Promise<"sent" | "failed" | "off"> {
   const log = over.log ?? ((l: string) => console.log(l));
   const owner = inboxOwner(over.env ?? process.env);
@@ -353,8 +429,15 @@ export async function notifyInboxNew(
     return Promise.race([p, late]).finally(() => clearTimeout(timer));
   };
   try {
-    const members = await within((over.members ?? loadMembers)().catch(() => [] as Member[]), over.membersTimeoutMs ?? 3_000, [] as Member[]);
-    const ok = await within((over.push ?? pushTextAndCard)(owner, MSG_INBOX_NEW, inboxCard(c, nameResolver(members))), over.pushTimeoutMs ?? 5_000, false);
+    // 名簿・案件・直前のやりとりは並べて待つ。案件とやりとりは2秒まで（遅い・失敗なら付けずに送る。知らせは止めない）
+    const extraMs = over.extraTimeoutMs ?? 2_000;
+    const quiet = <T>(f: () => Promise<T | null>) => within((async () => f())().catch(() => null), extraMs, null);
+    const [members, deal, context] = await Promise.all([
+      within((over.members ?? loadMembers)().catch(() => [] as Member[]), over.membersTimeoutMs ?? 3_000, [] as Member[]),
+      quiet(() => (over.deal ?? realInboxDeal)(c)),
+      quiet(() => (over.context ?? ((x: Candidate) => loadInboxContext({ groupId: x.groupId, messageId: x.id, quotedMessageId: over.quotedMessageId })))(c)),
+    ]);
+    const ok = await within((over.push ?? pushTextAndCard)(owner, MSG_INBOX_NEW, inboxCard(c, nameResolver(members), { deal, context })), over.pushTimeoutMs ?? 5_000, false);
     log(ok ? "[group-inbox] new sent 1" : "[group-inbox] new push-failed");
     return ok ? "sent" : "failed";
   } catch {

@@ -223,12 +223,15 @@ export function registeredCardFor(
     dueTime: string | null;
     assignee: string | null;
   },
+  /** 物件名を1行足す（仕分ける人の1対1から登録したときだけ渡す） */
+  extra?: { property?: string | null },
 ): FlexMessage | undefined {
   return registeredCard({
     pageId,
     title: parsed.title,
     due: dueFromParsed(parsed),
     assignee: parsed.assignee,
+    ...(extra?.property ? { property: extra.property } : {}),
   });
 }
 

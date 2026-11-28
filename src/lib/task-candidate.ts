@@ -47,6 +47,11 @@ export interface Candidate {
   groupId?: string | null;
   /** Bot 以外にメンションされた人（B1 Task 2。候補のボタンを押せる人に入る） */
   mentionedUserIds?: string[];
+  /**
+   * AI が発言から読んだ物件名（GROUP_INBOX が on のあいだに控えたものだけ。仕分けのカードの「物件」に出す）。
+   * 読めなかったら null。前の版の控えには無い
+   */
+  propertyName?: string | null;
 }
 
 /**
