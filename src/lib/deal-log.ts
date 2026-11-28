@@ -33,7 +33,9 @@ export const DL_HEAD_TTL_SEC = 30 * 24 * 60 * 60;
 export const DL_FLUSH_GUARD_SEC = 110;
 export const DL_FLUSH_BUDGET_MS = 10_000;
 /** 残りがこれを切ったら、新しい案件には手を付けない */
-export const DL_FLUSH_MIN_LEFT_MS = 2_500;
+export const DL_FLUSH_MIN_LEFT_MS = 3_000;
+/** Notion への追加は、残りがこれ以上あるときだけ始め、待つのもこれ以上（短い待ちで「失敗」にして同じ行を書き直さないため） */
+export const DL_APPEND_MIN_MS = 3_000;
 export const DL_FLUSH_DEALS = 5;
 /** 進行中の一覧に無い案件の行を捨てるまでの待ち（一覧の覚え5分より長く） */
 export const DL_CLOSED_WAIT_MS = 10 * 60 * 1000;
@@ -104,10 +106,17 @@ const len = (s: string) => Array.from(s).length;
 const textKey = (text: string) => normalizeProperty((text ?? "").replace(/[（(【［\[）)】］\]]/g, " "));
 const usableFull = (k: string) => len(k) >= DL_KEY_MIN && !GENERIC.has(k) && !/^[0-9a-z.,]+$/.test(k) && !/^[0-9.,]+(万|億)?円?$/.test(k);
 
-/** 案件1件の鍵。full＝名前そのもの（強い）／customer＝お客様（弱い）／town＝町名（弱い）／building＝号室を除いた建物名（弱い。rooms と一緒なら強い） */
+/**
+ * 案件1件の鍵。full＝名前そのもの（強い）／customer＝お客様の「…様」「…社長」（弱い。単独でも当たり）／
+ * customerSan＝お客様の「…さん」（単独では当たりにしない。社内でも「山口さん」と呼び合うため）／
+ * town＝町名（弱い）／building＝号室を除いた建物名（弱い。rooms と一緒なら強い）
+ */
 export interface DlDealKeys {
   full: string[];
   customer: string[];
+  customerSan: string[];
+  /** お客様の姓（名簿の人と同じ姓なら、お客様の鍵を使わない） */
+  surnames: string[];
   town: string | null;
   /** 町名のあとに続く番地の数字（「月出町16-15」→「1615」）。本文の番地が食い違うときは町名で当てない */
   townDigits: string;
@@ -117,17 +126,22 @@ export interface DlDealKeys {
 
 const PERSON = /^[\u4e00-\u9fffぁ-んァ-ヶー々]{1,8}(?:[ 　]+[\u4e00-\u9fffぁ-んァ-ヶー々]{1,8})?(?:様|さん|社長)$/;
 const HONORIFIC = /(様|さん|社長)$/;
-/** 「村上様」「寺本 昌司様」「田中社長」→ 姓＋様・姓＋さん（社長は 姓＋社長 だけ）。姓は空白の前・2字以上 */
-function customerKeys(person: string): string[] {
+/** 「村上様」「寺本 昌司様」「田中社長」→ 姓＋様（社長は 姓＋社長）と、姓＋さん。姓は空白の前・2字以上 */
+function addCustomer(person: string, out: DlDealKeys): void {
   const m = HONORIFIC.exec(person.trim());
-  if (!m) return [];
+  if (!m) return;
   const body = person.trim().slice(0, -m[1].length).trim();
   const surname = body.split(/[\s　]+/)[0] ?? "";
-  if (len(surname) < 2 || !/^[\u4e00-\u9fffぁ-んァ-ヶー々]+$/.test(surname)) return [];
-  const forms = m[1] === "社長" ? [`${surname}社長`] : [`${surname}様`, `${surname}さん`];
+  if (len(surname) < 2 || !/^[\u4e00-\u9fffぁ-んァ-ヶー々]+$/.test(surname)) return;
+  const norm = (f: string) => normalizeProperty(f);
+  const sama = m[1] === "社長" ? [`${surname}社長`] : [`${surname}様`];
+  const san = m[1] === "社長" ? [] : [`${surname}さん`];
   // 氏名で書かれたとき（「寺本昌司様」）も同じお客様
-  if (body !== surname) forms.push(`${body}${m[1]}`);
-  return forms.map((f) => normalizeProperty(f)).filter(Boolean);
+  if (body !== surname) (m[1] === "さん" ? san : sama).push(`${body}${m[1]}`);
+  out.customer.push(...sama.map(norm).filter(Boolean));
+  out.customerSan.push(...san.map(norm).filter(Boolean));
+  const sn = norm(surname);
+  if (sn) out.surnames.push(sn);
 }
 
 const PREF = /^(東京都|北海道|(?:京都|大阪)府|[\u4e00-\u9fff]{2,3}県)/;
@@ -141,13 +155,13 @@ function keysOfPart(part: string, out: DlDealKeys): void {
   if (!raw) return;
   // 末尾の「（…様）」はお客様。「（青春）」「(2筆)」のような人でない括弧からは作らない
   const tail = /[（(]([^（()）]*)[）)]\s*$/.exec(raw);
-  if (tail && HONORIFIC.test(tail[1].trim())) out.customer.push(...customerKeys(tail[1]));
+  if (tail && HONORIFIC.test(tail[1].trim())) addCustomer(tail[1], out);
   // 頭の「（査定）」なども含め、括弧は中身ごと外して名前の本体にする
   const base = raw.replace(BRACKETS, " ").replace(/\s+/g, " ").trim();
   if (!base) return;
   if (PERSON.test(base)) {
     // 名前がお客様だけの案件（「嘉祥様」）。名前そのものも「お客様」の鍵として扱う（強い鍵にはしない）
-    out.customer.push(...customerKeys(base));
+    addCustomer(base, out);
     return;
   }
   const full = normalizeProperty(base);
@@ -186,10 +200,12 @@ function keysOfPart(part: string, out: DlDealKeys): void {
 
 /** 案件名から照合の鍵を作る（「｜」があれば各部分から。自動登録の「査定｜顧客未定｜物件名」のため） */
 export function dealTextKeys(name: string): DlDealKeys {
-  const out: DlDealKeys = { full: [], customer: [], town: null, townDigits: "", building: null, rooms: [] };
+  const out: DlDealKeys = { full: [], customer: [], customerSan: [], surnames: [], town: null, townDigits: "", building: null, rooms: [] };
   for (const part of (name ?? "").split(/[｜|]/)) keysOfPart(part, out);
   out.full = out.full.filter((k, i) => out.full.indexOf(k) === i);
   out.customer = out.customer.filter((k, i) => out.customer.indexOf(k) === i);
+  out.customerSan = out.customerSan.filter((k, i) => out.customerSan.indexOf(k) === i);
+  out.surnames = out.surnames.filter((k, i) => out.surnames.indexOf(k) === i);
   return out;
 }
 
@@ -217,9 +233,14 @@ interface DlHit {
   deal: DealRef;
   strong: boolean;
 }
-function hitOf(hay: string, deal: DealRef, k: DlDealKeys): DlHit | null {
+function hitOf(hay: string, deal: DealRef, k: DlDealKeys, staff: string[]): DlHit | null {
   const full = k.full.some((key) => hasKey(hay, key));
-  const customer = k.customer.some((key) => hasKey(hay, key, noKanjiBefore));
+  // 名簿の人（社員・取引先）と同じ姓のお客様は、お客様の鍵を使わない（「山口さんお願いします」のような社内の声かけが案件のページに溜まるため）
+  const staffName = k.surnames.some((sn) => staff.some((n) => n.startsWith(sn)));
+  const sama = !staffName && k.customer.some((key) => hasKey(hay, key, noKanjiBefore));
+  // 「…さん」は単独では当たりにしない（同じ案件の町名・建物名・名前そのものと一緒のときだけ数える。引用・続きの添付は別の決まり）
+  const san = !staffName && k.customerSan.some((key) => hasKey(hay, key, noKanjiBefore));
+  const customer = sama || san;
   // 町名：すぐ後ろに番地の数字が書いてあって、案件の番地と食い違うなら別の物件（「月出町20-1」は「月出町16-15」の案件に当てない）
   const town =
     k.town !== null &&
@@ -236,13 +257,13 @@ function hitOf(hay: string, deal: DealRef, k: DlDealKeys): DlHit | null {
       return !r || k.rooms.includes(r) || roomInText;
     });
   const room = building && roomInText;
-  if (!full && !customer && !town && !building) return null;
+  if (!full && !sama && !town && !building) return null;
   // 強い当たり：名前そのもの／建物名＋号室／町名とお客様の両方
   return { deal, strong: full || room || (town && customer) };
 }
 
 const keyCache = new WeakMap<DealRef[], DlDealKeys[]>();
-function hitsInText(text: string, deals: DealRef[]): DlHit[] {
+function hitsInText(text: string, deals: DealRef[], staff: string[]): DlHit[] {
   const hay = textKey(text);
   if (!hay) return [];
   let keys = keyCache.get(deals);
@@ -253,15 +274,15 @@ function hitsInText(text: string, deals: DealRef[]): DlHit[] {
   const hits: DlHit[] = [];
   deals.forEach((d, i) => {
     if (hits.some((h) => h.deal.id === d.id)) return;
-    const h = hitOf(hay, d, (keys as DlDealKeys[])[i]);
+    const h = hitOf(hay, d, (keys as DlDealKeys[])[i], staff);
     if (h) hits.push(h);
   });
   return hits;
 }
 
-/** 本文がどれかの鍵で当たった進行中の案件（同じ ID は1回） */
-export function matchDealsInText(text: string, deals: DealRef[]): DealRef[] {
-  return hitsInText(text, deals).map((h) => h.deal);
+/** 本文がどれかの鍵で当たった進行中の案件（同じ ID は1回）。staff＝名簿の名前・呼ばれ方（正規化済み） */
+export function matchDealsInText(text: string, deals: DealRef[], staff: string[] = []): DealRef[] {
+  return hitsInText(text, deals, staff).map((h) => h.deal);
 }
 
 /**
@@ -269,8 +290,8 @@ export function matchDealsInText(text: string, deals: DealRef[]): DealRef[] {
  * （名前そのもの／建物名＋号室／町名とお客様の両方）がちょうど1件のときだけそれ。ほかは決めない（pick は null）。
  * 2件以上の案件が同じ鍵を持つ（同じ建物の 501 と 502・同じお客様）と、その鍵では必ず複数に当たるので、それだけでは決まらない。
  */
-export function pickDealInText(text: string, deals: DealRef[]): { pick: DealRef | null; hits: DealRef[] } {
-  const hits = hitsInText(text, deals);
+export function pickDealInText(text: string, deals: DealRef[], staff: string[] = []): { pick: DealRef | null; hits: DealRef[] } {
+  const hits = hitsInText(text, deals, staff);
   const all = hits.map((h) => h.deal);
   if (hits.length === 1) return { pick: hits[0].deal, hits: all };
   const strong = hits.filter((h) => h.strong);
@@ -288,8 +309,11 @@ export interface DlCommit {
 }
 export interface DlCaptureKv {
   get(key: string): Promise<unknown>;
-  /** 発言の印を SET NX で取り、取れたときだけ列に足して印を書く（1回の呼び出し）。もう印があれば false */
-  commit(c: DlCommit): Promise<boolean>;
+  /**
+   * 発言の印を SET NX で取り、取れたときだけ列に足して印を書く（1回の呼び出し）。もう印があれば "dup"。
+   * 列が上限（500行）に達していたら何も書かずに "full"（古い、まだ書いていない行を押し出さない）
+   */
+  commit(c: DlCommit): Promise<"added" | "dup" | "full">;
 }
 export interface DlCaptureDeps {
   on: boolean;
@@ -297,10 +321,12 @@ export interface DlCaptureDeps {
   loadDeals(): Promise<DealRef[]>;
   /** 名簿の名前。無ければ null */
   nameOf(userId: string): Promise<string | null>;
+  /** 名簿の人の名前・呼ばれ方（normalizeProperty 済み）。同じ姓のお客様の鍵を外すのに使う。無い・読めないときは外さない */
+  staffNames?(): Promise<string[]>;
   kv: DlCaptureKv;
   loadTimeoutMs?: number;
 }
-export type DlOutcome = "off" | "skip" | "unmatched" | "ambiguous" | "dup" | "error" | DlVia;
+export type DlOutcome = "off" | "skip" | "unmatched" | "ambiguous" | "dup" | "full" | "error" | DlVia;
 
 const idOf = (v: unknown): string | null => {
   let x = v;
@@ -347,7 +373,8 @@ export async function captureDealLog(ev: DlEvent, d: DlCaptureDeps): Promise<DlO
     let via: DlVia = "name";
     if (!media) {
       const deals = await within(d.loadDeals(), d.loadTimeoutMs ?? DL_LOAD_TIMEOUT_MS);
-      const { pick, hits } = pickDealInText(ev.text ?? "", deals);
+      const staff = d.staffNames ? await within(d.staffNames(), DL_NAME_TIMEOUT_MS).catch(() => [] as string[]) : [];
+      const { pick, hits } = pickDealInText(ev.text ?? "", deals, staff);
       if (pick) dealId = pick.id;
       else {
         const q = await quoted();
@@ -386,7 +413,7 @@ export async function captureDealLog(ev: DlEvent, d: DlCaptureDeps): Promise<DlO
       }),
       DL_KV_TIMEOUT_MS,
     );
-    return added ? via : "dup";
+    return added === "added" ? via : added;
   } catch {
     return "error";
   }
@@ -426,9 +453,13 @@ export interface DlFlushKv {
   get(key: string): Promise<unknown>;
   set(key: string, value: unknown, exSec: number): Promise<void>;
   setNx(key: string, value: unknown, exSec: number): Promise<boolean>;
+  del(key: string): Promise<void>;
   /** 列の頭から count 行を読む（消さない） */
   peek(count: number): Promise<unknown[]>;
-  /** 列の頭の taken 行を消し、head を頭に（順番のまま）・tail を後ろに戻す（1回の呼び出し） */
+  /**
+   * 列の頭の taken 行を消し、head を頭に（順番のまま）・tail を後ろに戻す（1回の呼び出し）。
+   * 列の頭を動かすのはこの呼び出しだけ（webhook は後ろに足すだけで、上限でも切り詰めない）なので、読んだ行と消す行はずれない
+   */
   settle(taken: number, head: DlRow[], tail: DlRow[]): Promise<void>;
 }
 export interface DlNotion {
@@ -469,22 +500,29 @@ const errCode = (err: unknown): string => {
 };
 const normId = (id: string) => id.replace(/-/g, "").toLowerCase();
 
-/** 見出しがもうあるか。分からない（読めない・200件見ても無い）ときは false＝足す側に倒す（印が無いときだけ呼ぶ） */
-async function pageHasHeading(pageId: string, d: DlFlushDeps, left: () => number): Promise<boolean> {
+/** 見出しがもうあるか。yes／no（最後まで読んで無い）／unknown（読めない・200件見ても無い・時間が無い） */
+async function pageHasHeading(pageId: string, d: DlFlushDeps, left: () => number): Promise<"yes" | "no" | "unknown"> {
   try {
     let cursor: string | undefined;
     for (let i = 0; i < DL_HEAD_SCAN_PAGES; i++) {
-      if (left() < DL_FLUSH_MIN_LEFT_MS) return false;
+      if (left() < DL_FLUSH_MIN_LEFT_MS) return "unknown";
       const r = await within(d.notion.list(pageId, cursor), left());
-      if (r.results.some(isHeading)) return true;
-      if (!r.next) return false;
+      if (r.results.some(isHeading)) return "yes";
+      if (!r.next) return "no";
       cursor = r.next;
     }
-    return false;
+    return "unknown";
   } catch {
-    return false;
+    return "unknown";
   }
 }
+/** Notion がはっきり断った（4xx）か。時間切れ・5xx・つながらないは「分からない」＝実は書けていることがある */
+const clearlyRejected = (err: unknown): boolean => {
+  const st = (err as { status?: unknown } | null)?.status;
+  return typeof st === "number" && st >= 400 && st < 500;
+};
+const HEAD_DONE = 1;
+const HEAD_PENDING = "p";
 
 /**
  * 列にたまった行を、案件ごとに Notion のページ本文の末尾へ足す。2分に1回・1回に5案件40行・合わせて約10秒まで。
@@ -536,17 +574,36 @@ export async function flushDealLog(now: number, d: DlFlushDeps): Promise<void> {
         continue;
       }
       tried++;
+      let headPending = false;
       try {
-        const marked = Boolean(await within(d.kv.get(dlHeadKey(dealId)), DL_KV_TIMEOUT_MS).catch(() => null));
-        const needHead = !marked && !(await pageHasHeading(dealId, d, left));
+        // 見出しの印：1＝ある／"p"＝見出しつきの追加を始めたが、結果が分からないまま／無し
+        const mark = await within(d.kv.get(dlHeadKey(dealId)), DL_KV_TIMEOUT_MS).catch(() => null);
+        let needHead = false;
+        if (mark !== HEAD_DONE && String(mark) !== String(HEAD_DONE)) {
+          const has = await pageHasHeading(dealId, d, left);
+          // 印が無いとき：見つからなければ（分からなくても）足す。"p" のとき：無いと確かめられたときだけ足す（2つ目の見出しを付けない）
+          needHead = mark === HEAD_PENDING ? has === "no" : has !== "yes";
+        }
+        // 見出しを探すのに時間を使った回は、追加を始めない（行は列に残し、次の回に書く）
+        if (left() < DL_APPEND_MIN_MS) {
+          keptIds.add(dealId);
+          continue;
+        }
+        if (needHead) {
+          // 見出しを足す前に印を置く（追加が実は通っていたのに「失敗」になっても、やり直しが見出しを重ねない）
+          await within(d.kv.set(dlHeadKey(dealId), HEAD_PENDING, DL_HEAD_TTL_SEC), DL_KV_TIMEOUT_MS);
+          headPending = true;
+        }
         const sorted = list.map((r, i) => ({ r, i })).sort((a, b) => a.r.at - b.r.at || a.i - b.i).map((x) => x.r);
-        await within(d.notion.append(dealId, [...(needHead ? [headingBlock()] : []), ...sorted.map(bulletBlock)]), Math.max(1, left()));
+        await within(d.notion.append(dealId, [...(needHead ? [headingBlock()] : []), ...sorted.map(bulletBlock)]), Math.max(DL_APPEND_MIN_MS, left()));
         deals++;
         written += list.length;
         // 印は書くたびに延ばす（動きのある案件では、ページを読み直さない）
-        await within(d.kv.set(dlHeadKey(dealId), 1, DL_HEAD_TTL_SEC), DL_KV_TIMEOUT_MS).catch(() => undefined);
+        await within(d.kv.set(dlHeadKey(dealId), HEAD_DONE, DL_HEAD_TTL_SEC), DL_KV_TIMEOUT_MS).catch(() => undefined);
       } catch (err) {
         failed.push(...list);
+        // はっきり断られた（4xx）＝見出しも書けていないので、置いた印を外す。分からないときは印を残す
+        if (headPending && clearlyRejected(err)) await within(d.kv.del(dlHeadKey(dealId)), DL_KV_TIMEOUT_MS).catch(() => undefined);
         d.log(`[deal-log] append-failed ${errCode(err)}`);
       }
     }

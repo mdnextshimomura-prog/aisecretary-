@@ -299,7 +299,8 @@ export async function maybeAskPhotoMention(ev: PhotoAskEvent, deps: PhotoAskDeps
     return false;
   }
   // 引用された資料が送り主の控えに無い：ほかの人が貼った資料かもしれないので、グループ全体の控えでも探す（画像・PDF だけ）
-  if (picked.quoted && picked.ids.length === 0 && ev.quotedMessageId && deps.listGroupMedia) {
+  // グループ全体の控え（gsatei:media）があるのは GROUP_SATEI が on の対象グループだけ。それ以外では KV を読まない
+  if (picked.quoted && picked.ids.length === 0 && ev.quotedMessageId && deps.listGroupMedia && groupSateiOn(groupId, env)) {
     try {
       const hit = (await deps.listGroupMedia(groupId)).find((m) => m.messageId === ev.quotedMessageId && (m.kind === "image" || m.kind === "file"));
       if (hit) {

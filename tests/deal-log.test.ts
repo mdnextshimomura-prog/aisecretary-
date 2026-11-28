@@ -1,7 +1,7 @@
 /** 案件ページに LINE の動きを溜める（DEAL_LOG）：ひも付けの決め方・控え・行の形・書き出し・失敗のとき */
 import assert from "node:assert/strict";
 import {
-  DL_FLUSH_GUARD_SEC, DL_HEADING, DL_Q, DL_ROW_TTL_MS, captureDealLog, dealLogOn, dlHeadKey, dlLastKey, dlMsgKey,
+  DL_APPEND_MIN_MS, DL_FLUSH_GUARD_SEC, DL_HEADING, DL_Q, DL_Q_MAX, DL_ROW_TTL_MS, captureDealLog, dealLogOn, dlHeadKey, dlLastKey, dlMsgKey,
   dealTextKeys, flushDealLog, formatDlRow, matchDealsInText, pickDealInText, richChunks,
   type DlCaptureDeps, type DlEvent, type DlFlushDeps, type DlRow,
 } from "../src/lib/deal-log";
@@ -43,13 +43,15 @@ function mkKv() {
         vals.set(key, value);
         return true;
       },
-      commit: async (c: { msgKey: string; lastKey: string | null; row: DlRow; last: unknown }) => {
+      del: async (key: string) => { ops.push(`del ${key}`); vals.delete(key); },
+      commit: async (c: { msgKey: string; lastKey: string | null; row: DlRow; last: unknown }): Promise<"added" | "dup" | "full"> => {
         ops.push(`commit ${c.msgKey}`);
-        if (vals.has(c.msgKey)) return false;
+        if ((lists.get(DL_Q) ?? []).length >= DL_Q_MAX) return "full";
+        if (vals.has(c.msgKey)) return "dup";
         vals.set(c.msgKey, c.row.dealId);
         lists.set(DL_Q, [...(lists.get(DL_Q) ?? []), c.row]);
         if (c.lastKey && c.last) vals.set(c.lastKey, c.last);
-        return true;
+        return "added";
       },
       peek: async (count: number) => { ops.push("peek"); return (lists.get(DL_Q) ?? []).slice(0, count); },
       settle: async (taken: number, head: DlRow[], tail: DlRow[]) => {
@@ -81,7 +83,7 @@ function mkNotion(pages: Record<string, unknown[]> = {}) {
       },
       append: async (pageId: string, children: unknown[]) => {
         calls.push(`append ${pageId} ${children.length}`);
-        if (failFor.has(pageId)) throw Object.assign(new Error("boom"), { code: "rate_limited" });
+        if (failFor.has(pageId)) throw Object.assign(new Error("boom"), { code: "rate_limited", status: 429 });
         pages[pageId] = [...(pages[pageId] ?? []), ...children];
       },
     },
@@ -105,26 +107,27 @@ const flushDeps = (k: ReturnType<typeof mkKv>, nt: ReturnType<typeof mkNotion>, 
 
   await t("名前の一致：案件ごとの鍵（名前そのもの・お客様・町名・建物名＋号室）", () => {
     assert.deepEqual(dealTextKeys("川西市緑風台3-1-16（村井様）"), {
-      full: ["川西市緑風台3116"], customer: ["村井様", "村井さん"], town: "緑風台", townDigits: "3116", building: null, rooms: [],
+      full: ["川西市緑風台3116"], customer: ["村井様"], customerSan: ["村井さん"], surnames: ["村井"], town: "緑風台", townDigits: "3116", building: null, rooms: [],
     });
     assert.deepEqual(dealTextKeys("ザ・リバーハウス中之島タワー618号（柏木様）"), {
-      full: ["リバハウス中之島タワ618号", "リバハウス中之島タワ618"], customer: ["柏木様", "柏木さん"], town: null, townDigits: "", building: "リバハウス中之島タワ", rooms: ["618"],
+      full: ["リバハウス中之島タワ618号", "リバハウス中之島タワ618"], customer: ["柏木様"], customerSan: ["柏木さん"], surnames: ["柏木"], town: null, townDigits: "", building: "リバハウス中之島タワ", rooms: ["618"],
     });
     assert.deepEqual(dealTextKeys("ジークレスト六甲の丘D304").rooms, ["d304", "304"]);
     assert.equal(dealTextKeys("サンコート津田沼3号棟 222号室").building, "サンコト津田沼3号棟");
-    assert.deepEqual(dealTextKeys("寺元 昌司様").customer, ["寺元様", "寺元さん", "寺元昌司様"]);
-    assert.deepEqual(dealTextKeys("田中社長").customer, ["田中社長"]);
+    const terao = dealTextKeys("寺元 昌司様");
+    assert.deepEqual([terao.customer, terao.customerSan, terao.surnames], [["寺元様", "寺元昌司様"], ["寺元さん"], ["寺元"]]);
+    assert.deepEqual([dealTextKeys("田中社長").customer, dealTextKeys("田中社長").customerSan], [["田中社長"], []]);
     // 短い町名（緑町・旭町）は町名の鍵にしない。人でない括弧からお客様の鍵を作らない。頭の「（査定）」は外す
     assert.equal(dealTextKeys("守口市旭町9-7").town, null);
-    assert.deepEqual(dealTextKeys("（査定）堺市西区鳳東町（青春）"), { full: ["堺市西区鳳東町"], customer: [], town: "鳳東町", townDigits: "", building: null, rooms: [] });
+    assert.deepEqual(dealTextKeys("（査定）堺市西区鳳東町（青春）"), { full: ["堺市西区鳳東町"], customer: [], customerSan: [], surnames: [], town: "鳳東町", townDigits: "", building: null, rooms: [] });
     assert.deepEqual(dealTextKeys("豊中市南蛍池 土地 (2筆)").customer, []);
     assert.deepEqual(dealTextKeys("枚方市出口南町 戸建て").full, ["枚方市出口南町戸建て", "枚方市出口南町"]);
     assert.equal(dealTextKeys("大阪市生野区大今里北（大坪様）").town, "大今里北");
     assert.equal(dealTextKeys("尼崎市東園田二丁目15番11号（長谷部様）").town, "東園田");
     // 市のあとが英字（大阪市内MT）は町名にしない。一般的な言葉・英数字だけの部分は鍵にしない
-    assert.deepEqual(dealTextKeys("大阪市内MT"), { full: ["大阪市内mt"], customer: [], town: null, townDigits: "", building: null, rooms: [] });
-    assert.deepEqual(dealTextKeys("両手仲介｜マンション｜買取再販｜1200万円｜ABC123"), { full: [], customer: [], town: null, townDigits: "", building: null, rooms: [] });
-    assert.deepEqual(dealTextKeys("査定｜顧客未定｜天満ハイツ302"), { full: ["天満ハイツ302"], customer: [], town: null, townDigits: "", building: "天満ハイツ", rooms: ["302"] });
+    assert.deepEqual(dealTextKeys("大阪市内MT"), { full: ["大阪市内mt"], customer: [], customerSan: [], surnames: [], town: null, townDigits: "", building: null, rooms: [] });
+    assert.deepEqual(dealTextKeys("両手仲介｜マンション｜買取再販｜1200万円｜ABC123"), { full: [], customer: [], customerSan: [], surnames: [], town: null, townDigits: "", building: null, rooms: [] });
+    assert.deepEqual(dealTextKeys("査定｜顧客未定｜天満ハイツ302"), { full: ["天満ハイツ302"], customer: [], customerSan: [], surnames: [], town: null, townDigits: "", building: "天満ハイツ", rooms: ["302"] });
   });
 
   await t("名前の一致：表（町名・お客様・建物・同じ建物の2件・2件の名指し・短い町名）", () => {
@@ -144,6 +147,7 @@ const flushDeps = (k: ReturnType<typeof mkKv>, nt: ReturnType<typeof mkNotion>, 
       "大阪市生野区大今里北（大坪様）", // 11
       "尼崎市東園田二丁目15番11号（長谷部様）", // 12
       "（査定）堺市西区鳳東町（青春）", // 13
+      "田上社長", // 14
     ];
     const ds = names.map((name, i) => ({ id: T(i), name }));
     // [本文, 決まる案件の番号（決まらなければ null）, 当たった案件の数]
@@ -163,11 +167,14 @@ const flushDeps = (k: ReturnType<typeof mkKv>, nt: ReturnType<typeof mkNotion>, 
       ["守口市旭町9-7の謄本", 2, 1],
       // お客様
       ["村井様から連絡ありました", 1, 1],
-      ["村井さんに折り返します", 1, 1],
+      ["村井さんに折り返します", null, 0], // 「…さん」だけでは当てない（社内の呼びかけと区別できない）
+      ["緑風台の村井さんに折り返します", 1, 1], // 町名と一緒なら数える
       ["上村井様から連絡ありました", null, 0], // 前が漢字＝別の名前
       ["売主村井様より鍵を預かりました", 1, 1], // よくある前置きのあとは当てる
       ["嘉山様の書類が届きました", 7, 1],
-      ["寺元さんに確認します", 8, 1],
+      ["寺元さんに確認します", null, 0],
+      ["寺元様に確認します", 8, 1],
+      ["田上社長から電話", 14, 1],
       ["青春の件", null, 0], // 人でない括弧
       // 建物
       ["リバーハウス中之島タワーの件", 5, 1],
@@ -182,7 +189,8 @@ const flushDeps = (k: ReturnType<typeof mkKv>, nt: ReturnType<typeof mkNotion>, 
       ["グランコート福島レジデンス 501号室と502号室", null, 2],
       ["グランコート福島レジデンス805の資料", null, 0], // 別の部屋
       // 2件を名指し：決めない。片方だけ強い（町名とお客様の両方）ならそちら
-      ["柏木さんの件と桜木町の件", null, 2],
+      ["柏木様の件と桜木町の件", null, 2],
+      ["柏木さんの件と桜木町の件", 0, 1], // 「柏木さん」は数えないので、町名の1件に決まる
       ["緑風台の件、嘉山様にも伝えます", null, 2],
       ["緑風台の村井様の件、桜木町はあとで", 1, 2],
       // 当たらない
@@ -196,6 +204,45 @@ const flushDeps = (k: ReturnType<typeof mkKv>, nt: ReturnType<typeof mkNotion>, 
       assert.equal(r.hits.length, count, text);
       assert.equal(matchDealsInText(text, ds).length, count, text);
     }
+  });
+
+  await t("名前の一致：名簿の人と同じ姓のお客様は、お客様の鍵を使わない（町名・名前そのものでは今までどおり当たる）", () => {
+    const ds = [{ id: D1, name: "川西市緑風台3-1-16（山口様）" }, { id: D2, name: "小笠原 花子様" }, { id: D3, name: "門真市桜木町16-15（村井様）" }];
+    // 名簿（wire が正規化して渡す形）：氏名（空白なし）・呼ばれ方
+    const staff = ["山口太郎", "小笠原", "やまちゃん"];
+    for (const [text, noStaff, withStaff] of [
+      ["山口様に書類を送りました", D1, null],
+      ["売主山口様より連絡", D1, null],
+      ["小笠原様から電話です", D2, null],
+      ["緑風台の件", D1, D1],
+      ["緑風台の山口さんの件", D1, D1],
+      ["村井様に連絡済み", D3, D3],
+      ["山口さんお願いします", null, null],
+    ] as Array<[string, string | null, string | null]>) {
+      assert.equal(pickDealInText(text, ds).pick?.id ?? null, noStaff, text);
+      assert.equal(pickDealInText(text, ds, staff).pick?.id ?? null, withStaff, text);
+    }
+    assert.deepEqual(matchDealsInText("山口様と小笠原様", ds, staff), []);
+  });
+
+  await t("控える：名簿の姓と同じお客様の「…様」は控えない。名簿を読めないときは「…さん」を数えない決まりだけで続ける", async () => {
+    const ds = [{ id: D1, name: "川西市緑風台3-1-16（山口様）" }];
+    const k = mkKv();
+    const base = { loadDeals: async () => ds };
+    assert.equal(await captureDealLog(ev({ text: "山口様に送りました" }), capDeps(k, { ...base, staffNames: async () => ["山口太郎"] })), "unmatched");
+    assert.equal(await captureDealLog(ev({ messageId: "m2", text: "山口さんお願いします" }), capDeps(k, { ...base, staffNames: async () => { throw new Error("x"); } })), "unmatched");
+    assert.equal(await captureDealLog(ev({ messageId: "m3", text: "山口様に送りました" }), capDeps(k, { ...base, staffNames: async () => { throw new Error("x"); } })), "name");
+    // 引用・続きの添付は今までどおり（名前の決まりとは別）
+    assert.equal(await captureDealLog(ev({ messageId: "m4", senderId: U2, text: "山口さん了解です", quotedMessageId: "m3" }), capDeps(k, { ...base, staffNames: async () => ["山口太郎"] })), "quote");
+  });
+
+  await t("控える：列が上限（500行）のときは新しい行を足さない（古い、まだ書いていない行を押し出さない）。印も付けない", async () => {
+    const k = mkKv();
+    k.lists.set(DL_Q, Array.from({ length: DL_Q_MAX }, (_, i) => row(D1, NOW + i, `行${i}`)));
+    assert.equal(await captureDealLog(ev({ text: "天満ハイツ302 鍵を返しました" }), capDeps(k)), "full");
+    assert.equal((k.lists.get(DL_Q) as DlRow[]).length, DL_Q_MAX);
+    assert.equal((k.lists.get(DL_Q) as DlRow[])[0].text, "行0");
+    assert.ok(!k.vals.has(dlMsgKey("m1")));
   });
 
   await t("名前の一致：数字の続きは別の部屋（302 は 3021 ではない）・表記ゆれは物件の鍵と同じ規則で吸収", () => {
@@ -402,6 +449,53 @@ const flushDeps = (k: ReturnType<typeof mkKv>, nt: ReturnType<typeof mkNotion>, 
     await flushDealLog(NOW + 120_000, flushDeps(k, nt, logs));
     assert.deepEqual(nt.pages[D1].map(plain), [DL_HEADING, "11/28 16:40 小笠原：一", "11/28 16:40 小笠原：三"]);
     assert.deepEqual(k.lists.get(DL_Q), []);
+  });
+
+  await t("書き出し：見出しつきの追加が「分からない」で終わっても、やり直しで見出しを重ねない（印を先に置く）", async () => {
+    // ① 実は通っていたのに時間切れ：次の回はページに見出しがあるので、行だけ足す
+    const k = mkKv();
+    const nt = mkNotion();
+    const logs: string[] = [];
+    const landedThenThrow = { ...nt.notion, append: async (p: string, c: unknown[]) => { await nt.notion.append(p, c); throw new Error("timeout"); } };
+    k.lists.set(DL_Q, [row(D1, NOW, "一")]);
+    await flushDealLog(NOW, flushDeps(k, nt, logs, { notion: landedThenThrow }));
+    assert.equal(k.vals.get(dlHeadKey(D1)), "p");
+    assert.deepEqual(logs, ["[deal-log] append-failed timeout", "[deal-log] flush deals 0 rows 0 fail 1 kept 0 dropped 0"]);
+    k.vals.delete("deallog:flush");
+    await flushDealLog(NOW + 120_000, flushDeps(k, nt, logs));
+    assert.equal(nt.pages[D1].map(plain).filter((x) => x === DL_HEADING).length, 1);
+    assert.equal(k.vals.get(dlHeadKey(D1)), 1);
+    // ② 実は通っていなかった：次の回にページを最後まで読んで無いと確かめ、見出しを足す
+    const k2 = mkKv();
+    const nt2 = mkNotion();
+    const lost = { ...nt2.notion, append: async () => { throw new Error("timeout"); } };
+    k2.lists.set(DL_Q, [row(D1, NOW, "一")]);
+    await flushDealLog(NOW, flushDeps(k2, nt2, [], { notion: lost }));
+    k2.vals.delete("deallog:flush");
+    await flushDealLog(NOW + 120_000, flushDeps(k2, nt2, []));
+    assert.deepEqual(nt2.pages[D1].map(plain), [DL_HEADING, "11/28 16:40 小笠原：一"]);
+    // ③ 「分からない」のあと、ページを読めない：見出しは足さず、行だけ書く
+    const k3 = mkKv();
+    const nt3 = mkNotion();
+    k3.vals.set(dlHeadKey(D1), "p");
+    k3.lists.set(DL_Q, [row(D1, NOW, "一")]);
+    await flushDealLog(NOW, flushDeps(k3, nt3, [], { notion: { ...nt3.notion, list: async () => { throw new Error("x"); } } }));
+    assert.deepEqual(nt3.pages[D1].map(plain), ["11/28 16:40 小笠原：一"]);
+  });
+
+  await t("書き出し：見出しを探すのに時間を使った回は、追加を始めない（短い待ちで失敗にして書き直さない）。追加の待ちは3秒以上", async () => {
+    const k = mkKv();
+    const nt = mkNotion();
+    let now = NOW;
+    const slowList = { ...nt.notion, list: async (p: string, c?: string) => { now += 8_000; return nt.notion.list(p, c); } };
+    const logs: string[] = [];
+    k.lists.set(DL_Q, [row(D1, NOW, "一")]);
+    await flushDealLog(NOW, flushDeps(k, nt, logs, { notion: slowList, clock: () => now }));
+    assert.deepEqual(nt.calls.filter((c) => c.startsWith("append")), []);
+    assert.equal((k.lists.get(DL_Q) as DlRow[]).length, 1);
+    assert.ok(!k.vals.has(dlHeadKey(D1)));
+    assert.deepEqual(logs, ["[deal-log] flush deals 0 rows 0 fail 0 kept 1 dropped 0"]);
+    assert.ok(DL_APPEND_MIN_MS >= 3_000);
   });
 
   await t("書き出し：完了・失注になった案件（進行中の一覧に無い）と2日より古い行は書かずに捨て、数をログに出す", async () => {

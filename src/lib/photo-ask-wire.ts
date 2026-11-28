@@ -80,6 +80,34 @@ function imageMediaType(ct: string): TaskAttachment["mediaType"] {
   return "image/jpeg";
 }
 
+/**
+ * 応答の本文を上限まで読む。content-length が上限より大きければ読まずにやめ、無い・うそのときも、読みながら数えて上限を超えたら止める
+ * （大きなファイルを丸ごとメモリに載せない）。超えたら例外 "size"
+ */
+async function readLimited(res: Response, max: number): Promise<Buffer> {
+  const declared = Number(res.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > max) {
+    await res.body?.cancel().catch(() => undefined);
+    throw new Error("size");
+  }
+  const reader = res.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > max) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error("size");
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
+
 /** 1枚でも取れない・大きすぎる・時間切れなら例外（一部の画像だけで判定しない）。ログは出さない */
 export async function loadPhotoAskImages(ids: string[], fetchImpl: typeof fetch = fetch): Promise<TaskAttachment[]> {
   const out: TaskAttachment[] = [];
@@ -90,8 +118,8 @@ export async function loadPhotoAskImages(ids: string[], fetchImpl: typeof fetch 
       cache: "no-store",
     });
     if (!res.ok) throw new Error("content");
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length === 0 || buf.length > MAX_BYTES) throw new Error("size");
+    const buf = await readLimited(res, MAX_BYTES);
+    if (buf.length === 0) throw new Error("size");
     // 引用された PDF も読む：中身の頭が %PDF なら PDF として渡す。画像でも PDF でもないファイル（Excel など）は読めなかった扱い
     const ct = res.headers.get("content-type") ?? "";
     if (buf.subarray(0, 5).toString("latin1") === "%PDF-") {

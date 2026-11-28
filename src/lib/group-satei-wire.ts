@@ -12,7 +12,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { kv } from "@vercel/kv";
 import { parseTaskFromMessage, type TaskAttachment } from "./claude";
-import { GS_CLAIM_TTL, GS_MIN, GS_RETRY_NAMESPACE, gsClaimKey, groupSateiActive, groupSateiOn, groupSateiPrepOn, groupSateiStage2On, ticketIdOf } from "./group-satei-data";
+import { GS_B_JUDGE_PER_DAY, GS_CLAIM_TTL, GS_MIN, GS_RETRY_NAMESPACE, gsBJudgeKey, gsClaimKey, groupSateiActive, groupSateiOn, groupSateiPrepOn, groupSateiStage2On, ticketIdOf } from "./group-satei-data";
 import { gsEntryAOk, gsEntryBGate, gsMediaRow, looksLikeSateiWords } from "./group-satei-gate";
 import {
   attachLateMedia, openGroupSatei, recordGroupSateiMedia, runRereadWorker, sweepGroupSatei,
@@ -413,6 +413,19 @@ function outcomeOnce(onOutcome?: (o: GsEntryOutcome) => void) {
   return report;
 }
 
+/** 入口 B の AI の判定を数え、その日の上限（GS_B_JUDGE_PER_DAY）を超えていたら true。数えられないときは false（聞く側に倒す） */
+async function bJudgeOverCap(): Promise<boolean> {
+  if (!process.env.KV_REST_API_URL || !process.env.KV_REST_API_TOKEN) return false;
+  try {
+    const key = gsBJudgeKey(ymdJst(Date.now()));
+    const n = await within(kv.incr(key), CLAIM_KV_TIMEOUT_MS);
+    // 期限は最初の1回だけ付ける（毎回たたかない）
+    if (n === 1) await within(kv.expire(key, 2 * 24 * 60 * 60), CLAIM_KV_TIMEOUT_MS).catch(() => undefined);
+    return n > GS_B_JUDGE_PER_DAY;
+  } catch {
+    return false;
+  }
+}
 /** 入口 A（@AI秘書 あてで査定書と判定された依頼。返事を送ったあとに呼ぶ）。例外は投げない */
 export async function maybeOpenGroupSateiA(
   p: {
@@ -483,6 +496,12 @@ export async function maybeOpenGroupSateiB(
       report("skip");
       // off・言葉の無い発言は黙る（グループのふつうの発言ごとにログを出さない）
       if (g.reason !== "off" && g.reason !== "words" && looksLikeSateiWords(p.text)) log(`[group-satei] skip:${g.reason}`);
+      return;
+    }
+    // AI に聞く回数の1日の上限（KV の数。超えたら聞かずに黙る＝受付票は開かない）。KV が無い・数えられないときは今までどおり聞く
+    if (await bJudgeOverCap()) {
+      report("skip");
+      log("[group-satei] skip:b-cap");
       return;
     }
     claimed = await setClaim(p.groupId as string, p.senderId as string);

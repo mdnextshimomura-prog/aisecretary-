@@ -1,6 +1,6 @@
 /** group-satei-gate.ts */
 import assert from "node:assert/strict";
-import { gsEntryAOk, gsEntryBGate, gsMediaRow, looksLikeSateiWords, pickMaterials } from "../src/lib/group-satei-gate";
+import { GS_WORDS, GS_WORDS_STRONG, GS_WORDS_WEAK, gsEntryAOk, gsEntryBGate, gsMediaRow, hasStrongSateiWord, looksLikeSateiWords, pickMaterials } from "../src/lib/group-satei-gate";
 import type { GsMedia } from "../src/lib/group-satei-data";
 
 let n = 0;
@@ -25,6 +25,29 @@ t("言葉の絞り込み：買取金額など（2026-11-28 社長の「買取金
   for (const s of ["買取の契約書を作って", "金額の確認お願いします", "値段交渉の件", "買付を出して"]) assert.ok(!looksLikeSateiWords(s), s);
   assert.deepEqual(gsEntryBGate({ groupId: G, senderId: BOSS, text: "買取金額頼む" }, ENV), { ok: true });
   assert.deepEqual(gsEntryBGate({ groupId: G, senderId: BOSS, text: "買取金額頼む" }, {}), { ok: false, reason: "off" });
+});
+t("強い言葉・弱い言葉：入口 A を広げるのは強い言葉だけ。入口 B は、弱い言葉でも売買でない文脈（賃料・修繕など）なら AI に聞かない", () => {
+  const p = { groupId: G, senderId: BOSS, isTask: true, requestType: "その他", confidence: 0.9 };
+  for (const s of ["査定お願い", "買取金額頼む", "買取価格は？", "買取額を教えて", "買い取り金額", "買い取り価格", "いくらで売れる？", "いくらで買える？", "売却価格の件"]) {
+    assert.ok(hasStrongSateiWord(s), s);
+    assert.ok(gsEntryAOk({ ...p, text: s }, ENV), s);
+  }
+  for (const s of ["賃料相場を調べて", "修繕の金額を出して", "このあたりの相場は？", "価格を出してください", "これいくらになる？", "値段を出して", "金額を出して"]) {
+    assert.ok(!hasStrongSateiWord(s), s);
+    assert.ok(!gsEntryAOk({ ...p, text: s }, ENV), s);
+    // AI が査定書と読んだものは今までどおり開く
+    assert.ok(gsEntryAOk({ ...p, text: s, requestType: "査定書" }, ENV), s);
+  }
+  // 入口 B の絞り込み：弱い言葉＋売買でない文脈は通さない
+  for (const s of ["賃料相場を調べて", "家賃の相場は？", "修繕の金額を出して", "リフォームの値段を出して", "見積の金額を出して", "手数料はいくらになる？"]) {
+    assert.ok(!looksLikeSateiWords(s), s);
+    assert.deepEqual(gsEntryBGate({ groupId: G, senderId: BOSS, text: s }, ENV), { ok: false, reason: "words" }, s);
+  }
+  // 強い言葉があれば、その文脈の言葉があっても通す（AI の確認に回す）
+  for (const s of ["リフォーム後の査定お願いします", "家賃込みでいくらで売れるか", "賃料の査定"]) assert.ok(looksLikeSateiWords(s), s);
+  // 弱い言葉だけ（文脈の言葉なし）は今までどおり通す
+  for (const s of ["このあたりの相場は？", "金額を出してください", "この物件いくらになる？"]) assert.ok(looksLikeSateiWords(s), s);
+  assert.deepEqual([...GS_WORDS].sort(), [...GS_WORDS_STRONG, ...GS_WORDS_WEAK].sort());
 });
 t("入口 A：AI の種類が査定書でなくても、査定の言葉があれば受付票を開く（タスク・0.5以上はそのまま）", () => {
   const p = { groupId: G, senderId: BOSS, isTask: true, requestType: "その他", confidence: 0.9 };

@@ -10,14 +10,17 @@ import {
   captureDealLog, dealLogOn, flushDealLog,
   type DlCaptureDeps, type DlCaptureKv, type DlEvent, type DlFlushKv, type DlNotion, type DlOutcome,
 } from "./deal-log";
-import { loadMembers } from "./members";
+import { loadMembers, normalizeName } from "./members";
+import { normalizeProperty } from "./property";
 import { loadActiveDeals } from "./task-record-wire";
 
-// 発言の印を SET NX で取り、取れたときだけ：列に足す・切り詰める・期限を付ける・「最後のひも付け」を書く。
-// 1回の呼び出しなので、途中で待つのをやめても、期限の無い列（発言の控え）や片方だけの印を残さない
+// 列が上限に達していたら何もしない（2）。発言の印を SET NX で取り、取れたときだけ：列に足す・期限を付ける・「最後のひも付け」を書く（1）。
+// 1回の呼び出しなので、途中で待つのをやめても、期限の無い列（発言の控え）や片方だけの印を残さない。
+// 上限でも列を切り詰めない：頭（古い、まだ書いていない行）を動かすのは見回りの片付けだけにする
 const COMMIT_LUA =
+  "if redis.call('LLEN', KEYS[1]) >= tonumber(ARGV[2]) then return 2 end " +
   "if not redis.call('SET', KEYS[2], ARGV[4], 'NX', 'EX', tonumber(ARGV[5])) then return 0 end " +
-  "redis.call('RPUSH', KEYS[1], ARGV[1]) redis.call('LTRIM', KEYS[1], -tonumber(ARGV[2]), -1) redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3])) " +
+  "redis.call('RPUSH', KEYS[1], ARGV[1]) redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3])) " +
   "if ARGV[6] ~= '' then redis.call('SET', KEYS[3], ARGV[6], 'EX', tonumber(ARGV[7])) end return 1";
 // 列の頭の taken 行を消し、手を付けなかった行を頭に（順番のまま）・失敗した行を後ろに戻して、期限を付け直す
 const SETTLE_LUA =
@@ -37,7 +40,7 @@ const captureKv: DlCaptureKv = {
         c.lastKey && c.last ? JSON.stringify(c.last) : "", String(DL_LAST_TTL_SEC),
       ],
     );
-    return Number(r) === 1;
+    return Number(r) === 1 ? "added" : Number(r) === 2 ? "full" : "dup";
   },
 };
 const flushKv: DlFlushKv = {
@@ -46,6 +49,9 @@ const flushKv: DlFlushKv = {
     await kv.set(key, value, { ex });
   },
   setNx: async (key, value, ex) => (await kv.set(key, value, { nx: true, ex })) === "OK",
+  del: async (key) => {
+    await kv.del(key);
+  },
   peek: (count) => kv.lrange(DL_Q, 0, count - 1),
   settle: async (taken, head, tail) => {
     await kv.eval(SETTLE_LUA, [DL_Q], [String(taken), String(DL_Q_TTL_SEC), String(head.length), ...head.map((r) => JSON.stringify(r)), ...tail.map((r) => JSON.stringify(r))]);
@@ -72,6 +78,12 @@ const captureDeps = (): DlCaptureDeps => ({
   botUserId: process.env.LINE_BOT_USER_ID ?? null,
   loadDeals: () => loadActiveDeals(crm()),
   nameOf: async (userId) => (await loadMembers()).find((m) => m.userIds.includes(userId))?.name ?? null,
+  // 名簿の人の名前・呼ばれ方（名簿は members.ts が5分覚える。待つのは deal-log.ts の側で1.5秒まで。読めなければ外さない）
+  staffNames: async () =>
+    (await loadMembers())
+      .flatMap((m) => [m.name, ...m.aliases])
+      .map((n) => normalizeProperty(normalizeName(n)))
+      .filter(Boolean),
   kv: captureKv,
 });
 
@@ -86,6 +98,7 @@ export function dealLogBatch(): { add(ev: DlEvent): void; done(): Promise<void> 
   let seen = 0;
   let hit = 0;
   let failed = 0;
+  let full = 0;
   return {
     add(ev) {
       if (!on || !ev.groupId) return;
@@ -94,13 +107,15 @@ export function dealLogBatch(): { add(ev: DlEvent): void; done(): Promise<void> 
         const r: DlOutcome = await captureDealLog(ev, captureDeps()).catch(() => "error" as const);
         if (r === "name" || r === "quote" || r === "follow") hit++;
         else if (r === "error") failed++;
+        else if (r === "full") full++;
       });
     },
     async done() {
       if (!on || seen === 0) return;
       await chain.catch(() => undefined);
       // 件数だけ（本文・名前・ID は出さない）。skip＝案件を決められなかった発言（溜めない）
-      console.log(`[deal-log] in ${seen} hit ${hit} skip ${seen - hit - failed} error ${failed}`);
+      // full＝列が上限（500行）でいっぱいで、控えられなかった発言（0 のときは出さない＝ふだんの行は今までと同じ）
+      console.log(`[deal-log] in ${seen} hit ${hit} skip ${seen - hit - failed - full} error ${failed}${full > 0 ? ` full ${full}` : ""}`);
     },
   };
 }

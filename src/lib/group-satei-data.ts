@@ -290,6 +290,9 @@ export const gsOpenKey = (groupId: string) => `gsatei:open:${groupId}`;
 export const gsMsgKey = (messageId: string) => `gsatei:msg:${messageId}`;
 export const gsDecKey = (tid: string) => `gsatei:dec:${tid}`;
 export const gsReadsKey = (ymd: string) => `gsatei:reads:${ymd}`;
+/** 入口 B の AI の判定（査定の依頼かどうか）の、JST の1日あたりの回数（弱い言葉はふつうの会話にもよく出るため。超えたらその日は聞かない） */
+export const GS_B_JUDGE_PER_DAY = 60;
+export const gsBJudgeKey = (ymd: string) => `gsatei:bai:${ymd}`;
 
 export const ticketIdOf = (messageId: string) => createHash("sha256").update(messageId).digest("hex").slice(0, 16);
 export const receiptOf = (no: number) => `G${no}`;

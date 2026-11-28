@@ -10,17 +10,28 @@ import {
 import { sateiNotifyTarget } from "./satei-data";
 
 /**
- * 査定の入口の言葉（入口 A・B で同じ1つの表）。
+ * 査定の入口の言葉。強い言葉（査定・売り買いの金額そのもの）と弱い言葉（ほかの用事でもよく使う）に分ける。
  * 2026-11-28：社長の「買取金額頼む」が査定の入口に入らず、ふつうのタスク（種別「買取再販」）になった件で、金額をたずねる言い方を足した。
+ * 同じ日の点検（M5）：「@秘書 賃料相場を調べて」「@秘書 修繕の金額を出して」で受付票が開かないよう、入口 A を広げるのは強い言葉だけにした。
  */
-export const GS_WORDS: readonly string[] = [
-  "査定", "価格を出して", "いくらで売れ", "売却価格", "相場",
-  "買取金額", "買取価格", "買取額", "買い取り金額", "買い取り価格", "いくらで買", "いくらになる", "値段を出して", "金額を出して",
+export const GS_WORDS_STRONG: readonly string[] = [
+  "査定", "買取金額", "買取価格", "買取額", "買い取り金額", "買い取り価格", "いくらで売れ", "いくらで買", "売却価格",
 ];
+export const GS_WORDS_WEAK: readonly string[] = ["相場", "価格を出して", "いくらになる", "値段を出して", "金額を出して"];
+export const GS_WORDS: readonly string[] = [...GS_WORDS_STRONG, ...GS_WORDS_WEAK];
+/** 売買の査定でないことが多い文脈。強い言葉が無く、これがあれば入口 B は AI に聞かない */
+export const GS_NOT_SALE_WORDS: readonly string[] = ["賃料", "家賃", "修繕", "リフォーム", "見積", "手数料"];
 
+const squash = (text: string) => (text ?? "").replace(/[\s　]/g, "");
+export function hasStrongSateiWord(text: string): boolean {
+  const s = squash(text);
+  return GS_WORDS_STRONG.some((w) => s.includes(w));
+}
+/** 入口 B の言葉の絞り込み：強い言葉がある、または弱い言葉があって売買でない文脈の言葉が無い */
 export function looksLikeSateiWords(text: string): boolean {
-  const s = (text ?? "").replace(/[\s　]/g, "");
-  return GS_WORDS.some((w) => s.includes(w));
+  const s = squash(text);
+  if (GS_WORDS_STRONG.some((w) => s.includes(w))) return true;
+  return GS_WORDS_WEAK.some((w) => s.includes(w)) && !GS_NOT_SALE_WORDS.some((w) => s.includes(w));
 }
 
 export type GsSkip = "off" | "self" | "no-target" | "no-sender" | "words";
@@ -46,9 +57,10 @@ export function gsEntryAOk(
   const target = sateiNotifyTarget(env);
   if (!target || !p.senderId || p.senderId === target) return false;
   if (!p.isTask || p.confidence < GS_MIN) return false;
-  // AI が種類を査定書と読まなくても（「買取金額頼む」→ ふつうのタスク）、査定の言葉があれば受付票を開く。
+  // AI が種類を査定書と読まなくても（「買取金額頼む」→ ふつうのタスク）、強い言葉があれば受付票を開く。
+  // 弱い言葉（相場・金額を出して など）だけでは広げない（賃料の相場・修繕の金額で受付票を開かない）。
   // タスクの登録とその返事は今のまま（ここは受付票を開くかどうかだけ）
-  return p.requestType === "査定書" || looksLikeSateiWords(p.text ?? "");
+  return p.requestType === "査定書" || hasStrongSateiWord(p.text ?? "");
 }
 
 export function gsMediaRow(m: {

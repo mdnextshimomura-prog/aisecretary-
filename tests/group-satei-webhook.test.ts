@@ -150,6 +150,46 @@ async function allThree(groupId: string) {
     }
   });
 
+  await t("入口 B：AI の判定は1日の上限まで（超えたら AI に聞かず符号だけ）。売買でない文脈の弱い言葉は KV も AI も呼ばない", async () => {
+    const realFetch = globalThis.fetch;
+    const bodies: string[] = [];
+    let incr = 61;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const b = String(init?.body ?? "");
+      bodies.push(b);
+      // @vercel/kv は命令を pipeline の形（[["incr", key]]）で送り、答えは [{ result }] の並び
+      if (b.includes('"incr"')) return new Response(JSON.stringify([{ result: incr }]), { status: 200, headers: { "content-type": "application/json" } });
+      throw new Error("外へ出てはいけない");
+    }) as typeof fetch;
+    try {
+      capture();
+      await maybeOpenGroupSateiB({ messageId: "m20", groupId: G, senderId: STAFF, at: 1, text: "このあたりの相場は？" }, TODAY);
+      release();
+      assert.deepEqual(logs, ["[group-satei] skip:b-cap"]);
+      assert.equal(bodies.length, 1, "数えた1回だけ（印・AI は呼ばない）");
+      assert.ok(bodies[0].includes("gsatei:bai:"));
+      // 上限の中：数えたあと先へ進む（このテストでは外へ出られないので符号は exception B）
+      incr = 60;
+      bodies.length = 0;
+      capture();
+      await maybeOpenGroupSateiB({ messageId: "m21", groupId: G, senderId: STAFF, at: 1, text: "このあたりの相場は？" }, TODAY);
+      release();
+      assert.ok(bodies.length > 1);
+      assert.ok(!logs.includes("[group-satei] skip:b-cap"));
+      // 売買でない文脈の弱い言葉：何も呼ばない・ログも出さない
+      bodies.length = 0;
+      capture();
+      await maybeOpenGroupSateiB({ messageId: "m22", groupId: G, senderId: STAFF, at: 1, text: "賃料相場を調べて" }, TODAY);
+      await maybeOpenGroupSateiA({ messageId: "m23", groupId: G, senderId: STAFF, at: 1, text: "修繕の金額を出して", isTask: true, requestType: "その他", confidence: 0.9 }, TODAY);
+      release();
+      assert.deepEqual(bodies, []);
+      assert.deepEqual(logs, []);
+    } finally {
+      release();
+      globalThis.fetch = realFetch;
+    }
+  });
+
   await t("data は他の機能と取り合わない", () => {
     for (const d of [
       "v1|gs|0123456789abcdef|1|0123abcd0123456789ab0123456789ab",
