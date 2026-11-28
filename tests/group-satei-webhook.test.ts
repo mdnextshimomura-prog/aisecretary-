@@ -126,6 +126,30 @@ async function allThree(groupId: string) {
     }
   });
 
+  await t("入口 A：種類が査定書でなくても「買取金額」の言葉で受付票を開きにいく（off・対象外は通信しない）", async () => {
+    const p = { senderId: STAFF, at: 1, text: "買取金額頼む", isTask: true, requestType: "その他", confidence: 0.9 };
+    calls = 0;
+    capture();
+    await maybeOpenGroupSateiA({ ...p, messageId: "m10", groupId: OTHER_G }, TODAY);
+    process.env.GROUP_SATEI = "0";
+    await maybeOpenGroupSateiA({ ...p, messageId: "m11", groupId: G }, TODAY);
+    process.env.GROUP_SATEI = "1";
+    // タスクでない・0.5 未満は言葉があっても開かない
+    await maybeOpenGroupSateiA({ ...p, messageId: "m12", groupId: G, isTask: false }, TODAY);
+    await maybeOpenGroupSateiA({ ...p, messageId: "m13", groupId: G, confidence: 0.4 }, TODAY);
+    release();
+    assert.equal(calls, 0);
+    assert.deepEqual(logs, []);
+    capture();
+    await maybeOpenGroupSateiA({ ...p, messageId: "m14", groupId: G }, TODAY);
+    release();
+    assert.ok(calls > 0, "受付票を開きにいった（KV へ行こうとした）");
+    for (const l of logs as string[]) {
+      assert.ok(l.startsWith("[group-satei] "), l);
+      assert.ok(!l.includes("買取"), l);
+    }
+  });
+
   await t("data は他の機能と取り合わない", () => {
     for (const d of [
       "v1|gs|0123456789abcdef|1|0123abcd0123456789ab0123456789ab",

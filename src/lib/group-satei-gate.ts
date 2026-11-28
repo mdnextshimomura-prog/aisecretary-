@@ -9,7 +9,14 @@ import {
 } from "./group-satei-data";
 import { sateiNotifyTarget } from "./satei-data";
 
-export const GS_WORDS: readonly string[] = ["査定", "価格を出して", "いくらで売れ", "売却価格", "相場"];
+/**
+ * 査定の入口の言葉（入口 A・B で同じ1つの表）。
+ * 2026-11-28：社長の「買取金額頼む」が査定の入口に入らず、ふつうのタスク（種別「買取再販」）になった件で、金額をたずねる言い方を足した。
+ */
+export const GS_WORDS: readonly string[] = [
+  "査定", "価格を出して", "いくらで売れ", "売却価格", "相場",
+  "買取金額", "買取価格", "買取額", "買い取り金額", "買い取り価格", "いくらで買", "いくらになる", "値段を出して", "金額を出して",
+];
 
 export function looksLikeSateiWords(text: string): boolean {
   const s = (text ?? "").replace(/[\s　]/g, "");
@@ -32,13 +39,16 @@ export function gsEntryBGate(
 }
 
 export function gsEntryAOk(
-  p: { groupId?: string; senderId?: string; isTask: boolean; requestType: string; confidence: number },
+  p: { groupId?: string; senderId?: string; isTask: boolean; requestType: string; confidence: number; text?: string },
   env: GsEnv = process.env,
 ): boolean {
   if (!groupSateiOn(p.groupId, env)) return false;
   const target = sateiNotifyTarget(env);
   if (!target || !p.senderId || p.senderId === target) return false;
-  return p.isTask && p.requestType === "査定書" && p.confidence >= GS_MIN;
+  if (!p.isTask || p.confidence < GS_MIN) return false;
+  // AI が種類を査定書と読まなくても（「買取金額頼む」→ ふつうのタスク）、査定の言葉があれば受付票を開く。
+  // タスクの登録とその返事は今のまま（ここは受付票を開くかどうかだけ）
+  return p.requestType === "査定書" || looksLikeSateiWords(p.text ?? "");
 }
 
 export function gsMediaRow(m: {
