@@ -375,6 +375,74 @@ async function main() {
     assert.deepEqual(f.logs, ["[staff-digest] nudge asked 2"]);
   });
 
+  await t("夕方の前：Notion で直接更新されたタスクは返事ありと見る（朝の送信＋3分より後）。催促から外し、下村さんへの知らせに1回だけ足す", async () => {
+    const AT = NOW - 9 * 3_600_000; // 朝の送信
+    const iso = (ms: number) => new Date(ms).toISOString();
+    const x = mkKv();
+    x.m.set(R.amKey(DAY), AM.map((a) => ({ ...a, at: AT })));
+    x.sets.set(R.answeredKey(DAY), new Set(["d"])); // 4 は LINE で返事済み（Notion も動いているが、知らせは重ねない）
+    const f = fwdDeps(x);
+    const current = AM.map((a) => ({ id: a.id, status: a.status, dueDate: a.due, lastEdited: iso(AT) }));
+    current[0].lastEdited = iso(AT + 2 * 3_600_000);            // 1：担当が Notion に書いた
+    current[1].lastEdited = iso(AT + 2 * 60_000);               // 2：朝の番号書き（3分以内）＝更新と数えない
+    current[2].lastEdited = iso(AT + 3 * 60_000 + 1_000);       // 3：3分を過ぎた更新（担当なし）
+    current[3].lastEdited = iso(AT + 5 * 3_600_000);            // 4：LINE で返事済み
+    current[4].lastEdited = "";                                 // 5：読めない＝更新と数えない
+    const r = await R.askNudge(DAY, current, { ...f.deps, now: () => NOW });
+    assert.equal(r, "asked");
+    assert.deepEqual(Array.from(x.sets.get(R.answeredKey(DAY)) ?? []).sort(), ["a", "c", "d"]);
+    assert.deepEqual(x.lists.get(R.FWD_KEY), [
+      { at: NOW, who: "小笠原", title: "天満の資料を送る", what: "Notion で更新" },
+      { at: NOW, who: null, title: "鍵の手配", what: "Notion で更新" },
+    ]);
+    // 催促のカードに残るのは 2 と 5 だけ
+    assert.deepEqual((x.m.get(R.nudgeKey(DAY)) as R.AmEntry[]).map((e) => e.n), [2, 5]);
+    assert.deepEqual(f.logs, ["[staff-digest] notion-edited 2", "[staff-digest] nudge asked 2"]);
+    // 知らせの文
+    x.m.delete(R.FWD_GUARD_KEY);
+    assert.equal(await R.flushForward(NOW, f.deps), "sent");
+    assert.equal(
+      (f.pushes[1].messages[0] as { text: string }).text,
+      "💬 グループの返事（2件）\n・小笠原さん：天満の資料を送る → Notion で更新\n・担当：鍵の手配 → Notion で更新"
+    );
+    // もう一度見ても、同じタスクは足さない（返事の印が付いている）
+    await R.askNudge(DAY, current, { ...f.deps, now: () => NOW });
+    assert.deepEqual(x.lists.get(R.FWD_KEY), []);
+  });
+
+  await t("夕方の前：朝の控えに送信の時刻が無い（前の版の控え）・KV に書けないときも、今までどおり催促の判定をする", async () => {
+    const x = mkKv();
+    x.m.set(R.amKey(DAY), AM); // at なし
+    const f = fwdDeps(x);
+    const current = AM.map((a) => ({ id: a.id, status: a.status, dueDate: a.due, lastEdited: new Date(NOW).toISOString() }));
+    assert.equal(await R.askNudge(DAY, current, f.deps), "asked");
+    assert.deepEqual(f.logs, ["[staff-digest] nudge asked 5"]);
+    assert.equal(x.lists.get(R.FWD_KEY), undefined);
+    // 印・知らせの列に書けなくても投げない。更新されたタスクは催促から外す
+    const y = mkKv();
+    y.m.set(R.amKey(DAY), AM.map((a) => ({ ...a, at: NOW - 3_600_000 })));
+    const g = fwdDeps(y);
+    const kv = { ...y.kv, sadd: async () => { throw new Error("kv"); } };
+    const cur2 = current.map((c, i) => ({ ...c, lastEdited: i === 0 ? c.lastEdited : "" }));
+    assert.equal(await R.askNudge(DAY, cur2, { ...g.deps, kv }), "asked");
+    assert.deepEqual(g.logs, ["[staff-digest] notion-edited note-failed", "[staff-digest] nudge asked 4"]);
+  });
+
+  await t("仕分ける人が担当のタスクの Notion の更新は、知らせには足さない（返事の印は付ける）", async () => {
+    const x = mkKv();
+    x.m.set(R.amKey(DAY), [{ ...AM[0], assignee: "下村", assigneeUserId: OWNER, at: NOW - 3_600_000 }]);
+    const f = fwdDeps(x);
+    assert.equal(await R.askNudge(DAY, [{ id: "a", status: AM[0].status, dueDate: AM[0].due, lastEdited: new Date(NOW).toISOString() }], f.deps), "none");
+    assert.deepEqual(Array.from(x.sets.get(R.answeredKey(DAY)) ?? []), ["a"]);
+    assert.equal(x.lists.get(R.FWD_KEY), undefined);
+  });
+
+  await t("朝の控えに送信の時刻を入れる", async () => {
+    const x = mkKv();
+    await R.saveMorningSnapshot(DAY, [{ n: 1, task: { id: "a", title: "x", assignee: null, assigneeUserId: null, status: "未着手", dueDate: "" } }], x.kv, () => undefined, 1234);
+    assert.deepEqual(x.m.get(R.amKey(DAY)), [{ id: "a", n: 1, title: "x", assignee: null, assigneeUserId: null, status: "未着手", due: "", at: 1234 }]);
+  });
+
   await t("夕方の前：全員から返事があれば何も送らない。朝の控えが無い日・off・仕分ける人なしも送らない", async () => {
     const x = mkKv();
     x.m.set(R.amKey(DAY), AM);

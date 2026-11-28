@@ -582,6 +582,8 @@ export async function getUpcomingTasks(opts: { followup?: boolean } = {}): Promi
     remindNumber: number | null;
     /** 物件名。空なら null（担当へのまとめ STAFF_DIGEST が添える。ほかは読まない） */
     propertyName: string | null;
+    /** ページの最終更新（Notion の last_edited_time。無ければ ""。STAFF_DIGEST の「Notion で更新＝返事あり」だけが読む） */
+    lastEdited: string;
   }>
 > {
   const tomorrowStr = jstDateStr(1);
@@ -696,6 +698,7 @@ export async function getUpcomingTasks(opts: { followup?: boolean } = {}): Promi
         )?.rich_text
           ?.map((r) => r.plain_text)
           .join("") || null,
+      lastEdited: typeof p.last_edited_time === "string" ? p.last_edited_time : "",
     };
   });
 }

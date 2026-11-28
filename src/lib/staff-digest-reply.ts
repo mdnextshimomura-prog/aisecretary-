@@ -436,7 +436,13 @@ export interface AmEntry {
   status: string;
   /** 期日（"YYYY-MM-DD"。無ければ ""） */
   due: string;
+  /** 朝のまとめを送り終えた時刻（ミリ秒）。無い古い控えは「Notion で更新」の判定をしない */
+  at?: number;
 }
+
+/** 朝の送信のときに秘書自身が番号を書くので、その分を「更新」と数えないための余裕 */
+export const NOTION_EDIT_MARGIN_MS = 3 * 60 * 1000;
+export const WHAT_NOTION = "Notion で更新";
 
 function asAmEntries(v: unknown): AmEntry[] {
   if (!Array.isArray(v)) return [];
@@ -450,10 +456,13 @@ export async function saveMorningSnapshot(
   day: string,
   ordered: Array<{ n: number; task: { id: string; title: string; assignee: string | null; assigneeUserId: string | null; status: string; dueDate: string } }>,
   kv: Pick<SdKv, "set">,
-  log: (line: string) => void
+  log: (line: string) => void,
+  /** 朝のまとめを送り終えた時刻。渡さなければ控えに入れない */
+  at?: number
 ): Promise<void> {
   try {
     const rows: AmEntry[] = ordered.map(({ n, task }) => ({
+      ...(typeof at === "number" ? { at } : {}),
       id: task.id,
       n,
       title: task.title,
@@ -548,8 +557,9 @@ export function nudgeAskCard(day: string, silent: AmEntry[]): FlexMessage {
 
 export interface NudgeAskDeps {
   env?: Env;
-  kv: Pick<SdKv, "get" | "set" | "smembers">;
+  kv: Pick<SdKv, "get" | "set" | "smembers" | "sadd" | "rpush">;
   owner: string | null;
+  now?(): number;
   push(to: string, messages: unknown[], key: string): Promise<number | null>;
   log(line: string): void;
 }
@@ -558,11 +568,13 @@ export type NudgeAskResult = "off" | "none" | "asked" | "failed";
 /**
  * 夕方のまとめを送る直前に呼ぶ（夕方の1日1回の印の中）。朝のまとめに出したタスクのうち、
  * いまも未完了の一覧にあり・状態も期日も朝のまま・返事（番号・引用・進捗）も無いものを、下村さんの 1対1 へカードで知らせる。
+ * Notion で直接書いた分も返事と見る：ページの最終更新が「朝の送信＋3分」より後なら返事あり（催促しない）。
+ * LINE の返事が無くそう判定したタスクは、返事の印を付け、下村さんへの知らせの列に「Notion で更新」として1回足す。
  * 0件・朝の控えなし・off・仕分ける人なしは送らない。例外は投げない（夕方のまとめを止めない）。
  */
 export async function askNudge(
   day: string,
-  current: Array<{ id: string; status: string; dueDate: string }>,
+  current: Array<{ id: string; status: string; dueDate: string; lastEdited?: string }>,
   deps: NudgeAskDeps
 ): Promise<NudgeAskResult> {
   if (!staffDigestOn(deps.env ?? process.env) || !deps.owner) return "off";
@@ -571,6 +583,27 @@ export async function askNudge(
     if (am.length === 0) return "none";
     const answered = new Set(await deps.kv.smembers(answeredKey(day)));
     const cur = new Map(current.map((t) => [t.id, t]));
+    // Notion で更新されたもの（まだ返事の印が無いものだけ）。印と知らせの控えに失敗しても、催促の判定は続ける
+    const edited = am.filter((a) => {
+      if (typeof a.at !== "number" || answered.has(a.id)) return false;
+      const ms = Date.parse(cur.get(a.id)?.lastEdited ?? "");
+      return !Number.isNaN(ms) && ms > a.at + NOTION_EDIT_MARGIN_MS;
+    });
+    if (edited.length > 0) {
+      for (const a of edited) answered.add(a.id);
+      const now = (deps.now ?? Date.now)();
+      try {
+        await deps.kv.sadd(answeredKey(day), edited.map((a) => a.id), DAY_TTL_SEC);
+        // 仕分ける人が担当のタスクは、本人が直した分なので知らせない
+        const rows: FwdRow[] = edited
+          .filter((a) => a.assigneeUserId !== deps.owner)
+          .map((a) => ({ at: now, who: a.assignee || null, title: cut(a.title, TITLE_MAX), what: WHAT_NOTION }));
+        if (rows.length > 0) await deps.kv.rpush(FWD_KEY, rows);
+        deps.log(`[staff-digest] notion-edited ${edited.length}`);
+      } catch {
+        deps.log("[staff-digest] notion-edited note-failed");
+      }
+    }
     const silent = am.filter((a) => {
       const c = cur.get(a.id);
       return Boolean(c) && c!.status === a.status && (c!.dueDate ?? "").slice(0, 10) === a.due && !answered.has(a.id);

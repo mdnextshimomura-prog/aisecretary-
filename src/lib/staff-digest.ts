@@ -82,6 +82,28 @@ function taskLine(n: number, t: DigestTask, today: string, tomorrow: string, fol
   return line;
 }
 
+const NOTION_URL_MAX = 300;
+/**
+ * まとめの末尾に添える Notion のリンク（2026-11-28 下村さん「担当が書くのは Notion でいい。LINE だと埋もれる」）。
+ *   ・STAFF_DIGEST_NOTION_URL があれば、https://www.notion.so/ か https://notion.so/ で始まるときだけ使う（ほかは無視）
+ *   ・無ければ NOTION_DATABASE_ID（32桁の16進。ハイフン入りも可）から https://www.notion.so/<ID> を作る
+ *   ・どちらも使えなければ null（＝リンクの行を足さない。文は足す前と同じ）
+ * textV2 を壊さないよう { } ・空白を含むものは使わない。値はログに出さない。
+ */
+export function digestNotionUrl(env: Env = process.env): string | null {
+  const raw = (env.STAFF_DIGEST_NOTION_URL ?? "").trim();
+  if (raw) {
+    const ok =
+      (raw.startsWith("https://www.notion.so/") || raw.startsWith("https://notion.so/")) &&
+      raw.length <= NOTION_URL_MAX &&
+      !/[{}\s]/.test(raw);
+    return ok ? raw : null;
+  }
+  const id = (env.NOTION_DATABASE_ID ?? "").trim().replace(/-/g, "");
+  return /^[0-9a-fA-F]{32}$/.test(id) ? `https://www.notion.so/${id.toLowerCase()}` : null;
+}
+const notionLine = (url: string | null | undefined) => (url ? `\nくわしく書くときは Notion へ：${url}` : "");
+
 /** 担当1人ぶんの返信の案内（人ごとに繰り返すので短く。例の番号は、その通に載せた番号を使う） */
 function personFooter(nums: number[], followup: boolean): string {
   const a = nums[0];
@@ -113,6 +135,8 @@ export interface DigestInput<T extends DigestTask> {
   followup: boolean;
   /** 決まっている番号（夕方：朝の番号を保つ）。無ければ載せる順に1から振る */
   numbers?: Map<string, number>;
+  /** 各通の末尾に添える Notion のリンク（digestNotionUrl）。無ければ行を足さない */
+  notionUrl?: string | null;
 }
 
 export interface DigestOutput<T extends DigestTask> {
@@ -146,6 +170,8 @@ export function buildStaffDigest<T extends DigestTask>(input: DigestInput<T>): D
 
   const ordered: Array<{ task: T; n: number }> = [];
   const messages: DigestMessage[] = [];
+  // Notion のリンクの行（無ければ ""。長さは1通の上限の計算にも入れる）
+  const link = notionLine(input.notionUrl);
   // 1人ぶんを1通に組む。4200字を超えるときだけ、見出しと案内をくり返して次の通に分ける
   const emit = (head: string, mentions: Record<string, string>, uid: string | null, list: T[], foot: (nums: number[]) => string) => {
     let lines: string[] = [];
@@ -160,7 +186,7 @@ export function buildStaffDigest<T extends DigestTask>(input: DigestInput<T>): D
       const n = numbers?.get(t.id) ?? ordered.length + 1;
       ordered.push({ task: t, n });
       const line = taskLine(n, t, today, tomorrow, followup);
-      const size = head.length + lines.reduce((a, l) => a + l.length + 1, 0) + line.length + 200;
+      const size = head.length + lines.reduce((a, l) => a + l.length + 1, 0) + line.length + 200 + link.length;
       if (nums.length > 0 && size > MAX_CHARS) flush();
       lines.push(line);
       nums.push(n);
@@ -170,17 +196,21 @@ export function buildStaffDigest<T extends DigestTask>(input: DigestInput<T>): D
 
   for (const g of Array.from(groups.values())) {
     // userId が無い担当はメンションできないので名前で呼ぶ
-    if (g.userId) emit(`{m1} ${ASK[slot]}`, { m1: g.userId }, g.userId, g.tasks, (nums) => personFooter(nums, followup));
-    else emit(`${sanitizeForTextV2(g.name ?? "")}さん ${ASK[slot]}`, {}, null, g.tasks, (nums) => personFooter(nums, followup));
+    if (g.userId) emit(`{m1} ${ASK[slot]}`, { m1: g.userId }, g.userId, g.tasks, (nums) => personFooter(nums, followup) + link);
+    else emit(`${sanitizeForTextV2(g.name ?? "")}さん ${ASK[slot]}`, {}, null, g.tasks, (nums) => personFooter(nums, followup) + link);
   }
-  if (unassigned.length > 0) emit(UNASSIGNED_HEAD, {}, null, unassigned, () => UNASSIGNED_FOOT);
+  if (unassigned.length > 0) emit(UNASSIGNED_HEAD, {}, null, unassigned, () => UNASSIGNED_FOOT + link);
 
   return { messages, ordered };
 }
 
 // ── 夕方に出すもの・番号 ──
 
-type EveTask = DigestTask & { remindNumber: number | null };
+type EveTask = DigestTask & {
+  remindNumber: number | null;
+  /** ページの最終更新（Notion の last_edited_time）。段階3 の「Notion で更新＝返事あり」が読む。無くてもよい */
+  lastEdited?: string;
+};
 
 /**
  * 夕方の対象：まだ完了していない（＝渡された並びにある）もののうち、
@@ -440,7 +470,7 @@ export async function runStaffDigestEveningOnTick(
     const { numbers, fresh } = assignEveningNumbers(selected, all, floor);
     // 番号を Notion に書いてから送る（先に返信されても引けるように。朝と同じ順）
     await bounded(Promise.all(fresh.map((f) => d.setNumber(f.id, f.n))), left() - slice);
-    const built = buildStaffDigest({ slot: "eve", tasks: selected, today, tomorrow, followup: d.followup, numbers });
+    const built = buildStaffDigest({ slot: "eve", tasks: selected, today, tomorrow, followup: d.followup, numbers, notionUrl: digestNotionUrl(env) });
     messages = built.messages;
     count = built.ordered.length;
   } catch (err) {

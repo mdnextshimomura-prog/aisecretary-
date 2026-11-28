@@ -214,17 +214,19 @@ export async function flushStaffDigestForwardOnTick(now: number): Promise<void> 
 /** 夕方のまとめの直前に：朝のまとめに返事の無いタスクを、下村さんへ［催促する］のカードで知らせる */
 export async function askNudgeBeforeEvening(
   day: string,
-  all: Array<{ id: string; status: string; dueDate: string }>
+  all: Array<{ id: string; status: string; dueDate: string; lastEdited?: string }>
 ): Promise<void> {
-  await askNudge(day, all, { kv: realKv, owner: inboxOwner(), push: pushOwner, log });
+  await askNudge(day, all, { kv: realKv, owner: inboxOwner(), push: pushOwner, now: Date.now, log });
 }
 
 /** 朝のまとめを送れたあとに：出したタスクを控える（催促の判定用） */
 export async function saveMorningSnapshotReal(
   day: string,
-  ordered: Parameters<typeof saveMorningSnapshot>[1]
+  ordered: Parameters<typeof saveMorningSnapshot>[1],
+  /** 朝のまとめを送り終えた時刻（このあとの Notion の更新を「返事あり」と見る） */
+  at: number
 ): Promise<void> {
-  await saveMorningSnapshot(day, ordered, realKv, log);
+  await saveMorningSnapshot(day, ordered, realKv, log, at);
 }
 
 /** ［催促する］（v1|sd|<日付>）の postback */

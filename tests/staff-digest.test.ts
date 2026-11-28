@@ -131,6 +131,46 @@ const SAMPLE: Row[] = [
     assert.deepEqual(d.messages[0].chunk.mentions, {});
   });
 
+  await t("Notion のリンク：STAFF_DIGEST_NOTION_URL（notion.so で始まるものだけ）→ 無ければ NOTION_DATABASE_ID から → どちらも無ければ足さない", () => {
+    const DB = "0123456789abcdef0123456789ABCDEF";
+    assert.equal(D.digestNotionUrl({}), null);
+    assert.equal(D.digestNotionUrl({ STAFF_DIGEST_NOTION_URL: "https://www.notion.so/team/tasks-abc?v=1" }), "https://www.notion.so/team/tasks-abc?v=1");
+    assert.equal(D.digestNotionUrl({ STAFF_DIGEST_NOTION_URL: " https://notion.so/abc ", NOTION_DATABASE_ID: DB }), "https://notion.so/abc");
+    assert.equal(D.digestNotionUrl({ NOTION_DATABASE_ID: DB }), "https://www.notion.so/0123456789abcdef0123456789abcdef");
+    assert.equal(D.digestNotionUrl({ NOTION_DATABASE_ID: "01234567-89ab-cdef-0123-456789abcdef" }), "https://www.notion.so/0123456789abcdef0123456789abcdef");
+    // 形の違うものは使わない。URL の指定が間違っているときは、データベースの ID にも落とさない（指定した人の意図と違う行き先を出さない）
+    for (const bad of ["http://www.notion.so/x", "https://example.com/www.notion.so/", "https://www.notion.so/a{b}", "https://www.notion.so/a b", `https://www.notion.so/${"a".repeat(400)}`]) {
+      assert.equal(D.digestNotionUrl({ STAFF_DIGEST_NOTION_URL: bad, NOTION_DATABASE_ID: DB }), null, bad);
+    }
+    assert.equal(D.digestNotionUrl({ NOTION_DATABASE_ID: "not-an-id" }), null);
+  });
+
+  await t("Notion のリンクは各通（担当なしの通も）の最後の1行。無ければ文は足す前と同じ", () => {
+    const URL = "https://www.notion.so/0123456789abcdef0123456789abcdef";
+    const base = D.buildStaffDigest({ slot: "am", tasks: SAMPLE, today: TODAY, tomorrow: TOMORROW, followup: true });
+    const d = D.buildStaffDigest({ slot: "am", tasks: SAMPLE, today: TODAY, tomorrow: TOMORROW, followup: true, notionUrl: URL });
+    assert.deepEqual(d.messages.map((m) => m.chunk.text), base.messages.map((m) => `${m.chunk.text}\nくわしく書くときは Notion へ：${URL}`));
+    assert.equal(
+      d.messages[0].chunk.text,
+      [
+        "{m1} 進捗の確認です。どうなりましたか？",
+        "1. 天満の資料を送る（2日超過）［天満ハイツ］",
+        "2. 売主へ電話（本日期限）（待ち：売主の書類）",
+        "",
+        "このメッセージに返信（リプライ）で答えてください",
+        "例：「1済」「2 アポ取れました。来週火曜です」「2待ち 売主の書類 金曜」",
+        `くわしく書くときは Notion へ：${URL}`,
+      ].join("\n")
+    );
+    assert.ok(d.messages[2].chunk.text.endsWith(`どなたが進めるか、このメッセージに返信で教えてください\nくわしく書くときは Notion へ：${URL}`));
+    assert.deepEqual(d.messages.map((m) => [m.nums, m.uid, m.chunk.mentions]), base.messages.map((m) => [m.nums, m.uid, m.chunk.mentions]));
+    assert.deepEqual(D.buildStaffDigest({ slot: "am", tasks: SAMPLE, today: TODAY, tomorrow: TOMORROW, followup: true, notionUrl: null }), base);
+    // 長い人を分けるときも、リンクを入れた長さで5000字に収める
+    const tasks = Array.from({ length: 40 }, (_, i) => row(`t${i}`, `${"あ".repeat(180)}${i}`, TODAY, OGA));
+    const long = D.buildStaffDigest({ slot: "am", tasks, today: TODAY, tomorrow: TOMORROW, followup: true, notionUrl: `https://www.notion.so/${"a".repeat(270)}` });
+    for (const m of long.messages) assert.ok(m.chunk.text.length <= 4800 && m.chunk.text.includes("くわしく書くときは Notion へ："));
+  });
+
   await t("同じ担当は userId のある行・無い行が混ざっても1通にまとめ、メンションする", () => {
     const d = D.buildStaffDigest({
       slot: "am", today: TODAY, tomorrow: TOMORROW, followup: true,
@@ -234,6 +274,13 @@ const SAMPLE: Row[] = [
     assert.deepEqual(Array.from(f.claimed), ["2026-11-28"]);
     assert.deepEqual(f.logs, ["[staff-digest] eve sent 2"]);
     assert.equal(await D.runStaffDigestEveningOnTick(EVE + 24 * 60 * MIN, ON, f.deps), "sent");
+  });
+
+  await t("夕方の通にも Notion のリンクが付く（環境変数から。ログには出さない）", async () => {
+    const f = fake({ tasks: EVE_TASKS });
+    assert.equal(await D.runStaffDigestEveningOnTick(EVE, { ...ON, NOTION_DATABASE_ID: "0123456789abcdef0123456789abcdef" }, f.deps), "sent");
+    for (const c of f.pushed[0]) assert.ok(c.text.endsWith("\nくわしく書くときは Notion へ：https://www.notion.so/0123456789abcdef0123456789abcdef"));
+    assert.ok(!f.logs.join("\n").includes("notion.so"));
   });
 
   await t("0件なら送らない（印は付けたまま＝その日はもう調べない）", async () => {
