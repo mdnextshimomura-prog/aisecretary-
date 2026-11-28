@@ -3,6 +3,7 @@ import { handleCloudTick } from "@/lib/obi/cloud-entry";
 import { runDueRemindersOnTick } from "@/lib/remind-due";
 import { runStaffDigestEveningOnTick } from "@/lib/staff-digest";
 import { flushStaffDigestForwardOnTick } from "@/lib/staff-digest-reply-wire";
+import { flushDealLogOnTick } from "@/lib/deal-log-wire";
 import { sweepGroupSateiOnTick, sweepGroupSateiStage2OnTick } from "@/lib/group-satei-wire";
 
 // 帯替えの完成リンク・差し戻し・失敗の知らせを、クラウドから出す毎分の見回り（設計 2026-10-11 の C1）。
@@ -41,6 +42,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // 段2d：事例の相談の案の配達・遅れの知らせ・山口さんへのリマインド（groupSateiPrepOn のときだけ。対象の票が無ければ KV を1回読むだけ）。
     // 前段で 40 秒を使っていたら、この回は飛ばす。中でも t0 から50秒の予算で、残り12秒を切ったら新しい票に手を付けない
     if (Date.now() - t0 < 40_000) await sweepGroupSateiStage2OnTick(t0);
+    // 案件ページに LINE の動きを溜める：たまった行を2分に1回、案件のページ本文へ（DEAL_LOG=1 のときだけ。off なら KV も触らない）。
+    // 中は約10秒まで。前段で 45 秒を使っていたら、この回は飛ばす（行は列に残り、次の回に書く）。例外は投げない
+    if (Date.now() - t0 < 45_000) await flushDealLogOnTick(Date.now());
   }
   return NextResponse.json(r.body, { status: r.status, headers: NO_STORE });
 }

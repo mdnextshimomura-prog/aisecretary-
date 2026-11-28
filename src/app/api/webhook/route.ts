@@ -115,6 +115,7 @@ import {
 } from "@/lib/task-status";
 import { statusDeps } from "@/lib/task-status-wire";
 import { recordInboxContext } from "@/lib/group-inbox-context";
+import { dealLogBatch } from "@/lib/deal-log-wire";
 import { staffDigestOn } from "@/lib/staff-digest";
 import { handleStaffAskText } from "@/lib/staff-ask-wire";
 import { statusWhat } from "@/lib/staff-digest-reply";
@@ -754,6 +755,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // 普通のグループの査定依頼（入口 A・B）は、その場では始めるだけで待たない（今の返事・後ろのイベントを遅らせない）。
   // 返す直前にまとめて待つ。off のあいだは空のまま（何も変わらない）。どれも例外を投げない
   const gsJobs: Promise<void>[] = [];
+  // 案件ページに LINE の動きを溜める（DEAL_LOG=1 のときだけ。off なら add も done も何も呼ばない）
+  const dealLog = dealLogBatch();
 
   for (const event of obi.rest) {
     // 送り主の制限（2026-11-08）。会社グループ（LINE_GROUP_ID）と、許可した人との 1対1
@@ -847,6 +850,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           at: event.timestamp ?? Date.now(),
         })
       );
+    }
+
+    // 案件ページに溜める行の控え（DEAL_LOG=1 のときだけ。グループの文字・画像・ファイル・動画。案件を決められた発言だけ KV の列へ。
+    // 待たずに始め、返す直前にまとめて待つ。投げない。AI は呼ばない）
+    {
+      const mt = event.message.type;
+      if (source.groupId && (mt === "text" || mt === "image" || mt === "file" || mt === "video")) {
+        dealLog.add({
+          groupId: source.groupId,
+          senderId: source.userId,
+          messageId: event.message.id,
+          kind: mt,
+          text: mt === "text" ? event.message.text : undefined,
+          quotedMessageId: event.message.quotedMessageId,
+          at: event.timestamp ?? Date.now(),
+        });
+      }
     }
 
     // 画像 → 通常は黙って「直近メディア」として控えるだけ（返信しない）。
@@ -2225,6 +2245,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 
   // 始めておいた査定依頼の受付票の処理を待ち切ってから返す（返したあとは関数が止められうるため）
+  gsJobs.push(dealLog.done());
   await Promise.allSettled(gsJobs);
 
   if (needsRetry) {
