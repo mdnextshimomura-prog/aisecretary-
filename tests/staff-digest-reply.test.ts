@@ -69,17 +69,41 @@ async function main() {
     assert.deepEqual(p("3 アポ取れました。来週火曜です"), [{ kind: "progress", numbers: [3], body: "アポ取れました。来週火曜です" }]);
     assert.deepEqual(p("３　アポ取れました"), [{ kind: "progress", numbers: [3], body: "アポ取れました" }]);
     assert.deepEqual(p("3. アポ取れました"), [{ kind: "progress", numbers: [3], body: "アポ取れました" }]);
-    assert.deepEqual(p("3アポ取れました"), [{ kind: "progress", numbers: [3], body: "アポ取れました" }]);
+    assert.deepEqual(p("3）アポ取れました"), [{ kind: "progress", numbers: [3], body: "アポ取れました" }]);
+    assert.deepEqual(p("3、アポ取れました"), [{ kind: "progress", numbers: [3], body: "アポ取れました" }]);
+    assert.deepEqual(p("3： 10時に内見です"), [{ kind: "progress", numbers: [3], body: "10時に内見です" }]);
     assert.deepEqual(p("1,2 まだです"), [{ kind: "progress", numbers: [1, 2], body: "まだです" }]);
     assert.deepEqual(p("3 小笠原が担当します"), [{ kind: "progress", numbers: [3], body: "小笠原が担当します" }]);
     // 雑談・番号でないもの
-    for (const s of ["こんにちは", "了解です", "3", "3件アポ取れました", "10時に電話します", "12/3 に内見です", "3,000万円で申込です", "2階の鍵です", "100 まだです", "0 まだです", ""]) {
+    // 番号のあとに区切りが無いものは読まない（「3ヶ月後に…」「1つ確認ですが」を番号と取り違えない）。小数・時刻も読まない
+    for (const s of ["こんにちは", "了解です", "3", "3アポ取れました", "3件アポ取れました", "3ヶ月後に決済です", "1つ確認ですが", "10時に電話します", "12/3 に内見です", "3,000万円で申込です", "3.5万円で申込です", "10:30に電話します", "2階の鍵です", "100 まだです", "0 まだです", ""]) {
       assert.equal(p(s), null, s);
     }
     // 今の言葉だけ（「3済」）は今までの道に任せる
     assert.equal(p("3済"), null);
     assert.equal(p("3待ち 売主の書類 金曜"), null);
     assert.equal(p("1済\n2完了"), null);
+    // 候補への返事（「1 登録」「2 なし」）の行が1つでもあれば読まない
+    const cand = (l: string) => /^\d+\s*(登録|なし)$/.test(l);
+    assert.equal(R.parseDigestReply("1 登録", isKnown, cand), null);
+    assert.equal(R.parseDigestReply("2 なし\n3 まだです", isKnown, cand), null);
+    assert.deepEqual(R.parseDigestReply("3 登録は来週します", isKnown, cand), [{ kind: "progress", numbers: [3], body: "登録は来週します" }]);
+  });
+
+  await t("読み方：「3 契約済みです」は進捗、「3済」は今までどおり完了（まとめを引用した返信の中だけの決まり）", () => {
+    // 本物のつなぎと同じ見分け：完了の言葉だけの形のときだけ「今の言葉」
+    const p = (s: string) => R.parseDigestReply(s, R.isBareCompletion);
+    assert.deepEqual(p("3 契約済みです"), [{ kind: "progress", numbers: [3], body: "契約済みです" }]);
+    assert.deepEqual(p("3 連絡済みです"), [{ kind: "progress", numbers: [3], body: "連絡済みです" }]);
+    for (const s of ["3済", "3 済", "3完了", "3おわった", "1,2完了"]) assert.equal(p(s), null, s);
+    assert.deepEqual(p("1済\n2 連絡済みです"), [{ kind: "known", raw: "1済" }, { kind: "progress", numbers: [2], body: "連絡済みです" }]);
+    // 区切りの無い「3連絡済みです」は読まない（今までの流れに任せる）
+    assert.equal(p("3連絡済みです"), null);
+  });
+
+  await t("読み方：まとめへの返信の中では、番号＋完了の言葉だけを完了と読む（文になっていれば進捗）", () => {
+    for (const s of ["3済", "3 済", "３済み", "3完了", "3おわった", "1,2完了", "1 2 済", "4 終わりました", "3 完了しました。", "3 done"]) assert.equal(R.isBareCompletion(s), true, s);
+    for (const s of ["3 契約済みです", "3 連絡済みです", "3 決済完了の連絡をしました", "3 もう終わったと思います", "3 済んでいません", "済", "3"]) assert.equal(R.isBareCompletion(s), false, s);
   });
 
   await t("読み方：改行で分けた各行を1件に。番号の無い行は前の進捗の続き。今の言葉の行も順に残す", () => {
@@ -189,10 +213,16 @@ async function main() {
     assert.deepEqual(x.lists.get(R.FWD_KEY), [{ at: NOW, who: "小笠原", title: "鍵の手配", what: "済" }]);
   });
 
-  await t("下村さん本人の返事は、知らせには載せない（答えた印は付ける）", async () => {
+  await t("下村さん本人の返事は、知らせには載せない（答えた印は付ける）。名簿で同じ人の別アカウントも同じ", async () => {
     const x = mkKv();
     await rec(x, [{ id: "p1", title: "鍵の手配", what: "済" }], "下村", OWNER);
     assert.deepEqual(Array.from(x.sets.get(R.answeredKey(DAY)) ?? []), ["p1"]);
+    assert.equal(x.lists.get(R.FWD_KEY), undefined);
+    await R.recordReplies(
+      { userId: YAMA, name: "下村", items: [{ id: "p2", title: "x", what: "済" }], now: NOW, sameAsOwner: true },
+      { env: ON, kv: x.kv, owner: OWNER, log: () => undefined },
+    );
+    assert.deepEqual(Array.from(x.sets.get(R.answeredKey(DAY)) ?? []), ["p1", "p2"]);
     assert.equal(x.lists.get(R.FWD_KEY), undefined);
   });
 
@@ -302,20 +332,21 @@ async function main() {
     assert.equal(y.ops.length, 0);
   });
 
-  const mkPress = (o: { env?: Record<string, string>; sent?: number[]; now?: number } = {}) => {
+  const mkPress = (o: { env?: Record<string, string>; status?: Array<number | null>; now?: number } = {}) => {
     const x = mkKv();
     x.m.set(R.nudgeKey(DAY), [AM[0], AM[2], AM[3], AM[1]]);
     const replies: string[] = [];
     const logs: string[] = [];
     const group: Array<Array<{ text: string; mentions: Record<string, string> }>> = [];
-    const sent = [...(o.sent ?? [])];
+    const status = [...(o.status ?? [])];
+    const keys: string[] = [];
     const deps: R.NudgeDeps = {
       env: o.env ?? ON, kv: x.kv, owner: OWNER, now: () => o.now ?? NOW,
-      pushGroup: async (chunks) => { group.push(chunks); const s = sent.length > 0 ? sent.shift()! : 1; return { sent: s, ids: s > 0 ? ["N1"] : [] }; },
+      pushGroup: async (chunk, key) => { group.push([chunk]); keys.push(key); const s = status.length > 0 ? status.shift()! : 200; return { status: s, ids: s === 200 ? ["N1"] : [] }; },
       reply: async (text) => { replies.push(text); },
       log: (l) => logs.push(l),
     };
-    return { ...x, deps, replies, logs, group };
+    return { ...x, deps, replies, logs, group, keys };
   };
 
   await t("ボタンの data：v1|sd|<日付> だけ読む", () => {
@@ -340,6 +371,7 @@ async function main() {
     }]);
     assert.deepEqual(x.replies, ["📣 グループへ催促を送りました（4件）"]);
     assert.deepEqual(x.logs, ["[staff-digest] nudge sent"]);
+    assert.deepEqual(x.keys, [`sd-nudge:${DAY}`]);
     // 催促のメッセージへの返信も、まとめへの返信として受けられるよう ID を控える
     assert.ok(x.m.has(digestMsgKey("N1")));
     await R.handleSdPostback({ day: DAY }, { userId: OWNER }, x.deps);
@@ -363,7 +395,7 @@ async function main() {
     assert.equal(x.replies[2], "もう全員から返事が届いています");
   });
 
-  await t("［催促する］：前の日のカード・off は送らない。送れなければ印を外してもう一度押せる", async () => {
+  await t("［催促する］：前の日のカード・off は送らない。はっきり断られたら（4xx）印を外してもう一度押せる", async () => {
     const old = mkPress({ now: NOW + 86_400_000 });
     await R.handleSdPostback({ day: DAY }, { userId: OWNER }, old.deps);
     assert.equal(old.group.length, 0);
@@ -374,12 +406,38 @@ async function main() {
     assert.deepEqual(off.replies, ["いまは止めています"]);
     assert.equal(off.ops.length + off.group.length, 0);
 
-    const x = mkPress({ sent: [0, 1] });
+    const x = mkPress({ status: [429, 200] });
     await R.handleSdPostback({ day: DAY }, { userId: OWNER }, x.deps);
-    assert.equal(x.replies[0], "⚠️ 送れなかったようです。グループに出ていなければ、もう一度押してください");
+    assert.equal(x.replies[0], "⚠️ 送れませんでした。もう一度押してください");
     assert.equal(x.logs[0], "[staff-digest] nudge push-failed");
+    assert.equal(x.m.has(R.nudgedKey(DAY)), false);
     await R.handleSdPostback({ day: DAY }, { userId: OWNER }, x.deps);
     assert.equal(x.replies[1], "📣 グループへ催促を送りました（4件）");
+  });
+
+  await t("［催促する］：結果が分からない（時間切れ・5xx）ときは印を残し、押し直しは同じ retry key で送る（409 は送れた扱い＝2通にならない）", async () => {
+    const x = mkPress({ status: [null, 500, 409] });
+    await R.handleSdPostback({ day: DAY }, { userId: OWNER }, x.deps);
+    assert.equal(x.replies[0], "⚠️ 送れたか確かめられませんでした。グループに出ていなければ、もう一度押してください");
+    assert.equal(x.logs[0], "[staff-digest] nudge unknown");
+    assert.equal(x.m.get(R.nudgedKey(DAY)), "trying");
+    await R.handleSdPostback({ day: DAY }, { userId: OWNER }, x.deps);
+    assert.equal(x.m.get(R.nudgedKey(DAY)), "trying");
+    await R.handleSdPostback({ day: DAY }, { userId: OWNER }, x.deps);
+    assert.equal(x.replies[2], "📣 グループへ催促を送りました（4件）");
+    assert.equal(x.m.get(R.nudgedKey(DAY)), "sent");
+    // どの回も同じ retry key
+    assert.deepEqual(x.keys, [`sd-nudge:${DAY}`, `sd-nudge:${DAY}`, `sd-nudge:${DAY}`]);
+    await R.handleSdPostback({ day: DAY }, { userId: OWNER }, x.deps);
+    assert.equal(x.replies[3], "もう送ってあります");
+    assert.equal(x.group.length, 3);
+  });
+
+  await t("催促の1通を LINE のメッセージにする（メンションがあれば textV2）", () => {
+    assert.deepEqual(R.chunkToMessage({ text: "a", mentions: {} }), { type: "text", text: "a" });
+    assert.deepEqual(R.chunkToMessage({ text: "{m1} a", mentions: { m1: OGA } }), {
+      type: "textV2", text: "{m1} a", substitution: { m1: { type: "mention", mentionee: { type: "user", userId: OGA } } },
+    });
   });
 
   await t("状況の言葉の言い方（知らせ用）", () => {

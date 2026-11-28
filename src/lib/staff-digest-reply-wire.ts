@@ -5,16 +5,18 @@
 import { kv } from "@vercel/kv";
 import { inboxOwner } from "./candidate-card";
 import { GS_RETRY_NAMESPACE } from "./group-satei-data";
-import { pushLineChunksWithIds, pushMessagesWithRetryKey, sendLineMessage } from "./line";
-import { loadMembers } from "./members";
+import { pushMessagesWithRetryKey, pushMessagesWithRetryKeyIds, sendLineMessage } from "./line";
+import { loadMembers, type Member } from "./members";
 import { appendTaskNote, completeTask, findTaskByRemindNumber, jstDateStr } from "./notion";
 import { uuidv5 } from "./satei-notify";
 import { DIGEST_GROUP_ID, staffDigestOn } from "./staff-digest";
 import {
   askNudge,
+  chunkToMessage,
   flushForward,
   handleDigestReply,
   handleSdPostback,
+  isBareCompletion,
   recordReplies,
   saveMorningSnapshot,
   statusWhat,
@@ -22,6 +24,7 @@ import {
   type SdKv,
 } from "./staff-digest-reply";
 import { applyStatusCommand, followupEnabled, type StatusDeps } from "./task-status";
+import { parseCandidateCommand } from "./task-candidate";
 import { parseStatusCommand } from "./task-status-command";
 import { statusDeps } from "./task-status-wire";
 
@@ -65,15 +68,19 @@ const pushOwner = (to: string, messages: unknown[], key: string) =>
 const within = <T>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
   Promise.race([p, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
 
+/** 名簿（3秒まで。引けなければ空＝名前なしで続ける） */
+async function roster(): Promise<Member[]> {
+  try {
+    return await within(loadMembers(), NOTE_TIMEOUT_MS, [] as Member[]);
+  } catch {
+    return [];
+  }
+}
+
 /** 名簿の名前（LINE のプロフィールは読まない）。分からなければ null */
 async function senderName(userId: string | null | undefined): Promise<string | null> {
   if (!userId) return null;
-  try {
-    const members = await within(loadMembers(), NOTE_TIMEOUT_MS, []);
-    return members.find((m) => m.userIds.includes(userId))?.name ?? null;
-  } catch {
-    return null;
-  }
+  return (await roster()).find((m) => m.userIds.includes(userId))?.name ?? null;
 }
 
 /**
@@ -93,8 +100,19 @@ async function noteItems(userId: string | null | undefined, items: ReplyItem[], 
   try {
     await within(
       (async () => {
-        const who = name === undefined ? await senderName(userId) : name;
-        await recordReplies({ userId, name: who, items, now: Date.now() }, { kv: realKv, owner: inboxOwner(), log });
+        // 名簿で、送り主が仕分ける人と同じ人（別アカウント）かも見る（同じ人の返事は知らせに載せない）
+        const me = userId ? (await roster()).find((m) => m.userIds.includes(userId)) : undefined;
+        const owner = inboxOwner();
+        await recordReplies(
+          {
+            userId,
+            name: name === undefined ? me?.name ?? null : name,
+            items,
+            now: Date.now(),
+            sameAsOwner: Boolean(owner && me?.userIds.includes(owner)),
+          },
+          { kv: realKv, owner, log }
+        );
       })(),
       NOTE_TIMEOUT_MS,
       undefined
@@ -141,8 +159,12 @@ export async function tryDigestProgressReply(o: {
     return await handleDigestReply(o, {
       now: Date.now,
       kv: realKv,
-      // route.ts と同じ順：状況の言葉（待ち・延期・不要）を先に見てから、番号での完了
-      isKnown: (line) => (followup && parseStatusCommand(line, today) !== null) || o.parseCompletion(line) !== null,
+      // route.ts と同じ順：状況の言葉（待ち・延期・不要）を先に見てから、番号での完了。
+      // 完了は、番号＋完了の言葉だけの形に限る（「3 契約済みです」は進捗として残す。まとめを引用した返信の中だけの決まり）
+      isKnown: (line) =>
+        (followup && parseStatusCommand(line, today) !== null) || (isBareCompletion(line) && o.parseCompletion(line) !== null),
+      // 候補への返事（「1 登録」「2 なし」）は、まとめを引用していても今までの流れに任せる
+      isOther: (line) => parseCandidateCommand(line) !== null,
       runKnown: async (line) => {
         const cmd = followup ? parseStatusCommand(line, today) : null;
         if (cmd) {
@@ -213,7 +235,9 @@ export async function handleStaffDigestPostback(
     kv: realKv,
     owner: inboxOwner(),
     now: Date.now,
-    pushGroup: (chunks) => pushLineChunksWithIds(DIGEST_GROUP_ID, chunks),
+    // retry key つき・時間の上限つき（line.ts の既定 5 秒）
+    pushGroup: (chunk, key) =>
+      pushMessagesWithRetryKeyIds(DIGEST_GROUP_ID, [chunkToMessage(chunk)], uuidv5(key, GS_RETRY_NAMESPACE)),
     reply,
     log,
   });

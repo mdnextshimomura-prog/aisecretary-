@@ -341,14 +341,20 @@ export function inboxCarousel(cs: Candidate[], nameOf: NameOf): { card: FlexMess
  */
 export async function notifyInboxNew(
   c: Candidate,
-  over: { push?: (to: string, text: string, card: FlexMessage) => Promise<boolean>; members?: () => Promise<Member[]>; log?: (l: string) => void; env?: Record<string, string | undefined> } = {},
+  over: { push?: (to: string, text: string, card: FlexMessage) => Promise<boolean>; members?: () => Promise<Member[]>; log?: (l: string) => void; env?: Record<string, string | undefined>; membersTimeoutMs?: number; pushTimeoutMs?: number } = {},
 ): Promise<"sent" | "failed" | "off"> {
   const log = over.log ?? ((l: string) => console.log(l));
   const owner = inboxOwner(over.env ?? process.env);
   if (!owner) return "off";
+  // webhook を止めない：名簿は3秒（だめなら名前なしで出す）、送信は5秒まで待つ（過ぎたら送れなかった扱い。候補は残る）
+  const within = <T>(p: Promise<T>, ms: number, fallback: T): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<T>((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
+    return Promise.race([p, late]).finally(() => clearTimeout(timer));
+  };
   try {
-    const members = await (over.members ?? loadMembers)().catch(() => [] as Member[]);
-    const ok = await (over.push ?? pushTextAndCard)(owner, MSG_INBOX_NEW, inboxCard(c, nameResolver(members)));
+    const members = await within((over.members ?? loadMembers)().catch(() => [] as Member[]), over.membersTimeoutMs ?? 3_000, [] as Member[]);
+    const ok = await within((over.push ?? pushTextAndCard)(owner, MSG_INBOX_NEW, inboxCard(c, nameResolver(members))), over.pushTimeoutMs ?? 5_000, false);
     log(ok ? "[group-inbox] new sent 1" : "[group-inbox] new push-failed");
     return ok ? "sent" : "failed";
   } catch {
@@ -515,6 +521,12 @@ export interface CandidateActionDeps {
     c: Candidate,
     replyToken: string,
     groupId: string,
+    /**
+     * fromInbox：仕分ける人の1対1（GROUP_INBOX）から押された登録。初動確認の聞き返しをしない
+     * （聞き返しは1対1に出るのに、回答待ちはグループ・依頼者に付くので、依頼者の次の発言が回答として読まれてしまう）。
+     * グループの中で押されたときは渡さない（今までどおり）
+     */
+    opts?: { fromInbox?: boolean },
   ): Promise<RegisterResult>;
   reply(replyToken: string, text: string): Promise<unknown>;
   now(): number;
@@ -543,6 +555,7 @@ export async function handleCandidateAction(
   let c: Candidate | null;
   let members: Member[];
   let regGroup = groupId ?? "";
+  let fromInbox = false;
   try {
     const now = deps.now();
     c = await deps.get(action.id, now);
@@ -560,6 +573,7 @@ export async function handleCandidateAction(
       return;
     }
     regGroup = groupId ?? deps.groupOf(c);
+    fromInbox = ownerDm;
     members = await deps.members().catch(() => [] as Member[]);
     if (!canOperateCandidate(actorId, c, members)) {
       await say(MSG_CAND_FORBIDDEN, "forbidden");
@@ -594,7 +608,9 @@ export async function handleCandidateAction(
   }
   let r: RegisterResult;
   try {
-    r = await deps.register(c, replyToken, regGroup);
+    r = fromInbox
+      ? await deps.register(c, replyToken, regGroup, { fromInbox: true })
+      : await deps.register(c, replyToken, regGroup);
   } catch {
     await deps.releaseRegister(c.id).catch(() => undefined);
     await say(MSG_CAND_ERROR, "error");

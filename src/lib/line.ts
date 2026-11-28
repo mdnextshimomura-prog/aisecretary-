@@ -290,9 +290,11 @@ export async function pushLineChunks(
 // pushLineChunks と同じ中身を同じ順で送り、送れた通数と、送ったメッセージの ID（応答の sentMessages[0].id）を返す
 // （担当へのまとめ STAFF_DIGEST：まとめを引用した返信の照合に ID を控える）。
 // pushLineChunks・pushLineMessageWithMentions は変えていない。例外は投げない。本文・宛先はログに出さない。
+// timeoutMs を渡したときだけ、1通ごとに時間の上限を付ける（毎分の見回りを止めないため。渡さなければ今までと同じ）。
 export async function pushLineChunksWithIds(
   to: string,
-  chunks: Array<{ text: string; mentions: Record<string, string> }>
+  chunks: Array<{ text: string; mentions: Record<string, string> }>,
+  timeoutMs?: number
 ): Promise<{ sent: number; ids: string[] }> {
   let sent = 0;
   const ids: string[] = [];
@@ -322,6 +324,7 @@ export async function pushLineChunksWithIds(
           Authorization: `Bearer ${ACCESS_TOKEN}`,
         },
         body: JSON.stringify({ to, messages: [message] }),
+        ...(timeoutMs !== undefined ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
       });
       if (!res.ok) {
         console.error("LINE push失敗:", res.status);

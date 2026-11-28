@@ -565,6 +565,11 @@ async function registerTaskFromText(
     buttons?: boolean;
     /** 発言者の［タスクを足す］の印を使うか（B1 Task 3。その人の @秘書 の依頼の登録＝聞き返しメニューからだけ） */
     dealPick?: boolean;
+    /**
+     * 初動確認の聞き返しをしない（GROUP_INBOX：仕分ける人の1対1から登録したときだけ）。
+     * 聞き返しは1対1に出るのに、回答待ちはグループ・依頼者に付くので、依頼者の次の発言が回答として読まれてしまうため
+     */
+    noClarify?: boolean;
   } = {}
 ): Promise<"ok" | "retry" | "failed" | "duplicate"> {
   // 通常経路と同じ予約を通す。ここを素通しにすると、同時到達で
@@ -646,7 +651,7 @@ async function registerTaskFromText(
   // 通常経路と同じ初動確認をかける。ここを飛ばすと、曖昧確認メニュー経由の
   // 依頼だけ聞き返しが働かず、同じ「これ買いたい」でも挙動が変わってしまう。
   let reply: string;
-  if (!shouldClarifyFor(senderId)) {
+  if (opts.noClarify || !shouldClarifyFor(senderId)) {
     reply = buildTaskRegisteredMessage(parsed);
   } else {
     try {
@@ -760,12 +765,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // 候補の［登録する］は、文字の「1 登録」と同じ登録（registerTaskFromText）に回す（B1 Task 2）
       await handleTaskPostbackEvent(event, {
         candidates: {
-          register: (c, token, groupId) =>
+          register: (c, token, groupId, o) =>
             registerTaskFromText(c.text, token, groupId, c.id, c.senderId ?? undefined, {
               assignee: c.assignee,
               assigneeUserId: c.assigneeUserId,
               baseMs: c.createdAt,
               buttons: true,
+              // 仕分ける人の1対1（GROUP_INBOX）からの登録は、初動確認の聞き返しをしない
+              ...(o?.fromInbox ? { noClarify: true } : {}),
             }),
         },
       }).catch(() => undefined);

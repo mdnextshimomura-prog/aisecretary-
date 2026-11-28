@@ -87,7 +87,7 @@ function footerOf(followup: boolean): string {
     (followup
       ? "\n相手待ち：「2待ち 売主の書類 金曜」\n期日を変える：「3延期 10/20」\nやらなくてよい：「3不要」"
       : "") +
-    "\n進み具合を書く：「3 アポ取れました。来週火曜です」"
+    "\n進み具合を書く：「3 アポ取れました。来週火曜です」（番号のあとに空白）"
   );
 }
 
@@ -188,7 +188,9 @@ export function selectEvening<T extends EveTask>(tasks: T[], today: string, tomo
  */
 export function assignEveningNumbers<T extends EveTask>(
   selected: T[],
-  all: T[]
+  all: T[],
+  /** 朝のまとめで使った、いちばん大きい番号（朝に載せて、そのあと待ち・延期で外れたタスクの番号と重ねないため） */
+  floor: number = 0
 ): { numbers: Map<string, number>; fresh: Array<{ id: string; n: number }> } {
   const numbers = new Map<string, number>();
   const used = new Set<number>();
@@ -199,7 +201,7 @@ export function assignEveningNumbers<T extends EveTask>(
       used.add(t.remindNumber);
     } else need.push(t);
   }
-  let next = Math.max(0, ...all.map((t) => t.remindNumber ?? 0)) + 1;
+  let next = Math.max(0, floor, ...all.map((t) => t.remindNumber ?? 0)) + 1;
   const fresh: Array<{ id: string; n: number }> = [];
   for (const t of need) {
     numbers.set(t.id, next);
@@ -215,6 +217,8 @@ export const DIGEST_MSG_TTL_SEC = 3 * 24 * 60 * 60;
 const EVE_MARK_TTL_SEC = 2 * 24 * 60 * 60;
 /** まとめのメッセージの控え（段階3 が引用リプライの照合に読む）。値は {at, slot} */
 export const digestMsgKey = (messageId: string) => `staffdigest:msg:${messageId}`;
+/** 朝のまとめに出したタスクの控え（段階3 が書く。値は [{id, n, …}]。day は JST の "YYYY-MM-DD"） */
+export const amKey = (day: string) => `staffdigest:am:${day}`;
 /** 夕方の「今日は送った」印（day は JST の "YYYY-MM-DD"） */
 export const digestEveKey = (day: string) => `staffdigest:eve:${day}`;
 
@@ -250,8 +254,10 @@ export interface DigestSendDeps {
   saveIds(ids: string[], slot: DigestSlot, now: number): Promise<void>;
   log(line: string): void;
 }
+/** まとめの送信は1通ごとにここまで（毎分の見回り・朝の cron を止めない） */
+const DIGEST_PUSH_TIMEOUT_MS = 10_000;
 const realSendDeps: DigestSendDeps = {
-  push: (chunks) => pushLineChunksWithIds(LINE_GROUP_ID, chunks),
+  push: (chunks) => pushLineChunksWithIds(LINE_GROUP_ID, chunks, DIGEST_PUSH_TIMEOUT_MS),
   saveIds: (ids, slot, now) => saveDigestMessageIds(ids, slot, now),
   log: (l) => console.log(l),
 };
@@ -305,6 +311,26 @@ export interface EveningDeps extends DigestSendDeps {
    * all＝いま未完了のタスク（朝と同じ引き方）。無ければ何もしない。失敗しても夕方のまとめは送る
    */
   beforeSend?(day: string, all: EveTask[]): Promise<void>;
+  /** 朝のまとめで使ったいちばん大きい番号（朝の控え staffdigest:am:<日付> から。無ければ 0） */
+  morningMax?(day: string): Promise<number>;
+  /** 送る前の準備（休業日・タスク・番号・催促のカード）に使ってよい時間。省けば 25 秒（テスト用） */
+  budgetMs?: number;
+}
+
+/** 送る前の準備の上限。印を取ってから、ここまでに「送り始める」か「印を外す」 */
+const PRE_SEND_BUDGET_MS = 25_000;
+
+/** 時間切れなら TimeoutError で投げる（待っていた処理は止めないが、結果は使わない） */
+function bounded<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const e = new Error("timeout");
+      e.name = "TimeoutError";
+      reject(e);
+    }, Math.max(0, ms));
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
 }
 
 /** 朝のリマインド（sendDailyReminders）と同じ引き方・同じ絞り方 */
@@ -331,6 +357,11 @@ function realEveningDeps(): EveningDeps {
     setNumber: setRemindNumber,
     // 読み込みの輪を作らないよう、使うときに読む（staff-digest-reply-wire は このファイルを読む）
     beforeSend: async (day, all) => (await import("./staff-digest-reply-wire")).askNudgeBeforeEvening(day, all),
+    morningMax: async (day) => {
+      const v = await kv.get(amKey(day));
+      if (!Array.isArray(v)) return 0;
+      return Math.max(0, ...v.map((e) => (typeof (e as { n?: unknown } | null)?.n === "number" ? (e as { n: number }).n : 0)));
+    },
   };
 }
 
@@ -351,25 +382,33 @@ export async function runStaffDigestEveningOnTick(
   const d = deps ?? realEveningDeps();
   const today = jstDay(now);
   const tomorrow = jstDay(now + 86_400_000);
+  // 印を取ったあとの準備には時間の上限を付ける（見回りが途中で切られると、印だけ残ってその日は送られないため）。
+  // 上限の 4/5 までに休業日・タスク・番号がそろわなければ印を外してやり直す。残りの 1/5 は催促のカード
+  const started = Date.now();
+  const budget = d.budgetMs ?? PRE_SEND_BUDGET_MS;
+  const slice = Math.floor(budget / 5);
+  const left = () => budget - (Date.now() - started);
   if (!(await d.claim(today))) return "taken";
-  if (await d.closedToday(today)) {
-    d.log("[staff-digest] eve closed");
-    return "closed";
-  }
 
   let chunks: Chunk[];
   let count: number;
   let all: EveTask[];
   try {
-    all = await d.fetchTasks();
+    if (await bounded(d.closedToday(today), left() - slice)) {
+      d.log("[staff-digest] eve closed");
+      return "closed";
+    }
+    all = await bounded(d.fetchTasks(), left() - slice);
     const selected = selectEvening(all, today, tomorrow);
     if (selected.length === 0) {
       d.log("[staff-digest] eve empty");
       return "empty";
     }
-    const { numbers, fresh } = assignEveningNumbers(selected, all);
+    // 朝の控えが読めなければ 0（＝引いてきたタスクの番号だけで決める。足す前と同じ）
+    const floor = d.morningMax ? await bounded(d.morningMax(today), left() - slice).catch(() => 0) : 0;
+    const { numbers, fresh } = assignEveningNumbers(selected, all, floor);
     // 番号を Notion に書いてから送る（先に返信されても引けるように。朝と同じ順）
-    await Promise.all(fresh.map((f) => d.setNumber(f.id, f.n)));
+    await bounded(Promise.all(fresh.map((f) => d.setNumber(f.id, f.n))), left() - slice);
     const built = buildStaffDigest({ slot: "eve", tasks: selected, today, tomorrow, followup: d.followup, numbers });
     chunks = built.chunks;
     count = built.ordered.length;
@@ -377,12 +416,17 @@ export async function runStaffDigestEveningOnTick(
     // まだ何も送っていないので、印を外して次の見回りでやり直す（17時台のあいだ）
     const name = (err as { name?: unknown } | null)?.name;
     d.log(`[staff-digest] eve fetch-failed ${typeof name === "string" ? name : "Error"}`);
-    await d.release(today).catch(() => undefined);
+    await bounded(d.release(today), 3_000).catch(() => undefined);
     return "failed";
   }
 
   // 段階3：夕方のまとめの前に、朝のまとめに返事の無いタスクを下村さんへ知らせる（失敗しても夕方のまとめは送る）
-  if (d.beforeSend) await d.beforeSend(today, all).catch(() => d.log("[staff-digest] nudge ask-failed"));
+  // 時間がかかりすぎたら待つのをやめて、夕方のまとめを送る
+  if (d.beforeSend) {
+    await bounded(d.beforeSend(today, all), Math.max(1_000, Math.min(slice, left()))).catch(() =>
+      d.log("[staff-digest] nudge ask-failed")
+    );
+  }
 
   // 送り始めたあとは印を残す（届いたか分からないものを送り直さない）
   return (await sendDigestChunks("eve", chunks, count, now, d)) > 0 ? "sent" : "failed";

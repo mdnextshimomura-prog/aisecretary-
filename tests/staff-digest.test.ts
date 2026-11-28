@@ -70,7 +70,7 @@ const SAMPLE: Row[] = [
         "相手待ち：「2待ち 売主の書類 金曜」",
         "期日を変える：「3延期 10/20」",
         "やらなくてよい：「3不要」",
-        "進み具合を書く：「3 アポ取れました。来週火曜です」",
+        "進み具合を書く：「3 アポ取れました。来週火曜です」（番号のあとに空白）",
       ].join("\n")
     );
     assert.deepEqual(d.chunks[0].mentions, { m1: U1 });
@@ -101,7 +101,7 @@ const SAMPLE: Row[] = [
     const text = d.chunks[0].text;
     assert.ok(text.includes("1. （m1）の件（本日期限）［A（B）］\n2. 天満ハイツの鍵（本日期限）\n3. 条件の確認（回答待ち）"));
     assert.ok(!text.includes("待ち："));
-    assert.ok(text.endsWith("例：「1済」「1,2完了」\n進み具合を書く：「3 アポ取れました。来週火曜です」"));
+    assert.ok(text.endsWith("例：「1済」「1,2完了」\n進み具合を書く：「3 アポ取れました。来週火曜です」（番号のあとに空白）"));
     assert.deepEqual(d.chunks[0].mentions, {});
   });
 
@@ -231,6 +231,45 @@ const SAMPLE: Row[] = [
     let called = 0;
     assert.equal(await D.runStaffDigestEveningOnTick(EVE, ON, { ...g.deps, beforeSend: async () => { called++; } }), "empty");
     assert.equal(called, 0);
+  });
+
+  await t("夕方の番号：朝のまとめで使った番号（朝の控え）より後ろから振る（待ち・延期で一覧から外れたタスクの番号と重ねない）", async () => {
+    // 朝は 1〜5 を出した。3〜5 は待ち・延期で夕方の一覧に無いが、Notion には番号が残っている
+    const r = D.assignEveningNumbers([EVE_TASKS[0], EVE_TASKS[1]], EVE_TASKS, 5);
+    assert.deepEqual(r.fresh, [{ id: "b", n: 6 }]);
+    // 控えが無い（0）なら足す前と同じ
+    assert.deepEqual(D.assignEveningNumbers([EVE_TASKS[0], EVE_TASKS[1]], EVE_TASKS).fresh, [{ id: "b", n: 2 }]);
+    const f = fake({ tasks: EVE_TASKS });
+    assert.equal(await D.runStaffDigestEveningOnTick(EVE, ON, { ...f.deps, morningMax: async () => 5 }), "sent");
+    assert.deepEqual(f.numbered, [["b", 6]]);
+    assert.ok(f.pushed[0][0].text.includes("6. 今日入った本日期限"));
+    // 朝の控えを読めなくても送る（引いてきたタスクの番号だけで決める）
+    const g = fake({ tasks: EVE_TASKS });
+    assert.equal(await D.runStaffDigestEveningOnTick(EVE, ON, { ...g.deps, morningMax: async () => { throw new Error("kv"); } }), "sent");
+    assert.deepEqual(g.numbered, [["b", 2]]);
+  });
+
+  await t("送る前の準備が時間切れなら、印を外してやり直す（印だけ残ってその日送られない、を防ぐ）。催促のカードが遅くてもまとめは送る", async () => {
+    const never = new Promise<never>(() => undefined);
+    let hang = true;
+    const f = fake({ tasks: () => (hang ? never : Promise.resolve(EVE_TASKS)) });
+    const fd = { ...f.deps, budgetMs: 50 };
+    assert.equal(await D.runStaffDigestEveningOnTick(EVE, ON, fd), "failed");
+    assert.deepEqual(f.logs, ["[staff-digest] eve fetch-failed TimeoutError"]);
+    assert.equal(f.claimed.size, 0);
+    assert.equal(f.pushed.length, 0);
+    hang = false;
+    assert.equal(await D.runStaffDigestEveningOnTick(EVE + MIN, ON, fd), "sent");
+    // 番号を書くのが終わらないときも同じ（まだ何も送っていない）
+    const g = fake({ tasks: EVE_TASKS });
+    assert.equal(await D.runStaffDigestEveningOnTick(EVE, ON, { ...g.deps, budgetMs: 50, setNumber: () => never }), "failed");
+    assert.equal(g.claimed.size + g.pushed.length, 0);
+    // 催促のカード（beforeSend）が返ってこなくても、待つのをやめて送る
+    const h = fake({ tasks: EVE_TASKS });
+    const t0 = Date.now();
+    assert.equal(await D.runStaffDigestEveningOnTick(EVE, ON, { ...h.deps, budgetMs: 50, beforeSend: () => never }), "sent");
+    assert.ok(Date.now() - t0 < 5_000);
+    assert.deepEqual(h.logs, ["[staff-digest] nudge ask-failed", "[staff-digest] eve sent 2"]);
   });
 
   await t("1通も送れなかったら failed（印は残す＝送り直さない）。ID は控えない", async () => {

@@ -35,14 +35,15 @@ const env = (inbox: boolean) => {
   const mk = (c: Candidate | null) => {
     const replies: string[] = [];
     const reg: Array<{ id: string; group: string }> = [];
+    const regArgs: unknown[][] = [];
     const removed: string[] = [];
     const deps: CandidateActionDeps = {
       get: async () => c, groupOf: (x) => x.groupId ?? G1, claimRegister: async () => true, releaseRegister: async () => undefined,
       remove: async (id) => { removed.push(id); }, hold: async () => undefined, members: async () => members as never,
-      register: async (x, _t, g) => { reg.push({ id: x.id, group: g }); return "ok"; },
+      register: async (...args) => { const [x, , g] = args; regArgs.push(args.slice(3)); reg.push({ id: x.id, group: g }); return "ok"; },
       reply: async (_t, text) => { replies.push(text); }, now: () => NOW, log: () => undefined,
     };
-    return { deps, replies, reg, removed };
+    return { deps, replies, reg, regArgs, removed };
   };
 
   await t("スイッチ：GROUP_INBOX=1・候補カード on・仕分ける人の ID が正しいときだけ on", async () => {
@@ -67,6 +68,16 @@ const env = (inbox: boolean) => {
     assert.equal(await cc.notifyInboxNew(cand("m1"), { push: async () => { throw new Error("x"); }, members: async () => [], log: (l) => logs.push(l) }), "failed");
     assert.deepEqual(logs, ["[group-inbox] new sent 1", "[group-inbox] new push-failed"]);
   });
+  await t("知らせ：名簿が返ってこなければ名前なしで出す・送信が返ってこなければ待つのをやめる（webhook を止めない）", async () => {
+    env(true);
+    const never = new Promise<never>(() => undefined);
+    const logs: string[] = [];
+    let pushed = 0;
+    assert.equal(await cc.notifyInboxNew(cand("m1"), { push: async () => { pushed++; return true; }, members: () => never, membersTimeoutMs: 20, log: (l) => logs.push(l) }), "sent");
+    assert.equal(pushed, 1);
+    assert.equal(await cc.notifyInboxNew(cand("m1"), { push: () => never, members: async () => [], pushTimeoutMs: 20, log: (l) => logs.push(l) }), "failed");
+    assert.deepEqual(logs, ["[group-inbox] new sent 1", "[group-inbox] new push-failed"]);
+  });
   await t("on：その場で聞くカード（グループ）は出さない", async () => {
     env(false); assert.equal(cc.instantCandidateActive(), true);
     env(true); assert.equal(cc.instantCandidateActive(), false);
@@ -77,6 +88,8 @@ const env = (inbox: boolean) => {
     await cc.handleCandidateAction({ op: "cr", id: "m1" }, OWNER, undefined, "rt", x.deps);
     assert.deepEqual(x.reg, [{ id: "m1", group: G1 }]);
     assert.deepEqual(x.removed, ["m1"]);
+    // 1対1からの登録は、初動確認の聞き返しをしない印を付けて渡す（聞き返しが1対1に出て、回答待ちがグループの依頼者に付くのを防ぐ）
+    assert.deepEqual(x.regArgs, [[{ fromInbox: true }]]);
   });
   await t("押す（on・仕分ける人の1対1）：［登録しない］は候補を消す", async () => {
     env(true);
@@ -100,6 +113,12 @@ const env = (inbox: boolean) => {
     const x = mk(cand("m1"));
     await cc.handleCandidateAction({ op: "cr", id: "m1" }, REQ, G1, "rt", x.deps);
     assert.deepEqual(x.reg, [{ id: "m1", group: G1 }]);
+    // グループの中で押した登録には印を付けない（今までどおり3つの引数だけ）
+    assert.deepEqual(x.regArgs, [[]]);
+    // 仕分ける人がグループの中で押したときも、グループの登録として扱う
+    const y = mk(cand("m1"));
+    await cc.handleCandidateAction({ op: "cr", id: "m1" }, OWNER, G1, "rt", y.deps);
+    assert.deepEqual(y.regArgs, [[]]);
   });
   const at17 = Date.UTC(2026, 10, 28, 8, 5); // JST 17:05
   const askDeps = (list: Array<Candidate | null>, pushes: Array<{ to: string; text: string; card: boolean }>) => ({

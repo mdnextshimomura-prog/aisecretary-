@@ -14,7 +14,7 @@
  */
 import type { Chunk } from "./chunk";
 import { sanitizeForTextV2 } from "./line";
-import { DIGEST_MSG_TTL_SEC, digestMsgKey, staffDigestOn } from "./staff-digest";
+import { amKey, DIGEST_MSG_TTL_SEC, digestMsgKey, staffDigestOn } from "./staff-digest";
 import { ALT_TEXT_MAX, FLEX_LABEL_MAX, POSTBACK_TEXT_MAX, pressedText, type FlexMessage } from "./task-card";
 import type { StatusBody } from "./task-status-command";
 
@@ -44,13 +44,13 @@ export const FWD_GUARD_KEY = "staffdigest:fwd:guard";
 export const FWD_INTERVAL_SEC = 30 * 60;
 /** 1通に載せる上限（残りは次の回） */
 export const FWD_MAX = 30;
-/** 朝のまとめに出したタスク（day は JST の "YYYY-MM-DD"。2日） */
-export const amKey = (day: string) => `staffdigest:am:${day}`;
+/** 朝のまとめに出したタスク（day は JST の "YYYY-MM-DD"。2日。鍵は staff-digest.ts＝夕方の番号決めも読む） */
+export { amKey };
 /** その日に返事のあったタスクの ID（集合。2日） */
 export const answeredKey = (day: string) => `staffdigest:answered:${day}`;
 /** ［催促する］のカードに載せたタスク（2日） */
 export const nudgeKey = (day: string) => `staffdigest:nudge:${day}`;
-/** 催促を送った印（SET NX。2日） */
+/** 催促の印（SET NX。2日。値は送れたと分かったら "sent"、それまでは "trying"） */
 export const nudgedKey = (day: string) => `staffdigest:nudged:${day}`;
 
 const JST_MS = 9 * 60 * 60 * 1000;
@@ -70,17 +70,17 @@ export type ReplyEntry =
 const normalize = (s: string) =>
   s.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0)).replace(/　/g, " ").trim();
 
-// 番号（「3」「1,2」）のあとに区切り（空白・. ：）など）を置くか、区切りなしで文が続く形。
-// 区切りなしのときは、数え方・時刻・日付の字が続くもの（「3件」「10時」「12/3」「3,000万」）を番号と読まない。
-const PROGRESS_RE = /^(\d{1,2}(?:[,、，・]\d{1,2})*)(?![\d,，、・])(\s*[.．:：）)]\s*|\s+)?(\S[\s\S]*)$/;
-const UNIT_HEAD_RE = /^[件時日月年階万円号分名人回社週番個枚本通度割坪㎡%％\/／:：~〜\-ー]/;
+// 番号（「3」「1,2」）のあとに、必ず区切り（空白か . ． : ： ) ） 、）を置いた形だけ読む。
+// 区切りの無い「3ヶ月後に…」「1つ確認ですが」「3件…」「10時…」「12/3…」「3,000万…」は番号と読まない。
+const PROGRESS_RE = /^(\d{1,2}(?:[,、，・]\d{1,2})*)(\s*[.．:：）)、]\s*|\s+)(\S[\s\S]*)$/;
 const BODY_MAX = 1500;
 
 function parseProgressLine(line: string): { numbers: number[]; body: string } | null {
   const m = line.match(PROGRESS_RE);
   if (!m) return null;
   const body = m[3].trim();
-  if (!m[2] && UNIT_HEAD_RE.test(body)) return null;
+  // 「3.5万円」「10:30に」＝小数・時刻（区切りの記号のすぐ後ろが数字）は番号と読まない
+  if (/^[.．:：]$/.test(m[2]) && /^\d/.test(body)) return null;
   const nums = (m[1].match(/\d+/g) ?? []).map(Number);
   if (nums.some((n) => n < 1 || n > 99)) return null;
   const numbers = nums.filter((n, i) => nums.indexOf(n) === i);
@@ -92,9 +92,15 @@ function parseProgressLine(line: string): { numbers: number[]; body: string } | 
  *   ・先頭の行は、今の言葉（「1済」「2待ち …」。isKnown が決める）か「番号＋文」であること
  *   ・番号で始まらない行は、直前の進捗の続き（今の言葉の行のあとに文が続く形は読まない）
  */
-export function parseDigestReply(text: string, isKnown: (line: string) => boolean): ReplyEntry[] | null {
+export function parseDigestReply(
+  text: string,
+  isKnown: (line: string) => boolean,
+  /** ほかの機能の言葉（候補への「1 登録」「2 なし」）の行か。1行でもあれば読まない（今までの流れに任せる） */
+  isOther?: (line: string) => boolean
+): ReplyEntry[] | null {
   const lines = text.split(/\r?\n/).map(normalize).filter((l) => l.length > 0);
   if (lines.length === 0) return null;
+  if (isOther && lines.some(isOther)) return null;
   const entries: ReplyEntry[] = [];
   for (const line of lines) {
     if (isKnown(line)) {
@@ -113,6 +119,15 @@ export function parseDigestReply(text: string, isKnown: (line: string) => boolea
   if (!entries.some((e) => e.kind === "progress")) return null;
   for (const e of entries) if (e.kind === "progress") e.body = cut(e.body, BODY_MAX);
   return entries;
+}
+
+// 番号＋完了の言葉だけ（「3済」「3 済」「3完了」「3おわった」「1,2完了」「3 完了しました」）。
+// まとめを引用した返信の中では、これだけを完了として読み、「3 契約済みです」「3 連絡済みです」のように
+// 文になっているものは進捗として残す（引用の無い返事の読み方は route.ts のまま変えない）。
+const BARE_DONE_RE =
+  /^\d{1,2}(?:[\s,、，・]+\d{1,2})*\s*[.．:：）)、]?\s*(済み?|完了|終わった|終わり|終わりました|おわった|おわり|おわりました|終了|done)(です|でした|しました|ました)?[。.!！\s]*$/i;
+export function isBareCompletion(line: string): boolean {
+  return BARE_DONE_RE.test(normalize(line));
 }
 
 // ── 1. 進捗の取り込み ──
@@ -139,6 +154,8 @@ export interface DigestReplyDeps {
   kv: Pick<SdKv, "get">;
   /** 今の言葉（済・完了・待ち・延期・不要）として読める行か。副作用なし */
   isKnown(line: string): boolean;
+  /** ほかの機能の言葉（候補への「1 登録」「2 なし」）の行か。1行でもあれば、この返信は受けない */
+  isOther?(line: string): boolean;
   /** 今の言葉の行を、今ある処理で実行する（1通に進捗と混ざっていたときだけ呼ぶ） */
   runKnown(line: string): Promise<{ text: string; changed: ReplyItem[] }>;
   findByNumber(n: number): Promise<{ id: string; title: string } | null>;
@@ -167,7 +184,7 @@ export async function handleDigestReply(
   if (!input.groupId || !input.quotedMessageId) return pass;
   let entries: ReplyEntry[] | null;
   try {
-    entries = parseDigestReply(input.text, deps.isKnown);
+    entries = parseDigestReply(input.text, deps.isKnown, deps.isOther);
   } catch {
     return pass;
   }
@@ -264,13 +281,20 @@ export interface RecordDeps {
  * 下村さん本人の返事は知らせに載せない。KV が落ちていても投げない。off なら KV を触らない。
  */
 export async function recordReplies(
-  input: { userId?: string | null; name: string | null; items: ReplyItem[]; now: number },
+  input: {
+    userId?: string | null;
+    name: string | null;
+    items: ReplyItem[];
+    now: number;
+    /** 名簿で仕分ける人と同じ人（別アカウント）か。true なら知らせに載せない */
+    sameAsOwner?: boolean;
+  },
   deps: RecordDeps
 ): Promise<void> {
   if (!staffDigestOn(deps.env ?? process.env) || input.items.length === 0) return;
   try {
     await deps.kv.sadd(answeredKey(jstDay(input.now)), input.items.map((i) => i.id), DAY_TTL_SEC);
-    if (deps.owner && input.userId !== deps.owner) {
+    if (deps.owner && input.userId !== deps.owner && !input.sameAsOwner) {
       const rows: FwdRow[] = input.items.map((i) => ({
         at: input.now,
         who: input.name || null,
@@ -511,7 +535,20 @@ const NUDGE_ASK = "朝の件、進み具合を返信で教えてください";
 const NUDGE_FOOTER = "朝のまとめか、このメッセージに返信（リプライ）で、番号をつけて答えてください";
 const MAX_MENTIONS = 20;
 
-/** グループへ出す催促（文字だけ・担当ごとに1行・メンション）。1通にまとめる */
+/** まとめの1通（Chunk）を LINE のメッセージにする（メンションがあれば textV2。line.ts の pushLineChunksWithIds と同じ形） */
+export function chunkToMessage(c: Chunk): Record<string, unknown> {
+  const keys = Object.keys(c.mentions);
+  if (keys.length === 0) return { type: "text", text: c.text };
+  return {
+    type: "textV2",
+    text: c.text,
+    substitution: Object.fromEntries(
+      keys.map((k) => [k, { type: "mention", mentionee: { type: "user", userId: c.mentions[k] } }])
+    ),
+  };
+}
+
+/** グループへ出す催促（文字だけ・担当ごとに1行・メンション）。必ず1通にまとめる（retry key を1つにするため） */
 export function nudgeChunks(list: AmEntry[]): Chunk[] {
   const { groups, unassigned } = groupByAssignee(list);
   const mentions: Record<string, string> = {};
@@ -538,7 +575,8 @@ export const MSG_SD_OWNER_ONLY = "このボタンを押せるのは下村さん�
 export const MSG_SD_STALE = "このカードは古くなりました（催促できるのは、その日のうちだけです）";
 export const MSG_SD_NONE = "もう全員から返事が届いています";
 export const MSG_SD_ALREADY = "もう送ってあります";
-export const MSG_SD_FAILED = "⚠️ 送れなかったようです。グループに出ていなければ、もう一度押してください";
+export const MSG_SD_FAILED = "⚠️ 送れませんでした。もう一度押してください";
+export const MSG_SD_UNKNOWN = "⚠️ 送れたか確かめられませんでした。グループに出ていなければ、もう一度押してください";
 export const msgSdSent = (n: number) => `📣 グループへ催促を送りました（${n}件）`;
 
 export interface NudgeDeps {
@@ -546,15 +584,22 @@ export interface NudgeDeps {
   kv: Pick<SdKv, "get" | "set" | "setNx" | "del" | "smembers">;
   owner: string | null;
   now(): number;
-  /** 会社のグループへ順に送り、送れた通数とメッセージ ID を返す */
-  pushGroup(chunks: Chunk[]): Promise<{ sent: number; ids: string[] }>;
+  /**
+   * 会社のグループへ retry key つきで1通送る（key は retry key の元になる文字列。時間の上限つき）。
+   * HTTP の状態（結果不明は null）と、送れたメッセージの ID を返す
+   */
+  pushGroup(chunk: Chunk, key: string): Promise<{ status: number | null; ids: string[] }>;
   reply(text: string): Promise<void>;
   log(line: string): void;
 }
 
 /**
- * ［催促する］（v1|sd|<JSTの日付>）。押せるのは仕分ける人だけ・その日のうちだけ・1日1回（二度押しは「もう送ってあります」）。
- * カードを出したあとに返事の来たタスクは外す。送れなければ印を外す（もう一度押せる）。例外は投げない。
+ * ［催促する］（v1|sd|<JSTの日付>）。押せるのは仕分ける人だけ・その日のうちだけ・送れたら1日1回（二度押しは「もう送ってあります」）。
+ * カードを出したあとに返事の来たタスクは外す。例外は投げない。
+ * 2通にしない作り：グループへはその日で1つの retry key（sd-nudge:<日付>）で送る。
+ *   ・送れた（2xx・409＝同じ key でもう受け付け済み）→ 印を "sent" にする
+ *   ・結果が分からない（時間切れ・5xx）→ 印は残す。押し直しは同じ retry key で送り直すので、届いていれば LINE が重ねない
+ *   ・はっきり断られた（4xx）→ 印を外す（もう一度押せる）
  */
 export async function handleSdPostback(a: { day: string }, src: { userId?: string | null }, deps: NudgeDeps): Promise<void> {
   const say = (text: string, code: string) => {
@@ -568,18 +613,27 @@ export async function handleSdPostback(a: { day: string }, src: { userId?: strin
     const answered = new Set(await deps.kv.smembers(answeredKey(a.day)));
     const list = asAmEntries(await deps.kv.get(nudgeKey(a.day))).filter((e) => !answered.has(e.id));
     if (list.length === 0) return say(MSG_SD_NONE, "none");
-    if (!(await deps.kv.setNx(nudgedKey(a.day), deps.now(), DAY_TTL_SEC))) return say(MSG_SD_ALREADY, "already");
-    const r = await deps.pushGroup(nudgeChunks(list)).catch(() => ({ sent: 0, ids: [] as string[] }));
-    if (r.sent === 0) {
-      await deps.kv.del(nudgedKey(a.day)).catch(() => undefined);
-      return say(MSG_SD_FAILED, "push-failed");
+    if (!(await deps.kv.setNx(nudgedKey(a.day), "trying", DAY_TTL_SEC))) {
+      // 送れたと分かっているときだけ断る。それ以外（前の回が結果不明）は、同じ retry key で送り直す
+      if ((await deps.kv.get(nudgedKey(a.day))) === "sent") return say(MSG_SD_ALREADY, "already");
     }
+    const r = await deps
+      .pushGroup(nudgeChunks(list)[0], `sd-nudge:${a.day}`)
+      .catch(() => ({ status: null as number | null, ids: [] as string[] }));
+    if (!sentOk(r.status)) {
+      if (r.status !== null && r.status >= 400 && r.status < 500) {
+        await deps.kv.del(nudgedKey(a.day)).catch(() => undefined);
+        return say(MSG_SD_FAILED, "push-failed");
+      }
+      return say(MSG_SD_UNKNOWN, "unknown");
+    }
+    await deps.kv.set(nudgedKey(a.day), "sent", DAY_TTL_SEC).catch(() => undefined);
     // 催促のメッセージへの返信も、まとめへの返信として受けられるようにする（控えられなくても催促は届いている）
     for (const id of r.ids) {
       await deps.kv.set(digestMsgKey(id), { at: deps.now(), slot: "nudge" }, DIGEST_MSG_TTL_SEC).catch(() => undefined);
     }
     return say(msgSdSent(list.length), "sent");
   } catch {
-    return say(MSG_SD_FAILED, "error");
+    return say(MSG_SD_UNKNOWN, "error");
   }
 }
