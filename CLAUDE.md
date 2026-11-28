@@ -75,6 +75,14 @@ src/app/api/webhook/route.ts   … 署名検証 → メンション判定 → �
 - ログ：`[group-no-cards] reply stripped 1`／`push stripped N`／`push skipped 1`（件数だけ）。テスト：`tests/group-no-cards.test.ts`。
 - 止め方：`GROUP_NO_CARDS` を外して出し直す。追加・変更は下村さんの承認後。
 
+（グループの依頼を個人 LINE で仕分ける・2026-11-28）`GROUP_INBOX`（`1` かつ候補カードが on＝`TASK_MENU`・`TASK_CANDIDATES` かつ `TASK_BUTTONS_ADMIN_IDS` の先頭が正しい userId のときだけ。既定 off。off なら今までと同じ）。下村さんの決定「グループで動くことは誰かのタスクになる。メンションが無くても拾って、自分のところにタスクかんばんのように出す。関係ないものは［登録しない］」。
+- 拾う条件は今の候補と同じ（`shouldCapture`・試行の人 `TASK_CANDIDATE_USER_IDS`・確信度 0.5 以上）。新しく控えたら、その場で仕分ける人（`inboxOwner()`＝`TASK_BUTTONS_ADMIN_IDS` の先頭）の1対1へ「📥 グループに依頼が来ました。タスクにしますか？」＋カード（題名・依頼者・担当（無ければ「未定」）・発言の時刻・本文の頭120字。ボタン［タスクにする］`v1|cr|ID`［登録しない］`v1|cx|ID`）を push（月の送信枠を1通）。送れなくても候補は残る。グループには何も出さない（その場で聞くカードも出さない）。
+- @秘書 あてで迷った依頼（0.5〜0.7）は、グループへ「📝 タスクにするか迷ったので、下村さんに確認します」と返し、カードは1対1へ。
+- 押す：仕分ける人の1対1からの `cr`・`cx` を、控えたグループの候補として扱う（登録は今と同じ `registerTaskFromText`。返事は1対1に出る。発生元は控えたグループ）。仕分ける人以外の1対1・off のときは今までどおり「見つかりませんでした」。グループの中の文字の「1 登録」「2 なし」・前に出したカードは今までどおり。
+- 17時のまとめ：グループではなく仕分ける人の1対1へ「📥 まだ仕分けていない依頼が n件あります」＋カード（最大10枚。残りは文に出す）。番号の言葉は使わない。
+- ファイル：`src/lib/candidate-card.ts`（`groupInboxOn`・`inboxCard`・`notifyInboxNew`・`handleCandidateAction` の1対1の枝）／`task-candidate-ask.ts`（17時の行き先）／webhook の2か所。テスト `tests/group-inbox.test.ts`。ログ `[group-inbox] new sent 1`／`new push-failed`。
+- 止め方：`GROUP_INBOX` を外して出し直す（控えた候補は残り、17時にグループへ文字で聞く動きに戻る）。
+
 （グループ査定の案件の自動登録・2026-11-27）`GROUP_SATEI_AUTO_DEAL`（`1` のときだけ。既定 off）/ `CRM_PROPERTIES_DB_ID`（CRM_物件 の DB ID。32桁の16進。ハイフン入りも可）— 詳しくは末尾の「案件の自動登録」の節。追加・変更は下村さんの承認後、値を画面に出さない方法で入れる。
 Webhook の `maxDuration` は 300（既存機能の既定を縮めないため）。帯替えの受付は内部で開始+58秒に収める。プランが許さずデプロイが失敗したら、下村さんと相談して 60 に戻す。
 LINE の Webhook の再送が無効だと、portal の結果不明・一覧の不一致のときに再送が来ない（結果は Discord・portal で確かめる）。
